@@ -41,12 +41,13 @@ jobs:
             --valkey-path ../valkey
 
       - name: Compare results
+        working-directory: valkey
         run: |
           git checkout ${{ github.event.pull_request.head.sha }}
-          python ./valkey/utils/compare_benchmark_results.py \
-            ./valkey-perf-benchmark/results/unstable/metrics.json \
-            ./valkey-perf-benchmark/results/${{ github.event.pull_request.head.sha }}/metrics.json \
-            comparison.md
+          python ./utils/compare_benchmark_results.py \
+            ../valkey-perf-benchmark/results/unstable/metrics.json \
+            ../valkey-perf-benchmark/results/${{ github.event.pull_request.head.sha }}/metrics.json \
+            ../comparison.md
 
       - name: Upload artifacts
         uses: actions/upload-artifact@6f51ac03b9356f520e9adb1b1b7802705f340c2b # v4.5.0
