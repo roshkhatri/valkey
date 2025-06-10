@@ -13,30 +13,38 @@ jobs:
     if: github.event.label.name == 'run-benchmark'
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
+      - name: Checkout valkey
         uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
         with:
           fetch-depth: 0
+          path: valkey
+
+      - name: Checkout valkey-perf-benchmark
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+        with:
+          repository: roshkhatri/valkey-perf-benchmark
+          path: valkey-perf-benchmark
+          fetch-depth: 1
 
       - name: Set up Python
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.10'
 
-      - name: Clone benchmark tool
-        run: git clone --depth=1 https://github.com/roshkhatri/valkey-perf-benchmark.git benchmark-tool
-
       - name: Run benchmarks
+        working-directory: valkey-perf-benchmark
         run: |
           python benchmark-tool/benchmark.py \
             --commits ${{ github.event.pull_request.head.sha }} \
             --baseline unstable \
             --results-dir results \
-            --valkey-path "$PWD"
+            --valkey-path ../valkey
 
       - name: Compare results
+        working-directory: valkey
         run: |
-          python compare_benchmark_results.py \
+          git checkout ${{ github.event.pull_request.head.sha }}
+          python ./utils/compare_benchmark_results.py \
             results/unstable/metrics.json \
             results/${{ github.event.pull_request.head.sha }}/metrics.json \
             comparison.md
