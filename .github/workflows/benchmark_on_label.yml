@@ -34,7 +34,7 @@ jobs:
       - name: Run benchmarks
         working-directory: valkey-perf-benchmark
         run: |
-          python benchmark-tool/benchmark.py \
+          python ./benchmark.py \
             --commits ${{ github.event.pull_request.head.sha }} \
             --baseline unstable \
             --results-dir results \
