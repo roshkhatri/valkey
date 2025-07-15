@@ -9,6 +9,26 @@ permissions:
   pull-requests: write
 
 jobs:
+
+  launch-runner:
+    if: github.event.label.name == 'run-benchmark'
+    runs-on: ubuntu-latest
+    outputs:
+      label: ${{ steps.start_runner.outputs.label }}
+    steps:
+      - name: Start EC2 self-hosted runner
+        id: start_runner
+        uses: machulav/ec2-github-runner@v2
+        with:
+          mode: start
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          ec2-image-id: ami-020cba7c55df1f615
+          ec2-instance-type: c5.metal
+          security-group-id: sg-xxxxxx
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          runner-labels: valkey-self-hosted
+
   benchmark:
     if: github.event.label.name == 'run-benchmark'
     runs-on: ubuntu-latest
