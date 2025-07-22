@@ -16,18 +16,28 @@ jobs:
     outputs:
       label: ${{ steps.start_runner.outputs.label }}
     steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: ${{ secrets.AWS_REGION }}
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+
       - name: Start EC2 self-hosted runner
         id: start_runner
         uses: machulav/ec2-github-runner@v2
         with:
           mode: start
+          iam-role-name: ${{ secrets.AWS_ROLE_TO_ASSUME }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
           ec2-image-id: ami-020cba7c55df1f615
           ec2-instance-type: c5.metal
-          security-group-id: sg-xxxxxx
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          runner-labels: valkey-self-hosted
+          security-group-id: ${{ secrets.AWS_SG_ID }}
+          subnet-id: ${{ secrets.AWS_SUBNET_ID }}
+          pre-runner-script: |
+            sudo yum update -y && \
+            sudo yum install docker -y && \
+            sudo yum install git -y && \
+            sudo yum install libicu -y && \
 
   benchmark:
     if: github.event.label.name == 'run-benchmark'
