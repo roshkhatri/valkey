@@ -2,7 +2,15 @@ name: On-demand Benchmark
 
 on:
   pull_request:
-    # types: [labeled]
+    types: [labeled]
+
+concurrency:
+  group: valkey-pr-benchmark
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: 'bash -Eeuo pipefail -x {0}'
 
 permissions:
   contents: read
@@ -10,46 +18,10 @@ permissions:
 
 jobs:
 
-  launch-runner:
-    # if: github.event.label.name == 'run-benchmark'
-    runs-on: ubuntu-latest
-    outputs:
-      label: ${{ steps.start-ec2-runner.outputs.label }}
-      ec2-instance-id: ${{ steps.start-ec2-runner.outputs.ec2-instance-id }}
-    steps:
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-region: ${{ secrets.AWS_REGION }}
-          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
-
-      - name: Start EC2 self-hosted runner
-        id: start_runner
-        uses: machulav/ec2-github-runner@v2
-        with:
-          mode: start
-          iam-role-name: ${{ secrets.AWS_ROLE_TO_ASSUME }}
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          ec2-image-id: ami-020cba7c55df1f615
-          ec2-instance-type: c5.metal
-          security-group-id: ${{ secrets.AWS_SG_ID }}
-          subnet-id: ${{ secrets.AWS_SUBNET_ID }}
-          pre-runner-script: |
-            sudo yum update -y && \
-            sudo yum install docker -y && \
-            sudo yum install git -y && \
-            sudo yum install libicu -y && \
-
   benchmark:
-    runs-on: ${{ needs.start-runner.outputs.label }}
-    needs: launch-runner
+    runs-on: [self-hosted, ec2-ubuntu-24]
+    if: github.event.label.name == 'run-benchmark' || github.event.label.name == 'run-cluster-benchmark'
     steps:
-      - name: Checkout valkey
-        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
-        with:
-          fetch-depth: 0
-          path: valkey
-
       - name: Checkout valkey-perf-benchmark
         uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
         with:
@@ -69,7 +41,8 @@ jobs:
             --commits ${{ github.event.pull_request.head.sha }} \
             --baseline unstable \
             --results-dir results \
-            --valkey-path ../valkey
+            --server-cpu-range 92-93 \
+            --client-cpu-range 94-95
 
       - name: Compare results
         working-directory: valkey-perf-benchmark
@@ -101,25 +74,3 @@ jobs:
               repo: context.repo.repo,
               body
             });
-
-  stop-runner:
-    name: Stop self-hosted EC2 runner
-    needs:
-      - launch-runner
-      - benchmark
-    runs-on: ubuntu-latest
-    if: ${{ always() }}
-    steps:
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-region: ${{ secrets.AWS_REGION }}
-          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
-
-      - name: Stop EC2 runner
-        uses: machulav/ec2-github-runner@v2
-        with:
-          mode: stop
-          github-token: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
-          label: ${{ needs.start-runner.outputs.label }}
-          ec2-instance-id: ${{ needs.start-runner.outputs.ec2-instance-id }}
