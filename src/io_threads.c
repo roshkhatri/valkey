@@ -218,7 +218,6 @@ static void *IOThreadMain(void *myid) {
     snprintf(thdname, sizeof(thdname), "io_thd_%ld", id);
     valkey_set_thread_title(thdname);
     serverSetCpuAffinity(server.server_cpulist);
-    makeThreadKillable();
     initSharedQueryBuf();
     pthread_cleanup_push(freeSharedQueryBuf, NULL);
 
@@ -228,6 +227,7 @@ static void *IOThreadMain(void *myid) {
     while (1) {
         /* Cancellation point so that pthread_cancel() from main thread is honored. */
         pthread_testcancel();
+
         /* Wait for jobs */
         for (int j = 0; j < 1000000; j++) {
             jobs_to_process = IOJobQueue_availableJobs(jq);
@@ -323,6 +323,7 @@ int updateIOThreads(const char **err) {
 
     // Create new threads.
     if (server.io_threads_num > prev_threads_num) {
+        prefetchCommandsBatchInit();
         for (int i = prev_threads_num; i < server.io_threads_num; i++) {
             createIOThread(i);
         }
@@ -446,9 +447,14 @@ int trySendWriteToIOThreads(client *c) {
          * threads from reading data that might be invalid in their local CPU cache. */
         c->io_last_reply_block = listLast(c->reply);
         if (c->io_last_reply_block) {
-            c->io_last_bufpos = ((clientReplyBlock *)listNodeValue(c->io_last_reply_block))->used;
+            clientReplyBlock *block = (clientReplyBlock *)listNodeValue(c->io_last_reply_block);
+            c->io_last_bufpos = block->used;
+            /* If buffer is encoded force new header */
+            if (block->flag.buf_encoded) block->last_header = NULL;
         } else {
             c->io_last_bufpos = (size_t)c->bufpos;
+            /* If buffer is encoded force new header */
+            if (c->flag.buf_encoded) c->last_header = NULL;
         }
     }
 
