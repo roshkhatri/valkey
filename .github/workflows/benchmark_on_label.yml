@@ -19,7 +19,7 @@ permissions:
 jobs:
 
   benchmark:
-    runs-on: [self-hosted, ec2-ubuntu-24]
+    runs-on: [self-hosted, ec2-perf-ubuntu-24]
     if: github.event.label.name == 'run-benchmark' || github.event.label.name == 'run-cluster-benchmark'
     steps:
       - name: Checkout valkey-perf-benchmark
