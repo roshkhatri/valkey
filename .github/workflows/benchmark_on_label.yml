@@ -37,12 +37,28 @@ jobs:
       - name: Run benchmarks
         working-directory: valkey-perf-benchmark
         run: |
-          python ./benchmark.py \
-            --commits ${{ github.event.pull_request.head.sha }} \
-            --baseline unstable \
-            --results-dir results \
-            --server-cpu-range 92-93 \
-            --client-cpu-range 94-95
+          # Base parameters
+          BASE_PARAMS=(
+            "--commits" "${{ github.event.pull_request.head.sha }}"
+            "--baseline" "unstable"
+            "--results-dir" "results"
+            "--server-cpu-range" "92-93"
+            "--client-cpu-range" "94-95"
+          )
+          
+          # Label-specific config file
+          if [[ "${{ github.event.label.name }}" == "run-benchmark" ]]; then
+            EXTRA_PARAMS=(
+              "--config" "./configs/benchmark-configs.json"
+            )
+          elif [[ "${{ github.event.label.name }}" == "run-cluster-benchmark" ]]; then
+            EXTRA_PARAMS=(
+              "--config" "configs/benchmark-configs-cluster-tls.json"
+            )
+          fi
+          
+          # Run benchmark with combined parameters
+          python ./benchmark.py "${BASE_PARAMS[@]}" "${EXTRA_PARAMS[@]}"
 
       - name: Compare results
         working-directory: valkey-perf-benchmark
