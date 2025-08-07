@@ -34,9 +34,8 @@ jobs:
       - name: Checkout valkey-perf-benchmark
         uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
         with:
-          repository: roshkhatri/valkey-perf-benchmark
+          repository: valkey-io/valkey-perf-benchmark
           path: valkey-perf-benchmark
-          ref: pr-run-fix
           fetch-depth: 1
 
       - name: Set up Python
@@ -51,12 +50,6 @@ jobs:
           sudo apt-get install -y build-essential
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-
-      - name: Ensure baseline branch is available
-        working-directory: valkey
-        run: |
-          echo "Fetching unstable branch for baseline comparison"
-          git fetch origin unstable:unstable || echo "unstable branch already available"
 
       - name: Run benchmarks
         working-directory: valkey-perf-benchmark
@@ -85,6 +78,8 @@ jobs:
             ../comparison.md
 
       - name: Upload artifacts
+        if: always()
+        continue-on-error: true
         uses: actions/upload-artifact@6f51ac03b9356f520e9adb1b1b7802705f340c2b # v4.5.0
         with:
           name: benchmark-results
