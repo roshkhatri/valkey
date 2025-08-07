@@ -70,7 +70,7 @@ jobs:
 
           # Run benchmark
           python ./benchmark.py \
-            --commits "HEAD" \
+            --commits "${{ github.event.pull_request.head.sha }}" \
             --baseline "unstable" \
             --results-dir "results" \
             --valkey-path "../valkey" \
