@@ -21,7 +21,7 @@ jobs:
 
   benchmark:
     runs-on: ${{ github.repository == 'valkey-io/valkey' && fromJSON('["self-hosted","ec2-ubuntu-24.04-benchmarking"]') || 'ubuntu-latest' }}
-    if:|
+    if: |
       github.event.action == 'labeled' &&
       (github.event.label.name == 'run-benchmark' || github.event.label.name == 'run-cluster-benchmark')
     steps:
