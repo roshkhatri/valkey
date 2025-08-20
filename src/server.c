@@ -4102,7 +4102,6 @@ int processCommand(client *c) {
         serverAssert(!server.in_exec);
         serverAssert(!scriptIsRunning());
     }
-    usleep(100);
     /* in case we are starting to ProcessCommand and we already have a command we assume
      * this is a reprocessing of this command, so we do not want to perform some of the actions again. */
     int client_reprocessing_command = c->cmd ? 1 : 0;
