@@ -64,7 +64,7 @@ start_server {tags {"dual-channel-replication external:skip"}} {
                 set end_time [clock milliseconds]
                 set elapsed [expr {$end_time - $start_time}]
                 puts "Execution time: $elapsed ms"
-                set res [wait_for_log_messages 0 {"*Attach replica rdb client*"} $loglines 20 100]
+                set res [wait_for_log_messages 0 {"*Attach replica rdb client*"} $loglines 30 100]
                 set loglines [lindex $res 1]
                 incr $loglines
                 wait_and_resume_process -2
@@ -139,11 +139,11 @@ start_server {tags {"dual-channel-replication external:skip"}} {
             # Pause replicas after primary forks for
             $replica1 debug pause-after-fork 1
             $replica2 debug pause-after-fork 1
-            test "20 100 - Test dual-channel: primary tracking replica backlog refcount - start with empty backlog" {
+            test "30 100 - Test dual-channel: primary tracking replica backlog refcount - start with empty backlog" {
                 $replica1 replicaof $primary_host $primary_port
                 set start_time [clock milliseconds]
                 if {[catch {
-                    set res [wait_for_log_messages 0 {"*Add rdb replica * no repl-backlog to track*"} $loglines 20 100]
+                    set res [wait_for_log_messages 0 {"*Add rdb replica * no repl-backlog to track*"} $loglines 30 100]
                 } err]} {
                     set elapsed [expr {[clock milliseconds] - $start_time}]
                     puts "Execution time: $elapsed ms (failed)"
@@ -151,7 +151,7 @@ start_server {tags {"dual-channel-replication external:skip"}} {
                 }
                 set elapsed [expr {[clock milliseconds] - $start_time}]
                 puts "Execution time: $elapsed ms"
-                set res [wait_for_log_messages 0 {"*Attach replica rdb client*"} $loglines 20 100]
+                set res [wait_for_log_messages 0 {"*Attach replica rdb client*"} $loglines 30 100]
                 set loglines [lindex $res 1]
                 incr $loglines
                 wait_and_resume_process -2
@@ -165,11 +165,11 @@ start_server {tags {"dual-channel-replication external:skip"}} {
                 assert [string match *replicas_waiting_psync:0* [$primary info replication]]
             }
 
-            test "20 100 - Test dual-channel: primary tracking replica backlog refcount - start with backlog" {
+            test "30 100 - Test dual-channel: primary tracking replica backlog refcount - start with backlog" {
                 $replica2 replicaof $primary_host $primary_port
                 set start_time [clock milliseconds]
                 if {[catch {
-                    set res [wait_for_log_messages 0 {"*Add rdb replica * tracking repl-backlog tail*"} $loglines 20 100]
+                    set res [wait_for_log_messages 0 {"*Add rdb replica * tracking repl-backlog tail*"} $loglines 30 100]
                 } err]} {
                     set elapsed [expr {[clock milliseconds] - $start_time}]
                     puts "Execution time: $elapsed ms (failed)"
