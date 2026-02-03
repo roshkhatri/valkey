@@ -137,7 +137,7 @@ static void prefetchValue(KeyPrefetchInfo *info) {
     void *entry;
     if (hashtableIncrementalFindGetResult(&info->hashtab_state, &entry)) {
         robj *val = entry;
-        if (val->encoding == OBJ_ENCODING_RAW && val->type == OBJ_STRING) {
+        if (val->encoding != OBJ_ENCODING_EMBSTR && val->encoding != OBJ_ENCODING_INT) {
             valkey_prefetch(objectGetVal(val));
         }
     }
