@@ -1,0 +1,296 @@
+name: AI PR Review with Bedrock Agent
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
+
+jobs:
+  ai-agent-review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::968533178160:role/github-actions-bedrock
+          role-session-name: GitHubActions-${{ github.run_id }}
+          aws-region: us-east-1
+          role-duration-seconds: 3600
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install boto3 botocore PyGithub
+
+      - name: PR Review with Bedrock Agent
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO_NAME: ${{ github.repository }}
+          AGENT_ID: "2308D9B3CF"
+          AGENT_ALIAS_ID: "TSTALIASID"
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_TITLE: ${{ github.event.pull_request.title || 'Untitled' }}
+        run: |
+          python3 << 'PYEOF'
+          import boto3, os, re, subprocess, time
+          from botocore.config import Config as BotoConfig
+          from pathlib import Path
+          from github import Github, Auth
+
+          BASE = os.environ['BASE_SHA']
+          HEAD = os.environ['HEAD_SHA']
+
+          def git(*args):
+              return subprocess.run(['git'] + list(args), capture_output=True, text=True).stdout.strip()
+
+          def read_safe(path, limit=30000):
+              try:
+                  t = Path(path).read_text(errors='replace')
+                  return t[:limit] + '\n...(truncated)' if len(t) > limit else t
+              except Exception:
+                  return None
+
+          # Get diff and changed files
+          diff = git('diff', '-U5', f'{BASE}...{HEAD}')
+          files = [f for f in git('diff', '--name-only', f'{BASE}...{HEAD}').split('\n') if f.strip()]
+
+          if not diff.strip():
+              print("No diff found")
+              exit(0)
+
+          # Read changed files for full context (budget: 100k chars)
+          # Skip binary/object files
+          skip_ext = {'.o', '.a', '.so', '.png', '.jpg', '.gif', '.ico', '.pyc', '.bin'}
+          context = ""
+          total = 0
+          for f in files:
+              if any(f.endswith(ext) for ext in skip_ext):
+                  continue
+              c = read_safe(f)
+              if c and total + len(c) < 100000:
+                  context += f"\n### {f}\n```\n{c}\n```\n"
+                  total += len(c)
+
+          if len(diff) > 60000:
+              diff = diff[:60000] + "\n...(truncated)"
+
+          pr_title = os.environ.get('PR_TITLE', 'Untitled')
+
+          prompt = f"""You are a senior principal C systems engineer reviewing a PR for the Valkey project (high-performance in-memory data store, Redis fork). You are a Valkey codebase expert You produce reviews comparable to GitHub Copilot and ChatGPT Codex — precise, actionable, and focused on what matters.
+
+          ## Project Knowledge
+
+          ### Valkey Conventions
+          - C style: 4-space indent, no tabs, K&R braces, pointer right-aligned (`char *ptr`).
+          - Naming: `snake_case` variables, `camelCase` functions (e.g. `createStringObject`), `UPPER_CASE` macros.
+          - Memory: `zmalloc`/`zfree`/`zrealloc` only (tracked allocations). `sds` for dynamic byte buffers.
+          - Errors: `C_OK`/`C_ERR` for int returns, `-1` for `ssize_t`, `NULL` for pointers.
+          - Use `serverAssert()` for invariants. Use `bool` for true/false in new code.
+          - Use `objectGetVal()`/`objectSetVal()` accessors — don't access `robj->ptr` directly.
+          - Comments: C style `/* */` preferred. Explain WHY, not WHAT.
+          - License header required on new files (BSD-3-Clause, Valkey Contributors).
+
+          ### Threading Model
+          - Thread 0 = main thread. Threads 1..N-2 = IO workers. Thread N-1 = compression-dedicated.
+          - `stream_compressor_t` is owned EXCLUSIVELY by IO thread N-1. Main thread NEVER touches it.
+          - Main thread owns the accumulator. Interaction via `IOJobQueue` (submit) and `mutexQueue` (completions).
+          - Call `waitForClientIO(c)` before any client state changes.
+          - `trySendWriteToIOThreads()` snapshots `io_last_reply_block`/`io_last_bufpos` before dispatch.
+          - `write_buf` is immutable during `CLIENT_PENDING_IO`. Only swap when `io_write_state == CLIENT_IDLE`.
+
+          ### Critical Invariants
+          - Once `stream_started=1`, ALL data goes through `async_compress_write()`. Any `addReply*()` to a compressed replica is a bug.
+          - `async_compress_retain()` BEFORE `ioThreadsPushCompressionJob()` — IO thread could process before push returns.
+          - `compressionDrainCompletions()` checks `replica == NULL` or generation mismatch for stale completions.
+          - Replica write path asserts `c->bufpos == 0 && listLength(c->reply) == 0`.
+          - `beforeSleep` order: drain completions → promote double-buffers → feed compressed replicas → flush partial → IO dispatch.
+          - COB accounting must include shared buffer lag + write_buf + fill_buf.
+          - Check `IOJobQueue_isFull()` before push. On full: throttle, don't disconnect.
+
+          ### Common Pitfalls
+          - Don't modify `feedReplicationBuffer()` — shared buffer stays uncompressed.
+          - Don't use `addReplyProto()` for compressed output — replicas assert bufpos==0 && reply empty.
+          - Don't destroy `stream_compressor_t` from main thread — submit finalize job to IO thread N-1.
+          - Don't advance delivery cursor on socket write — only on REPLCONF ACK.
+          - Don't compress during full sync RDB transfer — only at `REPLICA_STATE_ONLINE`.
+          - Always call `compress_rio_finish()` before `compress_rio_destroy()`.
+          - Every `zmalloc` needs a `zfree` on ALL paths (success, error, shutdown).
+          - Every `LZ4F_createCompressionContext` needs `LZ4F_freeCompressionContext`. Same for ZSTD.
+
+          ## Changed File Contents
+          {context}
+
+          ## PR: {pr_title}
+          ## Diff
+          ```diff
+          {diff}
+          ```
+
+          ## Review Priorities (in order)
+
+          1. **Thread safety**: Data races, missing synchronization, wrong thread ownership, retain/release lifecycle errors
+          2. **Memory safety**: Use-after-free, double-free, leaks on error paths, missing NULL checks, buffer overflows, integer overflow in size calculations
+          3. **Logic bugs**: Off-by-one, wrong conditions, unreachable code, missing error handling, broken invariants
+          4. **API contract violations**: Misuse of Valkey APIs (e.g., addReply* to compressed replicas, direct struct access when accessors exist, wrong return conventions)
+          5. **Concurrency correctness**: IO thread dispatch ordering, beforeSleep sequencing, double-buffer state machine violations
+          6. **Backward compatibility**: Breaking uncompressed paths, config migration, mixed-version cluster behavior
+          7. **Style/conventions**: Only flag if it violates Valkey's enforced conventions (clang-format, naming, comment style)
+
+          ## Output Format
+
+          For each finding, use EXACTLY this format:
+
+          [filepath:line] 🔴/🟡/🟢 Concise problem title
+
+          ```c
+          problematic_code    // ❌ what's wrong
+          ```
+
+          **Why this breaks**: One sentence explaining the concrete consequence (crash, data corruption, leak, race condition, etc.)
+
+          **Fix**:
+          ```c
+          corrected_code
+          ```
+
+          **Context**: One sentence connecting this to the PR's intent or a project invariant.
+
+          ---
+
+          Severity guide:
+          🔴 Must fix — bugs, crashes, data corruption, leaks, security holes, thread safety violations
+          🟡 Should fix — missing error handling, edge cases, backward compat risks, incomplete cleanup
+          🟢 Nit — style, naming, minor improvements, documentation gaps
+
+          ## Rules
+          - Use line numbers from the NEW file (right side of diff), not the old file.
+          - Max 15 findings. Prioritize by severity — all 🔴 before any 🟡, all 🟡 before any 🟢.
+          - Be specific: name the variable, the function, the line. Don't say "there might be an issue" — say what breaks and why.
+          - Every finding MUST have a concrete fix, not just "consider doing X".
+          - Skip praise, skip boilerplate, skip "looks good overall" filler.
+          - If the code is clean, just say LGTM with a one-line summary of what you verified.
+          - End with a 1-2 sentence summary: what's the biggest risk in this PR?
+          - Separate findings with --- lines."""
+
+          # Call Bedrock agent
+          client = boto3.client('bedrock-agent-runtime', region_name='us-east-1',
+              config=BotoConfig(read_timeout=900, connect_timeout=30,
+                                retries={'max_attempts': 3, 'mode': 'adaptive'}))
+
+          print(f"Reviewing {len(files)} files (~{total} chars context, ~{len(diff)} chars diff)")
+
+          result = ""
+          max_retries = 2
+          for attempt in range(max_retries + 1):
+              try:
+                  resp = client.invoke_agent(
+                      agentId=os.environ['AGENT_ID'],
+                      agentAliasId=os.environ['AGENT_ALIAS_ID'],
+                      sessionId=f"pr-{os.environ['PR_NUMBER']}-{attempt}-{int(time.time())}",
+                      inputText=prompt)
+
+                  for ev in resp['completion']:
+                      if 'chunk' in ev and 'bytes' in ev['chunk']:
+                          result += ev['chunk']['bytes'].decode('utf-8')
+                  if not result.strip():
+                      result = "LGTM"
+                  break  # Success
+              except Exception as e:
+                  print(f"Agent error (attempt {attempt + 1}/{max_retries + 1}): {e}")
+                  if attempt < max_retries:
+                      wait = 10 * (attempt + 1)
+                      print(f"Retrying in {wait}s...")
+                      time.sleep(wait)
+                      result = ""
+                  else:
+                      result = f"Review failed after {max_retries + 1} attempts: {e}"
+
+          # Parse diff to map files -> changed line numbers
+          def parse_diff_lines(d):
+              m, f, ln, hunk = {}, None, 0, False
+              for line in d.split('\n'):
+                  if line.startswith('+++ b/'):
+                      f = line[6:]; m.setdefault(f, set()); hunk = False
+                  elif line.startswith('@@ ') and f:
+                      cm = re.search(r'\+(\d+)', line)
+                      if cm: ln = int(cm.group(1)); hunk = True
+                  elif hunk and f:
+                      if line.startswith('+'): m[f].add(ln); ln += 1
+                      elif not line.startswith('-'): ln += 1
+              return m
+
+          diff_map = parse_diff_lines(diff)
+          comments, summary = [], []
+
+          for block in re.split(r'\n\s*---\s*\n', result):
+              block = block.strip()
+              if not block:
+                  continue
+              lines = block.split('\n')
+              mt = re.match(r'\[([^:]+):(\d+)(?:-(\d+))?\]\s*(.*)', lines[0].strip())
+              if mt:
+                  fp, ln = mt.group(1).strip(), int(mt.group(2))
+                  end = int(mt.group(3)) if mt.group(3) else None
+                  title = mt.group(4).strip()
+                  detail = [l for l in lines[1:] if l.strip()]
+                  body = f"**{title}**\n\n" + '\n'.join(detail) if detail else title
+
+                  # Resolve path against diff map
+                  valid = diff_map.get(fp, set())
+                  if not valid:
+                      for dp, dl in diff_map.items():
+                          if dp.endswith('/' + fp):
+                              valid = dl; fp = dp; break
+
+                  if valid and min(valid) <= ln <= max(valid):
+                      c = {"path": fp, "line": ln, "body": body}
+                      if end and end != ln:
+                          c["start_line"] = ln; c["line"] = end
+                      comments.append(c)
+                  else:
+                      summary.append(f"**{fp}:{ln}** — {body}")
+              elif block:
+                  summary.append(block)
+
+          # Post review
+          auth = Auth.Token(os.environ['GITHUB_TOKEN'])
+          g = Github(auth=auth)
+          repo = g.get_repo(os.environ['REPO_NAME'])
+          pr = repo.get_pull(int(os.environ['PR_NUMBER']))
+
+          body = '\n\n'.join(summary).strip() or "LGTM"
+          body = f"🤖 *AI Review*\n\n{body}"
+
+          try:
+              if comments:
+                  print(f"Posting {len(comments)} inline comments")
+                  pr.create_review(
+                      commit=repo.get_commit(HEAD),
+                      body=body,
+                      event="REQUEST_CHANGES" if any('🔴' in c['body'] for c in comments) else "COMMENT",
+                      comments=comments)
+              else:
+                  pr.create_issue_comment(body)
+              print("Done!")
+          except Exception as e:
+              print(f"Post error: {e}")
+              try:
+                  pr.create_issue_comment(f"🤖 *AI Review (fallback)*\n\n{result}")
+              except:
+                  print("Failed to post fallback")
+          PYEOF
