@@ -43,6 +43,7 @@ distclean:
 	-(cd hdr_histogram && $(MAKE) clean) > /dev/null || true
 	-(cd fpconv && $(MAKE) clean) > /dev/null || true
 	-(cd fast_float_c_interface && $(MAKE) clean) > /dev/null || true
+	-(cd lz4 && $(MAKE) clean) > /dev/null || true
 	-(rm -f .make-*)
 
 .PHONY: distclean
@@ -139,3 +140,11 @@ gtest-parallel: .make-prerequisites
 		rm -rf gtest-parallel; \
 		git clone --depth 1 https://github.com/google/gtest-parallel.git gtest-parallel; \
 	fi
+
+.PHONY: gtest-parallel
+
+lz4: .make-prerequisites
+	@printf '%b %b\n' $(MAKECOLOR)MAKE$(ENDCOLOR) $(BINCOLOR)$@$(ENDCOLOR)
+	cd lz4 && $(MAKE) CFLAGS="$(CFLAGS)"
+
+.PHONY: lz4
