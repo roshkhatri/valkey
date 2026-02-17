@@ -31,6 +31,7 @@
 #define __RDB_H
 
 #include <stdio.h>
+#include <string.h>
 #include "rio.h"
 
 /* TBD: include only necessary headers. */
@@ -70,6 +71,14 @@ static inline bool rdbIsForeignVersion(int rdbver) {
 
 static inline bool rdbUseValkeyMagic(int rdbver) {
     return rdbver > RDB_FOREIGN_VERSION_MAX;
+}
+
+/* Check whether a buffer starts with a recognized RDB magic prefix
+ * ("REDIS" or "VALKE").  Used for format detection when distinguishing
+ * compressed (VKCS) from uncompressed RDB streams. */
+static inline bool rdbIsValidMagic(const uint8_t *header, size_t len) {
+    return len >= 5 &&
+           (memcmp(header, "REDIS", 5) == 0 || memcmp(header, "VALKE", 5) == 0);
 }
 
 /* Defines related to the dump file format. To store 32 bits lengths for short
