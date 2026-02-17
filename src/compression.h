@@ -7,6 +7,7 @@
 #ifndef COMPRESSION_H
 #define COMPRESSION_H
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <sys/types.h>
@@ -33,6 +34,13 @@ typedef enum {
 /* --- Emit callback type --- */
 typedef int (*vkcsEmitFn)(void *ctx, const uint8_t *data, size_t len);
 
+/* --- Flush modes for streaming compression --- */
+typedef enum {
+    FLUSH_CONTINUE = 0, /* Buffer internally */
+    FLUSH_SYNC = 1,     /* Emit all buffered data, keep frame open */
+    FLUSH_END = 2,      /* Finalize frame */
+} compress_flush_mode_t;
+
 /* --- Streaming compressor context --- */
 typedef struct {
     compression_algo_t algo;
@@ -41,7 +49,13 @@ typedef struct {
         void *lz4f; /* LZ4F_cctx* */
         void *zstd; /* ZSTD_CCtx* */
     } ctx;
-    int frame_started;
+    bool frame_started;
+    bool stable_src; /* LZ4F optimization: set to true only when the caller
+                      * guarantees the input buffer remains valid and
+                      * unmodified until the next streamCompressFeed call.
+                      * Default false (safe). The async replication path sets
+                      * this to true because the accumulator sds is swapped
+                      * out before submission, giving exclusive ownership. */
 } stream_compressor_t;
 
 /* --- Streaming decompressor context --- */
@@ -80,18 +94,18 @@ void streamDecompressorDestroy(stream_decompressor_t *sd);
 
 /* Return upper bound on compressed output size.
  * frame_started: whether the algorithm frame header has already been written.
- * flush_mode: 0=continue, 1=flush, 2=end. */
-size_t streamCompressOutputBound(compression_algo_t algo, size_t input_len, int frame_started, int flush_mode);
+ * flush_mode: FLUSH_CONTINUE, FLUSH_SYNC, or FLUSH_END. */
+size_t streamCompressOutputBound(compression_algo_t algo, size_t input_len, int frame_started, compress_flush_mode_t flush_mode);
 
 /* Feed data through streaming compressor.
- * flush_mode: 0=continue, 1=flush, 2=end.
+ * flush_mode: FLUSH_CONTINUE, FLUSH_SYNC, or FLUSH_END.
  * Returns bytes written to *output_ptr, 0 for no output, -1 on error. */
 ssize_t streamCompressFeed(stream_compressor_t *sc,
                            uint8_t **output_ptr,
                            size_t output_capacity,
                            const uint8_t *input,
                            size_t input_len,
-                           int flush_mode);
+                           compress_flush_mode_t flush_mode);
 
 /* Feed compressed data through streaming decompressor.
  * Returns bytes written to output, 0 for no output, -1 on error. */
