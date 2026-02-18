@@ -50,7 +50,7 @@ typedef struct {
         void *zstd; /* ZSTD_CCtx* */
     } ctx;
     bool frame_started;
-    bool errored;    /* Permanently failed — LZ4F/ZSTD state is undefined after
+    bool errored;    /* Permanently failed — algorithm state is undefined after
                       * an error. All subsequent streamCompressFeed calls return
                       * -1 immediately. The caller must tear down the stream
                       * (disconnect replica / abort RDB save). No mid-stream

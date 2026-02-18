@@ -539,3 +539,587 @@ int test_streamCompressFeedErrorRecovery(int argc, char **argv, int flags) {
 
     return 0;
 }
+
+/* ===================================================================
+ * Tests for sync compress API and rio decorators (Tasks 3.1-3.6)
+ * =================================================================== */
+
+#include "../compression_pipeline.h"
+
+/* --- Emit callback that appends to a dynamically growing buffer --- */
+typedef struct {
+    uint8_t *data;
+    size_t len;
+    size_t capacity;
+} dynamic_buf_t;
+
+static void dynamicBufInit(dynamic_buf_t *db) {
+    db->data = zmalloc(4096);
+    db->len = 0;
+    db->capacity = 4096;
+}
+
+static void dynamicBufFree(dynamic_buf_t *db) {
+    if (db->data) zfree(db->data);
+    db->data = NULL;
+    db->len = 0;
+    db->capacity = 0;
+}
+
+static int emitToDynamicBuf(void *ctx, const uint8_t *data, size_t len) {
+    dynamic_buf_t *db = (dynamic_buf_t *)ctx;
+    while (db->len + len > db->capacity) {
+        db->capacity *= 2;
+        db->data = zrealloc(db->data, db->capacity);
+    }
+    memcpy(db->data + db->len, data, len);
+    db->len += len;
+    return 0;
+}
+
+/* --- Test: sync_compress_create/destroy (Task 3.1) --- */
+int test_syncCompressCreateDestroy(int argc, char **argv, int flags) {
+    UNUSED(argc);
+    UNUSED(argv);
+    UNUSED(flags);
+
+    dynamic_buf_t db;
+    dynamicBufInit(&db);
+
+    sync_compress_config_t cfg = {.algo = ALGO_LZ4, .level = 0, .stream_kind = STREAM_KIND_RDB};
+    sync_compress_ctx_t *t = sync_compress_create(&cfg, emitToDynamicBuf, &db);
+    TEST_ASSERT_MESSAGE("create should succeed for LZ4", t != NULL);
+    TEST_ASSERT_MESSAGE("algo should be LZ4", t->algo == ALGO_LZ4);
+    TEST_ASSERT_MESSAGE("envelope should not be written yet", t->envelope_written == 0);
+    TEST_ASSERT_MESSAGE("should not be errored", t->errored == 0);
+
+    sync_compress_destroy(t);
+    dynamicBufFree(&db);
+
+    /* NULL config should fail */
+    TEST_ASSERT_MESSAGE("NULL config should return NULL",
+                        sync_compress_create(NULL, emitToDynamicBuf, &db) == NULL);
+
+    /* NULL emit_cb should fail */
+    TEST_ASSERT_MESSAGE("NULL emit_cb should return NULL",
+                        sync_compress_create(&cfg, NULL, NULL) == NULL);
+
+    /* ALGO_NONE should fail */
+    sync_compress_config_t bad_cfg = {.algo = ALGO_NONE, .level = 0, .stream_kind = STREAM_KIND_RDB};
+    TEST_ASSERT_MESSAGE("ALGO_NONE should return NULL",
+                        sync_compress_create(&bad_cfg, emitToDynamicBuf, &db) == NULL);
+
+    /* ALGO_ZSTD should fail (not yet implemented) */
+    sync_compress_config_t zstd_cfg = {.algo = ALGO_ZSTD, .level = 0, .stream_kind = STREAM_KIND_RDB};
+    TEST_ASSERT_MESSAGE("ALGO_ZSTD should return NULL (not yet implemented)",
+                        sync_compress_create(&zstd_cfg, emitToDynamicBuf, &db) == NULL);
+
+    /* destroy NULL should be safe */
+    sync_compress_destroy(NULL);
+
+    return 0;
+}
+
+/* --- Test: sync_compress write + finish round-trip (Tasks 3.2, 3.3) --- */
+int test_syncCompressRoundTrip(int argc, char **argv, int flags) {
+    UNUSED(argc);
+    UNUSED(argv);
+    UNUSED(flags);
+
+    dynamic_buf_t db;
+    dynamicBufInit(&db);
+
+    sync_compress_config_t cfg = {.algo = ALGO_LZ4, .level = 0, .stream_kind = STREAM_KIND_RDB};
+    sync_compress_ctx_t *t = sync_compress_create(&cfg, emitToDynamicBuf, &db);
+    TEST_ASSERT(t != NULL);
+
+    /* Write some data */
+    const char *test_data = "Hello, compression world! This is a test of the sync compress API.";
+    size_t data_len = strlen(test_data);
+    sync_compress_write(t, test_data, data_len);
+    TEST_ASSERT_MESSAGE("should not be errored after write", t->errored == 0);
+    TEST_ASSERT_MESSAGE("envelope should be written after first write", t->envelope_written == 1);
+
+    /* Finalize */
+    sync_compress_finish(t);
+    TEST_ASSERT_MESSAGE("should not be errored after finish", t->errored == 0);
+
+    /* Verify output starts with VKCS envelope */
+    TEST_ASSERT_MESSAGE("output should have at least envelope size", db.len >= VKCS_ENVELOPE_SIZE);
+    TEST_ASSERT_MESSAGE("magic byte 0", db.data[0] == VKCS_MAGIC_0);
+    TEST_ASSERT_MESSAGE("magic byte 1", db.data[1] == VKCS_MAGIC_1);
+    TEST_ASSERT_MESSAGE("magic byte 2", db.data[2] == VKCS_MAGIC_2);
+    TEST_ASSERT_MESSAGE("magic byte 3", db.data[3] == VKCS_MAGIC_3);
+    TEST_ASSERT_MESSAGE("version", db.data[4] == VKCS_VERSION);
+    TEST_ASSERT_MESSAGE("algo_id", db.data[5] == ALGO_LZ4);
+    TEST_ASSERT_MESSAGE("stream_kind RDB", (db.data[6] & 0x01) == STREAM_KIND_RDB);
+
+    /* Decompress and verify round-trip */
+    stream_decompressor_t sd;
+    TEST_ASSERT(streamDecompressorInit(&sd, ALGO_LZ4) == 0);
+
+    uint8_t decompressed[256];
+    size_t total_decompressed = 0;
+    uint8_t *compressed_data = db.data + VKCS_ENVELOPE_SIZE;
+    size_t compressed_len = db.len - VKCS_ENVELOPE_SIZE;
+    size_t src_offset = 0;
+
+    while (src_offset < compressed_len) {
+        size_t consumed = 0;
+        ssize_t produced = streamDecompressFeed(
+            &sd, decompressed + total_decompressed,
+            sizeof(decompressed) - total_decompressed,
+            compressed_data + src_offset,
+            compressed_len - src_offset, &consumed);
+        TEST_ASSERT_MESSAGE("decompression should not fail", produced >= 0);
+        total_decompressed += (size_t)produced;
+        src_offset += consumed;
+        if (consumed == 0 && produced == 0) break;
+    }
+
+    TEST_ASSERT_MESSAGE("decompressed length should match original",
+                        total_decompressed == data_len);
+    TEST_ASSERT_MESSAGE("decompressed data should match original",
+                        memcmp(decompressed, test_data, data_len) == 0);
+
+    streamDecompressorDestroy(&sd);
+    sync_compress_destroy(t);
+    dynamicBufFree(&db);
+    return 0;
+}
+
+/* --- Test: compress_rio_t write + finish round-trip (Task 3.4) --- */
+int test_compressRioRoundTrip(int argc, char **argv, int flags) {
+    UNUSED(argc);
+    UNUSED(argv);
+    UNUSED(flags);
+
+    /* Use a buffer rio as the inner rio */
+    sds buf = sdsempty();
+    rio buffer_rio;
+    rioInitWithBuffer(&buffer_rio, buf);
+
+    sync_compress_config_t cfg = {.algo = ALGO_LZ4, .level = 0, .stream_kind = STREAM_KIND_RDB};
+    compress_rio_t cr;
+    TEST_ASSERT(rioInitWithCompress(&cr, &buffer_rio, &cfg) == 0);
+    const char *test_data = "The quick brown fox jumps over the lazy dog. "
+                            "Pack my box with five dozen liquor jugs.";
+    size_t data_len = strlen(test_data);
+    TEST_ASSERT_MESSAGE("rioWrite should succeed",
+                        rioWrite((rio *)&cr, test_data, data_len) != 0);
+
+    /* Finalize and destroy */
+    compress_rio_finish(&cr);
+
+    /* Get the compressed output from the buffer rio */
+    sds compressed = buffer_rio.io.buffer.ptr;
+    size_t compressed_len = sdslen(compressed);
+    TEST_ASSERT_MESSAGE("compressed output should exist", compressed_len > VKCS_ENVELOPE_SIZE);
+
+    /* Verify VKCS envelope */
+    TEST_ASSERT_MESSAGE("magic V", compressed[0] == (char)VKCS_MAGIC_0);
+    TEST_ASSERT_MESSAGE("magic K", compressed[1] == (char)VKCS_MAGIC_1);
+    TEST_ASSERT_MESSAGE("magic C", compressed[2] == (char)VKCS_MAGIC_2);
+    TEST_ASSERT_MESSAGE("magic S", compressed[3] == (char)VKCS_MAGIC_3);
+
+    /* Decompress and verify */
+    stream_decompressor_t sd;
+    TEST_ASSERT(streamDecompressorInit(&sd, ALGO_LZ4) == 0);
+
+    uint8_t decompressed[512];
+    size_t total_decompressed = 0;
+    uint8_t *comp_data = (uint8_t *)compressed + VKCS_ENVELOPE_SIZE;
+    size_t comp_len = compressed_len - VKCS_ENVELOPE_SIZE;
+    size_t src_offset = 0;
+
+    while (src_offset < comp_len) {
+        size_t consumed = 0;
+        ssize_t produced = streamDecompressFeed(
+            &sd, decompressed + total_decompressed,
+            sizeof(decompressed) - total_decompressed,
+            comp_data + src_offset,
+            comp_len - src_offset, &consumed);
+        TEST_ASSERT_MESSAGE("decompression should not fail", produced >= 0);
+        total_decompressed += (size_t)produced;
+        src_offset += consumed;
+        if (consumed == 0 && produced == 0) break;
+    }
+
+    TEST_ASSERT_MESSAGE("decompressed length should match",
+                        total_decompressed == data_len);
+    TEST_ASSERT_MESSAGE("decompressed data should match",
+                        memcmp(decompressed, test_data, data_len) == 0);
+
+    streamDecompressorDestroy(&sd);
+    compress_rio_destroy(&cr);
+    sdsfree(compressed);
+    return 0;
+}
+
+/* --- Test: decompress_rio_t read round-trip (Task 3.5) --- */
+int test_decompressRioRoundTrip(int argc, char **argv, int flags) {
+    UNUSED(argc);
+    UNUSED(argv);
+    UNUSED(flags);
+
+    /* First, produce compressed data using sync compress */
+    dynamic_buf_t db;
+    dynamicBufInit(&db);
+
+    sync_compress_config_t cfg = {.algo = ALGO_LZ4, .level = 0, .stream_kind = STREAM_KIND_RDB};
+    sync_compress_ctx_t *t = sync_compress_create(&cfg, emitToDynamicBuf, &db);
+    TEST_ASSERT(t != NULL);
+
+    const char *test_data = "Decompression rio test data. "
+                            "This should round-trip through compress then decompress.";
+    size_t data_len = strlen(test_data);
+    sync_compress_write(t, test_data, data_len);
+    sync_compress_finish(t);
+    sync_compress_destroy(t);
+
+    /* Skip the VKCS envelope — decompress_rio expects it already consumed */
+    TEST_ASSERT(db.len > VKCS_ENVELOPE_SIZE);
+    uint8_t *compressed_data = db.data + VKCS_ENVELOPE_SIZE;
+    size_t compressed_len = db.len - VKCS_ENVELOPE_SIZE;
+
+    /* Create a buffer rio with the compressed data (no envelope) */
+    sds comp_sds = sdsnewlen(compressed_data, compressed_len);
+    rio buffer_rio;
+    rioInitWithBuffer(&buffer_rio, comp_sds);
+
+    /* Create decompress rio */
+    decompress_rio_t dr;
+    decompress_rio_init(&dr, &buffer_rio, ALGO_LZ4);
+
+    /* Read decompressed data */
+    char result[256];
+    memset(result, 0, sizeof(result));
+    TEST_ASSERT_MESSAGE("rioRead should succeed",
+                        rioRead((rio *)&dr, result, data_len) != 0);
+    TEST_ASSERT_MESSAGE("decompressed data should match original",
+                        memcmp(result, test_data, data_len) == 0);
+
+    decompress_rio_destroy(&dr);
+    sdsfree(comp_sds);
+    dynamicBufFree(&db);
+    return 0;
+}
+
+/* --- Test: prefix_replay_rio_t (Task 3.6) --- */
+int test_prefixReplayRio(int argc, char **argv, int flags) {
+    UNUSED(argc);
+    UNUSED(argv);
+    UNUSED(flags);
+
+    /* Create a buffer rio with some data */
+    const char *remaining = "remaining data after prefix";
+    sds buf = sdsnewlen(remaining, strlen(remaining));
+    rio buffer_rio;
+    rioInitWithBuffer(&buffer_rio, buf);
+
+    /* Create prefix replay rio with a prefix */
+    const char *prefix = "REDIS001";
+    prefix_replay_rio_t pr;
+    prefix_replay_rio_init(&pr, &buffer_rio, prefix, 8);
+
+    /* Read should serve prefix first, then inner rio data */
+    char result[64];
+    memset(result, 0, sizeof(result));
+    size_t total_len = 8 + strlen(remaining);
+    TEST_ASSERT_MESSAGE("rioRead should succeed",
+                        rioRead((rio *)&pr, result, total_len) != 0);
+
+    /* Verify prefix bytes */
+    TEST_ASSERT_MESSAGE("prefix should match",
+                        memcmp(result, prefix, 8) == 0);
+    /* Verify remaining data */
+    TEST_ASSERT_MESSAGE("remaining data should match",
+                        memcmp(result + 8, remaining, strlen(remaining)) == 0);
+
+    sdsfree(buf);
+    return 0;
+}
+
+/* --- Test: compress_rio_finish is idempotent (Task 3.4) --- */
+int test_compressRioFinishIdempotent(int argc, char **argv, int flags) {
+    UNUSED(argc);
+    UNUSED(argv);
+    UNUSED(flags);
+
+    sds buf = sdsempty();
+    rio buffer_rio;
+    rioInitWithBuffer(&buffer_rio, buf);
+
+    sync_compress_config_t cfg = {.algo = ALGO_LZ4, .level = 0, .stream_kind = STREAM_KIND_RDB};
+    compress_rio_t cr;
+    TEST_ASSERT(rioInitWithCompress(&cr, &buffer_rio, &cfg) == 0);
+
+    rioWrite((rio *)&cr, "test", 4);
+    compress_rio_finish(&cr);
+    size_t len_after_first = sdslen(buffer_rio.io.buffer.ptr);
+
+    /* Second finish should be a no-op */
+    compress_rio_finish(&cr);
+    size_t len_after_second = sdslen(buffer_rio.io.buffer.ptr);
+    TEST_ASSERT_MESSAGE("second finish should not produce more output",
+                        len_after_first == len_after_second);
+
+    compress_rio_destroy(&cr);
+    sdsfree(buffer_rio.io.buffer.ptr);
+    return 0;
+}
+
+/* --- Test: compress_rio flush mid-stream does not end frame (Task 3.4) --- */
+int test_compressRioFlushMidStream(int argc, char **argv, int flags) {
+    UNUSED(argc);
+    UNUSED(argv);
+    UNUSED(flags);
+
+    sds buf = sdsempty();
+    rio buffer_rio;
+    rioInitWithBuffer(&buffer_rio, buf);
+
+    sync_compress_config_t cfg = {.algo = ALGO_LZ4, .level = 0, .stream_kind = STREAM_KIND_RDB};
+    compress_rio_t cr;
+    TEST_ASSERT(rioInitWithCompress(&cr, &buffer_rio, &cfg) == 0);
+
+    /* Write some data */
+    TEST_ASSERT(rioWrite((rio *)&cr, "first chunk", 11) != 0);
+
+    /* Flush mid-stream — should NOT end the frame */
+    TEST_ASSERT_MESSAGE("flush should succeed", rioFlush((rio *)&cr) != 0);
+
+    /* Write more data — should succeed because frame is still open */
+    TEST_ASSERT_MESSAGE("write after flush should succeed",
+                        rioWrite((rio *)&cr, "second chunk", 12) != 0);
+
+    /* Now finalize */
+    compress_rio_finish(&cr);
+
+    /* Verify the entire stream decompresses correctly */
+    sds compressed = buffer_rio.io.buffer.ptr;
+    size_t compressed_len = sdslen(compressed);
+    TEST_ASSERT(compressed_len > VKCS_ENVELOPE_SIZE);
+
+    stream_decompressor_t sd;
+    TEST_ASSERT(streamDecompressorInit(&sd, ALGO_LZ4) == 0);
+
+    uint8_t decompressed[256];
+    size_t total_decompressed = 0;
+    uint8_t *comp_data = (uint8_t *)compressed + VKCS_ENVELOPE_SIZE;
+    size_t comp_len = compressed_len - VKCS_ENVELOPE_SIZE;
+    size_t src_offset = 0;
+
+    while (src_offset < comp_len) {
+        size_t consumed = 0;
+        ssize_t produced = streamDecompressFeed(
+            &sd, decompressed + total_decompressed,
+            sizeof(decompressed) - total_decompressed,
+            comp_data + src_offset,
+            comp_len - src_offset, &consumed);
+        TEST_ASSERT_MESSAGE("decompression should not fail", produced >= 0);
+        total_decompressed += (size_t)produced;
+        src_offset += consumed;
+        if (consumed == 0 && produced == 0) break;
+    }
+
+    TEST_ASSERT_MESSAGE("total decompressed should be 23 bytes",
+                        total_decompressed == 23);
+    TEST_ASSERT_MESSAGE("decompressed should match concatenated input",
+                        memcmp(decompressed, "first chunksecond chunk", 23) == 0);
+
+    streamDecompressorDestroy(&sd);
+    compress_rio_destroy(&cr);
+    sdsfree(compressed);
+    return 0;
+}
+
+/* --- Test: decompress_rio with large payload (>64KB) exercises partial
+ * consume in the large-chunk read path. Before the fix, unconsumed
+ * compressed bytes were dropped between iterations, causing false EOF
+ * or data corruption. (P1 regression test) --- */
+int test_decompressRioLargePayload(int argc, char **argv, int flags) {
+    UNUSED(argc);
+    UNUSED(argv);
+    UNUSED(flags);
+
+    /* Generate a large payload (256KB) with a repeating pattern so
+     * it's compressible but large enough to require multiple
+     * decompression iterations. */
+    const size_t payload_len = 256 * 1024;
+    uint8_t *payload = zmalloc(payload_len);
+    for (size_t i = 0; i < payload_len; i++) {
+        payload[i] = (uint8_t)(i % 251); /* prime modulus for variety */
+    }
+
+    /* Compress via sync_compress */
+    dynamic_buf_t db;
+    dynamicBufInit(&db);
+
+    sync_compress_config_t cfg = {.algo = ALGO_LZ4, .level = 0, .stream_kind = STREAM_KIND_RDB};
+    sync_compress_ctx_t *t = sync_compress_create(&cfg, emitToDynamicBuf, &db);
+    TEST_ASSERT(t != NULL);
+
+    sync_compress_write(t, payload, payload_len);
+    sync_compress_finish(t);
+    sync_compress_destroy(t);
+
+    /* Strip VKCS envelope */
+    TEST_ASSERT(db.len > VKCS_ENVELOPE_SIZE);
+    uint8_t *comp_data = db.data + VKCS_ENVELOPE_SIZE;
+    size_t comp_len = db.len - VKCS_ENVELOPE_SIZE;
+
+    /* Decompress via decompress_rio */
+    sds comp_sds = sdsnewlen(comp_data, comp_len);
+    rio buffer_rio;
+    rioInitWithBuffer(&buffer_rio, comp_sds);
+
+    decompress_rio_t dr;
+    decompress_rio_init(&dr, &buffer_rio, ALGO_LZ4);
+
+    /* Read in small chunks (4KB) to force multiple iterations through
+     * the decompression state machine. */
+    uint8_t *result = zmalloc(payload_len);
+    size_t total_read = 0;
+    while (total_read < payload_len) {
+        size_t chunk = 4096;
+        if (chunk > payload_len - total_read) chunk = payload_len - total_read;
+        size_t ret = rioRead((rio *)&dr, result + total_read, chunk);
+        TEST_ASSERT_MESSAGE("rioRead should succeed for large payload", ret != 0);
+        total_read += chunk;
+    }
+
+    TEST_ASSERT_MESSAGE("decompressed data should match original",
+                        memcmp(result, payload, payload_len) == 0);
+
+    decompress_rio_destroy(&dr);
+    sdsfree(comp_sds);
+    zfree(result);
+    zfree(payload);
+    dynamicBufFree(&db);
+    return 0;
+}
+
+/* --- Test: sync_compress_write after finish is silently ignored.
+ * Before the fix, writes after finish could start a new LZ4 frame
+ * under the same envelope, violating the one-envelope/one-frame
+ * contract. (P2 regression test) --- */
+int test_syncCompressWriteAfterFinish(int argc, char **argv, int flags) {
+    UNUSED(argc);
+    UNUSED(argv);
+    UNUSED(flags);
+
+    dynamic_buf_t db;
+    dynamicBufInit(&db);
+
+    sync_compress_config_t cfg = {.algo = ALGO_LZ4, .level = 0, .stream_kind = STREAM_KIND_RDB};
+    sync_compress_ctx_t *t = sync_compress_create(&cfg, emitToDynamicBuf, &db);
+    TEST_ASSERT(t != NULL);
+
+    sync_compress_write(t, "hello", 5);
+    sync_compress_finish(t);
+    size_t len_after_finish = db.len;
+
+    /* Write after finish — should be silently ignored */
+    sync_compress_write(t, "world", 5);
+    TEST_ASSERT_MESSAGE("write after finish should not produce output",
+                        db.len == len_after_finish);
+
+    /* Second finish — should also be a no-op */
+    sync_compress_finish(t);
+    TEST_ASSERT_MESSAGE("second finish should not produce output",
+                        db.len == len_after_finish);
+
+    /* Verify the stream is still valid: one envelope + one frame */
+    TEST_ASSERT(db.len > VKCS_ENVELOPE_SIZE);
+    stream_decompressor_t sd;
+    TEST_ASSERT(streamDecompressorInit(&sd, ALGO_LZ4) == 0);
+
+    uint8_t decompressed[64];
+    size_t total = 0;
+    uint8_t *cdata = db.data + VKCS_ENVELOPE_SIZE;
+    size_t clen = db.len - VKCS_ENVELOPE_SIZE;
+    size_t off = 0;
+    while (off < clen) {
+        size_t consumed = 0;
+        ssize_t produced = streamDecompressFeed(
+            &sd, decompressed + total, sizeof(decompressed) - total,
+            cdata + off, clen - off, &consumed);
+        TEST_ASSERT(produced >= 0);
+        total += (size_t)produced;
+        off += consumed;
+        if (consumed == 0 && produced == 0) break;
+    }
+
+    TEST_ASSERT_MESSAGE("should decompress to 'hello' only",
+                        total == 5 && memcmp(decompressed, "hello", 5) == 0);
+
+    streamDecompressorDestroy(&sd);
+    sync_compress_destroy(t);
+    dynamicBufFree(&db);
+    return 0;
+}
+
+/* Test that two independent compress/decompress streams can coexist
+ * without interfering with each other. Verifies no shared mutable state. */
+int test_independentStreamsCoexist(int argc, char **argv, int flags) {
+    UNUSED(argc);
+    UNUSED(argv);
+    UNUSED(flags);
+
+    /* Create two independent compress streams with different data */
+    dynamic_buf_t db1, db2;
+    dynamicBufInit(&db1);
+    dynamicBufInit(&db2);
+
+    sync_compress_config_t cfg = {.algo = ALGO_LZ4, .level = 0, .stream_kind = STREAM_KIND_RDB};
+    sync_compress_ctx_t *t1 = sync_compress_create(&cfg, emitToDynamicBuf, &db1);
+    sync_compress_ctx_t *t2 = sync_compress_create(&cfg, emitToDynamicBuf, &db2);
+    TEST_ASSERT(t1 != NULL && t2 != NULL);
+
+    const char *data1 = "Stream one data - unique content for first stream AAAA";
+    const char *data2 = "Stream two data - different content for second stream BBBB";
+
+    /* Interleave writes to both streams */
+    sync_compress_write(t1, data1, strlen(data1));
+    sync_compress_write(t2, data2, strlen(data2));
+    sync_compress_write(t1, data1, strlen(data1)); /* write again to stream 1 */
+    sync_compress_write(t2, data2, strlen(data2)); /* write again to stream 2 */
+
+    sync_compress_finish(t1);
+    sync_compress_finish(t2);
+
+    /* Decompress both and verify independently */
+    for (int i = 0; i < 2; i++) {
+        dynamic_buf_t *db = (i == 0) ? &db1 : &db2;
+        const char *expected = (i == 0) ? data1 : data2;
+        size_t expected_len = strlen(expected) * 2; /* written twice */
+
+        TEST_ASSERT(db->len > VKCS_ENVELOPE_SIZE);
+        sds comp = sdsnewlen(db->data + VKCS_ENVELOPE_SIZE,
+                             db->len - VKCS_ENVELOPE_SIZE);
+        rio buf_rio;
+        rioInitWithBuffer(&buf_rio, comp);
+
+        decompress_rio_t dr;
+        decompress_rio_init(&dr, &buf_rio, ALGO_LZ4);
+
+        char result[256];
+        memset(result, 0, sizeof(result));
+        TEST_ASSERT_MESSAGE("rioRead should succeed for coexisting stream",
+                            rioRead((rio *)&dr, result, expected_len) != 0);
+        TEST_ASSERT_MESSAGE("first half should match",
+                            memcmp(result, expected, strlen(expected)) == 0);
+        TEST_ASSERT_MESSAGE("second half should match",
+                            memcmp(result + strlen(expected), expected, strlen(expected)) == 0);
+
+        decompress_rio_destroy(&dr);
+        sdsfree(comp);
+    }
+
+    sync_compress_destroy(t1);
+    sync_compress_destroy(t2);
+    dynamicBufFree(&db1);
+    dynamicBufFree(&db2);
+    return 0;
+}

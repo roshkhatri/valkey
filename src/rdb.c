@@ -46,6 +46,8 @@
 #include "module.h"
 #include "cluster.h"
 #include "cluster_migrateslots.h"
+#include "compression.h"
+#include "compression_pipeline.h"
 
 #include <math.h>
 #include <fcntl.h>
@@ -66,6 +68,13 @@
 #define rdbReportCorruptRDB(...) rdbReportError(1, __LINE__, __VA_ARGS__)
 /* This macro is called when RDB read failed (possibly a short read) */
 #define rdbReportReadError(...) rdbReportError(0, __LINE__, __VA_ARGS__)
+
+/* Returns 1 if streaming compression is enabled for RDB saves. */
+static inline int isRdbStreamingCompressionEnabled(void) {
+    return server.rdb_compression &&
+           (server.rdb_compression_algo == ALGO_LZ4 ||
+            server.rdb_compression_algo == ALGO_ZSTD);
+}
 
 /* This macro tells if we are in the context of a RESTORE command, and not loading an RDB or AOF. */
 #define isRestoreContext() ((server.current_client == NULL || server.current_client->id == CLIENT_ID_AOF) ? 0 : 1)
@@ -506,8 +515,13 @@ ssize_t rdbSaveRawString(rio *rdb, unsigned char *s, size_t len) {
     }
 
     /* Try LZF compression - under 20 bytes it's unable to compress even
-     * aaaaaaaaaaaaaaaaaa so skip it */
-    if (server.rdb_compression && len > 20) {
+     * aaaaaaaaaaaaaaaaaa so skip it.
+     * Skip per-string LZF only when THIS rio has streaming compression
+     * active (RIO_FLAG_STREAMING_COMPRESSION). This avoids double-compression
+     * while preserving LZF for paths without a compress_rio wrapper
+     * (diskless sync, DUMP, AOF rewrite). */
+    if (server.rdb_compression && len > 20 &&
+        !(rdb && (rdb->flags & RIO_FLAG_STREAMING_COMPRESSION))) {
         n = rdbSaveLzfStringObject(rdb, s, len);
         if (n == -1) return -1;
         if (n > 0) return n;
@@ -1549,6 +1563,9 @@ static int rdbSaveInternal(int req, const char *filename, rdbSaveInfo *rsi, int 
     int error = 0;
     int saved_errno;
     char *err_op; /* For a detailed log */
+    int use_streaming_compression = isRdbStreamingCompressionEnabled();
+    compress_rio_t cr;
+    int cr_initialized = 0;
 
     FILE *fp = fopen(filename, "w");
     if (!fp) {
@@ -1570,10 +1587,42 @@ static int rdbSaveInternal(int req, const char *filename, rdbSaveInfo *rsi, int 
         if (!(rdbflags & RDBFLAGS_KEEP_CACHE)) rioSetReclaimCache(&rdb, 1);
     }
 
-    if (rdbSaveRio(req, RDB_VERSION, &rdb, &error, rdbflags, rsi) == C_ERR) {
+    /* When streaming compression is enabled, wrap the file rio with
+     * compress_rio_t. rdbSaveRio writes through the compressor transparently.
+     * Per-string LZF is already disabled in rdbSaveRawString when algo != LZF. */
+    rio *save_rio = &rdb;
+    if (use_streaming_compression) {
+        sync_compress_config_t cfg = {
+            .algo = (compression_algo_t)server.rdb_compression_algo,
+            .level = 0, /* default level */
+            .stream_kind = STREAM_KIND_RDB,
+        };
+        if (rioInitWithCompress(&cr, &rdb, &cfg) != 0) {
+            errno = EIO; /* Compressor init failure — set errno for werr log */
+            err_op = "rioInitWithCompress";
+            goto werr;
+        }
+        save_rio = (rio *)&cr;
+        cr_initialized = 1;
+    }
+
+    if (rdbSaveRio(req, RDB_VERSION, save_rio, &error, rdbflags, rsi) == C_ERR) {
         errno = error;
         err_op = "rdbSaveRio";
         goto werr;
+    }
+
+    /* Finalize the compression frame before flushing to disk. */
+    if (cr_initialized) {
+        if (compress_rio_finish(&cr) != 0) {
+            errno = EIO; /* Compression finalization failure */
+            err_op = "compress_rio_finish";
+            compress_rio_destroy(&cr);
+            cr_initialized = 0;
+            goto werr;
+        }
+        compress_rio_destroy(&cr);
+        cr_initialized = 0;
     }
 
     /* Make sure data will not remain on the OS's output buffers */
@@ -1599,6 +1648,11 @@ static int rdbSaveInternal(int req, const char *filename, rdbSaveInfo *rsi, int 
 werr:
     saved_errno = errno;
     serverLog(LL_WARNING, "Write error while saving DB to the disk(%s): %s", err_op, strerror(errno));
+    if (cr_initialized) {
+        /* Skip finish on error — output is being discarded (unlink below).
+         * Just release resources. */
+        compress_rio_destroy(&cr);
+    }
     if (fp) fclose(fp);
     unlink(filename);
     errno = saved_errno;
@@ -1654,6 +1708,11 @@ int rdbSave(int req, char *filename, rdbSaveInfo *rsi, int rdbflags) {
     }
 
     serverLog(LL_NOTICE, "DB saved on disk");
+    if (isRdbStreamingCompressionEnabled()) {
+        serverLog(LL_VERBOSE,
+                  "RDB saved with %s streaming compression",
+                  server.rdb_compression_algo == ALGO_LZ4 ? "LZ4" : "ZSTD");
+    }
     server.dirty = 0;
     server.lastsave = time(NULL);
     server.lastbgsave_status = C_OK;
@@ -3595,7 +3654,7 @@ eoferr:
 int rdbLoad(char *filename, rdbSaveInfo *rsi, int rdbflags) {
     FILE *fp;
     rio rdb;
-    int retval;
+    int retval = RDB_FAILED;
     struct stat sb;
     int rdb_fd;
 
@@ -3612,8 +3671,48 @@ int rdbLoad(char *filename, rdbSaveInfo *rsi, int rdbflags) {
     startLoadingFile(sb.st_size, filename, rdbflags);
     rioInitWithFile(&rdb, fp);
 
-    retval = rdbLoadRio(&rdb, rdbflags, rsi);
+    /* Format detection: check for VKCS envelope, fall back to RDB magic. */
+    uint8_t header[VKCS_ENVELOPE_SIZE];
+    compression_algo_t algo;
+    uint8_t stream_kind;
+    decompress_rio_t dr;
+    prefix_replay_rio_t pr;
+    int dr_initialized = 0;
+    rio *load_rio = &rdb;
 
+    int vkcs = vkcsDetectFormat(&rdb, header, &algo, &stream_kind);
+    if (vkcs < 0) {
+        serverLog(LL_WARNING, "Short read loading RDB header from %s", filename);
+        goto done;
+    } else if (vkcs == 1) {
+        /* VKCS compressed stream */
+        if (stream_kind != STREAM_KIND_RDB) {
+            serverLog(LL_WARNING, "VKCS stream_kind is not RDB in file %s", filename);
+            goto done;
+        }
+        decompress_rio_init(&dr, &rdb, algo);
+        dr_initialized = 1;
+        if (dr.base.flags & RIO_FLAG_READ_ERROR) {
+            serverLog(LL_WARNING, "Failed to initialize decompressor for %s", filename);
+            goto done;
+        }
+        load_rio = (rio *)&dr;
+        serverLog(LL_NOTICE, "Loading compressed RDB (algo=%d) from %s", (int)algo, filename);
+    } else if (rdbIsValidMagic(header, VKCS_ENVELOPE_SIZE)) {
+        /* Uncompressed RDB — replay the consumed header bytes */
+        prefix_replay_rio_init(&pr, &rdb, (const char *)header, VKCS_ENVELOPE_SIZE);
+        load_rio = (rio *)&pr;
+    } else {
+        serverLog(LL_WARNING, "Unrecognized format loading RDB from %s", filename);
+        goto done;
+    }
+
+    retval = rdbLoadRio(load_rio, rdbflags, rsi);
+
+done:
+    if (dr_initialized) {
+        decompress_rio_destroy(&dr);
+    }
     fclose(fp);
     stopLoading(retval == RDB_OK);
     /* Reclaim the cache backed by rdb */

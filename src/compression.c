@@ -5,8 +5,7 @@
  */
 
 /* Streaming compression/decompression using algorithm-native framing.
- * LZ4 via LZ4F frame API, ZSTD via streaming API.
- * See .kiro/specs/compression-module/design-compact.md for full design. */
+ * Currently supports LZ4 via LZ4F frame API. */
 
 #include "compression.h"
 #include "zmalloc.h"
@@ -91,7 +90,6 @@ int readVkcsEnvelope(const uint8_t *buf, size_t len, compression_algo_t *algo, u
 
 /* Initialize a streaming compressor for the given algorithm.
  * For LZ4: creates an LZ4F compression context.
- * For ZSTD: deferred to task 22.1.
  * Returns 0 on success, -1 on error. */
 int streamCompressorInit(stream_compressor_t *sc, compression_algo_t algo, int level) {
     if (!sc) return -1;
@@ -112,7 +110,7 @@ int streamCompressorInit(stream_compressor_t *sc, compression_algo_t algo, int l
         return 0;
     }
     case ALGO_ZSTD:
-        /* ZSTD support added in task 22.1 */
+        /* Not yet implemented */
         memset(sc, 0, sizeof(*sc));
         return -1;
     default:
@@ -134,7 +132,7 @@ void streamCompressorDestroy(stream_compressor_t *sc) {
         }
         break;
     case ALGO_ZSTD:
-        /* ZSTD support added in task 22.1 */
+        /* Not yet implemented */
         break;
     default:
         break;
@@ -145,7 +143,6 @@ void streamCompressorDestroy(stream_compressor_t *sc) {
 
 /* Initialize a streaming decompressor for the given algorithm.
  * For LZ4: creates an LZ4F decompression context.
- * For ZSTD: deferred to task 22.2.
  * Returns 0 on success, -1 on error. */
 int streamDecompressorInit(stream_decompressor_t *sd, compression_algo_t algo) {
     if (!sd) return -1;
@@ -164,7 +161,7 @@ int streamDecompressorInit(stream_decompressor_t *sd, compression_algo_t algo) {
         return 0;
     }
     case ALGO_ZSTD:
-        /* ZSTD support added in task 22.2 */
+        /* Not yet implemented */
         memset(sd, 0, sizeof(*sd));
         return -1;
     default:
@@ -186,7 +183,7 @@ void streamDecompressorDestroy(stream_decompressor_t *sd) {
         }
         break;
     case ALGO_ZSTD:
-        /* ZSTD support added in task 22.2 */
+        /* Not yet implemented */
         break;
     default:
         break;
@@ -217,8 +214,7 @@ static const LZ4F_preferences_t lz4f_prefs = {
 /* Return upper bound on compressed output size.
  * Accounts for frame header overhead when !frame_started and
  * flush/end overhead for internally buffered data.
- * For LZ4: uses lz4f_prefs (1MB blocks) to match streamCompressFeed.
- * For ZSTD: deferred to task 22.3. */
+ * For LZ4: uses lz4f_prefs (1MB blocks) to match streamCompressFeed. */
 size_t streamCompressOutputBound(compression_algo_t algo, size_t input_len, int frame_started, compress_flush_mode_t flush_mode) {
     switch (algo) {
     case ALGO_LZ4: {
@@ -236,9 +232,8 @@ size_t streamCompressOutputBound(compression_algo_t algo, size_t input_len, int 
         return bound;
     }
     case ALGO_ZSTD:
-        /* ZSTD support added in task 22.3. Return 0 to signal unsupported —
-         * callers that allocate based on this will get a zero-size buffer and
-         * streamCompressFeed will fail cleanly rather than writing past end. */
+        /* Not yet implemented — return 0 so callers get a zero-size buffer
+         * and streamCompressFeed will fail cleanly. */
         return 0;
     default:
         return 0;
@@ -248,9 +243,7 @@ size_t streamCompressOutputBound(compression_algo_t algo, size_t input_len, int 
 /* Feed data through the streaming compressor.
  * flush_mode: 0=continue (buffer internally), 1=flush (emit all buffered),
  *             2=end (finalize frame).
- * Returns bytes written to *output_ptr, 0 for no output, -1 on error.
- * For ZSTD: output_ptr is a pointer-to-pointer that may be updated on
- * realloc. For LZ4, *output_ptr is never changed. */
+ * Returns bytes written to *output_ptr, 0 for no output, -1 on error. */
 ssize_t streamCompressFeed(stream_compressor_t *sc,
                            uint8_t **output_ptr,
                            size_t output_capacity,
@@ -330,7 +323,7 @@ ssize_t streamCompressFeed(stream_compressor_t *sc,
         return -1;
     }
     case ALGO_ZSTD:
-        /* ZSTD support added in task 22.3 */
+        /* Not yet implemented */
         return -1;
     default:
         return -1;
@@ -366,7 +359,7 @@ ssize_t streamDecompressFeed(stream_decompressor_t *sd,
         return (ssize_t)dst_size;
     }
     case ALGO_ZSTD:
-        /* ZSTD support added in task 22.2 */
+        /* Not yet implemented */
         return -1;
     default:
         return -1;
