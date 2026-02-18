@@ -73,12 +73,15 @@ static inline bool rdbUseValkeyMagic(int rdbver) {
     return rdbver > RDB_FOREIGN_VERSION_MAX;
 }
 
-/* Check whether a buffer starts with a recognized RDB magic prefix
- * ("REDIS" or "VALKE").  Used for format detection when distinguishing
- * compressed (VKCS) from uncompressed RDB streams. */
+/* Check whether a buffer starts with a recognized RDB magic prefix.
+ * "VALKEY" is the exact 6-byte magic for Valkey-format RDB (e.g. "VALKEY080").
+ * "REDIS" + digit matches the legacy format (e.g. "REDIS0080") for all
+ * versions 0000-9999, avoiding a forward-compatibility cliff at version 1000.
+ * Matches the same checks used in rdbLoadRio() (rdb.c). */
 static inline bool rdbIsValidMagic(const uint8_t *header, size_t len) {
-    return len >= 5 &&
-           (memcmp(header, "REDIS", 5) == 0 || memcmp(header, "VALKE", 5) == 0);
+    if (len < 6) return false;
+    if (memcmp(header, "VALKEY", 6) == 0) return true;
+    return memcmp(header, "REDIS", 5) == 0 && header[5] >= '0' && header[5] <= '9';
 }
 
 /* Defines related to the dump file format. To store 32 bits lengths for short

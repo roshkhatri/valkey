@@ -14,6 +14,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "../compression.h"
+#include "../zmalloc.h"
 #include "test_help.h"
 
 /* --- Emit callback that writes into a flat buffer --- */
@@ -239,8 +240,15 @@ int test_envelopeBitFlipFuzz(int argc, char **argv, int flags) {
         compression_algo_t got_algo;
         uint8_t got_kind;
         /* Most flips should cause rejection; some may land on don't-care
-         * bits and still parse.  We just exercise the path here. */
-        readVkcsEnvelope(eb.buf, eb.pos, &got_algo, &got_kind);
+         * bits and still parse. When parse succeeds, validate the returned
+         * values are valid enum members. */
+        int ret = readVkcsEnvelope(eb.buf, eb.pos, &got_algo, &got_kind);
+        if (ret == 0) {
+            TEST_ASSERT_MESSAGE("parsed algo must be LZ4 or ZSTD",
+                                got_algo == ALGO_LZ4 || got_algo == ALGO_ZSTD);
+            TEST_ASSERT_MESSAGE("parsed kind must be RDB or REPL",
+                                got_kind == STREAM_KIND_RDB || got_kind == STREAM_KIND_REPL);
+        }
     }
     return 0;
 }
@@ -260,5 +268,274 @@ int test_envelopeEmitFailure(int argc, char **argv, int flags) {
 
     int ret = writeVkcsEnvelope(emitAlwaysFail, NULL, ALGO_LZ4, STREAM_KIND_RDB);
     TEST_ASSERT_MESSAGE("writeVkcsEnvelope must propagate emit_cb failure", ret == -1);
+    return 0;
+}
+
+/* ===================================================================
+ * Streaming compression/decompression tests
+ * =================================================================== */
+
+/* --- Test: LZ4 compressor init/destroy lifecycle --- */
+int test_streamCompressorInitDestroy(int argc, char **argv, int flags) {
+    UNUSED(argc);
+    UNUSED(argv);
+    UNUSED(flags);
+
+    stream_compressor_t sc;
+    TEST_ASSERT_MESSAGE("LZ4 init should succeed",
+                        streamCompressorInit(&sc, ALGO_LZ4, 0) == 0);
+    TEST_ASSERT_MESSAGE("algo should be LZ4", sc.algo == ALGO_LZ4);
+    TEST_ASSERT_MESSAGE("frame_started should be false", sc.frame_started == false);
+    TEST_ASSERT_MESSAGE("ctx should be non-NULL", sc.ctx.lz4f != NULL);
+    streamCompressorDestroy(&sc);
+    TEST_ASSERT_MESSAGE("ctx should be NULL after destroy", sc.ctx.lz4f == NULL);
+    TEST_ASSERT_MESSAGE("algo should be NONE after destroy", sc.algo == ALGO_NONE);
+
+    /* ZSTD should fail (not yet implemented) */
+    stream_compressor_t sc2;
+    TEST_ASSERT_MESSAGE("ZSTD init should fail",
+                        streamCompressorInit(&sc2, ALGO_ZSTD, 0) == -1);
+    TEST_ASSERT_MESSAGE("algo should be NONE after failed init", sc2.algo == ALGO_NONE);
+
+    /* ALGO_NONE should fail */
+    stream_compressor_t sc3;
+    TEST_ASSERT_MESSAGE("NONE init should fail",
+                        streamCompressorInit(&sc3, ALGO_NONE, 0) == -1);
+
+    /* NULL should fail */
+    TEST_ASSERT_MESSAGE("NULL init should fail",
+                        streamCompressorInit(NULL, ALGO_LZ4, 0) == -1);
+
+    return 0;
+}
+
+/* --- Test: LZ4 decompressor init/destroy lifecycle --- */
+int test_streamDecompressorInitDestroy(int argc, char **argv, int flags) {
+    UNUSED(argc);
+    UNUSED(argv);
+    UNUSED(flags);
+
+    stream_decompressor_t sd;
+    TEST_ASSERT_MESSAGE("LZ4 decomp init should succeed",
+                        streamDecompressorInit(&sd, ALGO_LZ4) == 0);
+    TEST_ASSERT_MESSAGE("algo should be LZ4", sd.algo == ALGO_LZ4);
+    TEST_ASSERT_MESSAGE("ctx should be non-NULL", sd.ctx.lz4f != NULL);
+    streamDecompressorDestroy(&sd);
+    TEST_ASSERT_MESSAGE("ctx should be NULL after destroy", sd.ctx.lz4f == NULL);
+    TEST_ASSERT_MESSAGE("algo should be NONE after destroy", sd.algo == ALGO_NONE);
+
+    /* ZSTD should fail */
+    stream_decompressor_t sd2;
+    TEST_ASSERT_MESSAGE("ZSTD decomp init should fail",
+                        streamDecompressorInit(&sd2, ALGO_ZSTD) == -1);
+    TEST_ASSERT_MESSAGE("algo should be NONE after failed init", sd2.algo == ALGO_NONE);
+
+    return 0;
+}
+
+/* --- Test: LZ4 compress → decompress round-trip --- */
+int test_streamCompressDecompressRoundTrip(int argc, char **argv, int flags) {
+    UNUSED(argc);
+    UNUSED(argv);
+    UNUSED(flags);
+
+    const char *input = "Hello, Valkey compression module! This is a test payload.";
+    size_t input_len = strlen(input);
+
+    /* Compress */
+    stream_compressor_t sc;
+    TEST_ASSERT(streamCompressorInit(&sc, ALGO_LZ4, 0) == 0);
+
+    size_t bound = streamCompressOutputBound(ALGO_LZ4, input_len, 0, FLUSH_END);
+    TEST_ASSERT_MESSAGE("bound should be > 0", bound > 0);
+
+    uint8_t *compressed = zmalloc(bound);
+    TEST_ASSERT(compressed != NULL);
+    uint8_t *out_ptr = compressed;
+
+    ssize_t compressed_len = streamCompressFeed(&sc, &out_ptr, bound,
+                                                (const uint8_t *)input, input_len,
+                                                FLUSH_END);
+    TEST_ASSERT_MESSAGE("compress should succeed", compressed_len > 0);
+    TEST_ASSERT_MESSAGE("frame should be closed after FLUSH_END",
+                        sc.frame_started == false);
+    streamCompressorDestroy(&sc);
+
+    /* Decompress */
+    stream_decompressor_t sd;
+    TEST_ASSERT(streamDecompressorInit(&sd, ALGO_LZ4) == 0);
+
+    uint8_t decompressed[256];
+    size_t input_consumed = 0;
+    ssize_t decompressed_len = streamDecompressFeed(&sd, decompressed, sizeof(decompressed),
+                                                    compressed, (size_t)compressed_len,
+                                                    &input_consumed);
+    TEST_ASSERT_MESSAGE("decompress should succeed", decompressed_len > 0);
+    TEST_ASSERT_MESSAGE("decompressed length should match input",
+                        (size_t)decompressed_len == input_len);
+    TEST_ASSERT_MESSAGE("decompressed content should match input",
+                        memcmp(decompressed, input, input_len) == 0);
+    TEST_ASSERT_MESSAGE("all compressed input should be consumed",
+                        input_consumed == (size_t)compressed_len);
+
+    streamDecompressorDestroy(&sd);
+    zfree(compressed);
+    return 0;
+}
+
+/* --- Test: streamCompressOutputBound returns sane values --- */
+int test_streamCompressOutputBound(int argc, char **argv, int flags) {
+    UNUSED(argc);
+    UNUSED(argv);
+    UNUSED(flags);
+
+    /* Basic: bound for 1KB input should be > 0 */
+    size_t b1 = streamCompressOutputBound(ALGO_LZ4, 1024, 0, FLUSH_CONTINUE);
+    TEST_ASSERT_MESSAGE("bound for 1KB continue should be > 0", b1 > 0);
+
+    /* Bound with frame header should be larger than without */
+    size_t b_no_frame = streamCompressOutputBound(ALGO_LZ4, 1024, 1, FLUSH_CONTINUE);
+    size_t b_with_frame = streamCompressOutputBound(ALGO_LZ4, 1024, 0, FLUSH_CONTINUE);
+    TEST_ASSERT_MESSAGE("bound with frame header should be >= without frame",
+                        b_with_frame >= b_no_frame);
+
+    /* Flush bound should be >= continue bound */
+    size_t b_flush = streamCompressOutputBound(ALGO_LZ4, 1024, 1, FLUSH_SYNC);
+    size_t b_cont = streamCompressOutputBound(ALGO_LZ4, 1024, 1, FLUSH_CONTINUE);
+    TEST_ASSERT_MESSAGE("flush bound should be >= continue bound",
+                        b_flush >= b_cont);
+
+    /* End bound should be >= flush bound */
+    size_t b_end = streamCompressOutputBound(ALGO_LZ4, 1024, 1, FLUSH_END);
+    TEST_ASSERT_MESSAGE("end bound should be >= flush bound",
+                        b_end >= b_flush);
+
+    /* Zero input should still return > 0 for flush/end (internal buffering) */
+    size_t b_zero_flush = streamCompressOutputBound(ALGO_LZ4, 0, 1, FLUSH_SYNC);
+    TEST_ASSERT_MESSAGE("zero input flush bound should be > 0", b_zero_flush > 0);
+
+    return 0;
+}
+
+/* --- Test: streamCompressFeed error paths --- */
+int test_streamCompressFeedErrors(int argc, char **argv, int flags) {
+    UNUSED(argc);
+    UNUSED(argv);
+    UNUSED(flags);
+
+    uint8_t buf[64];
+    uint8_t *ptr = buf;
+
+    /* NULL compressor */
+    TEST_ASSERT_MESSAGE("NULL sc should return -1",
+                        streamCompressFeed(NULL, &ptr, sizeof(buf),
+                                           (const uint8_t *)"x", 1, FLUSH_CONTINUE) == -1);
+
+    /* NULL output_ptr */
+    stream_compressor_t sc;
+    TEST_ASSERT(streamCompressorInit(&sc, ALGO_LZ4, 0) == 0);
+    TEST_ASSERT_MESSAGE("NULL output_ptr should return -1",
+                        streamCompressFeed(&sc, NULL, sizeof(buf),
+                                           (const uint8_t *)"x", 1, FLUSH_CONTINUE) == -1);
+    streamCompressorDestroy(&sc);
+
+    return 0;
+}
+
+/* --- Test: streamDecompressFeed error paths --- */
+int test_streamDecompressFeedErrors(int argc, char **argv, int flags) {
+    UNUSED(argc);
+    UNUSED(argv);
+    UNUSED(flags);
+
+    uint8_t buf[64];
+    size_t consumed = 0;
+
+    /* NULL decompressor */
+    TEST_ASSERT_MESSAGE("NULL sd should return -1",
+                        streamDecompressFeed(NULL, buf, sizeof(buf),
+                                             (const uint8_t *)"x", 1, &consumed) == -1);
+
+    /* NULL input_consumed */
+    stream_decompressor_t sd;
+    TEST_ASSERT(streamDecompressorInit(&sd, ALGO_LZ4) == 0);
+    TEST_ASSERT_MESSAGE("NULL input_consumed should return -1",
+                        streamDecompressFeed(&sd, buf, sizeof(buf),
+                                             (const uint8_t *)"x", 1, NULL) == -1);
+
+    /* Zero output capacity should return -1 (no-progress prevention) */
+    TEST_ASSERT_MESSAGE("zero output capacity should return -1",
+                        streamDecompressFeed(&sd, buf, 0,
+                                             (const uint8_t *)"x", 1, &consumed) == -1);
+
+    streamDecompressorDestroy(&sd);
+    return 0;
+}
+
+/* --- Test: pre-frame errors are recoverable, mid-frame errors are permanent --- */
+int test_streamCompressFeedErrorRecovery(int argc, char **argv, int flags) {
+    UNUSED(argc);
+    UNUSED(argv);
+    UNUSED(flags);
+
+    stream_compressor_t sc;
+    TEST_ASSERT(streamCompressorInit(&sc, ALGO_LZ4, 0) == 0);
+
+    /* Pre-frame error: compressBegin fails with tiny buffer, but no frame
+     * bytes have been emitted yet — this is recoverable. */
+    uint8_t tiny[1];
+    uint8_t *ptr = tiny;
+    ssize_t ret = streamCompressFeed(&sc, &ptr, 1,
+                                     (const uint8_t *)"test data", 9, FLUSH_END);
+    TEST_ASSERT_MESSAGE("should fail with tiny buffer", ret == -1);
+    TEST_ASSERT_MESSAGE("errored should NOT be set (pre-frame failure)",
+                        sc.errored == false);
+    TEST_ASSERT_MESSAGE("frame_started should still be false",
+                        sc.frame_started == false);
+
+    /* Retry with a proper buffer — should succeed */
+    size_t bound = streamCompressOutputBound(ALGO_LZ4, 9, 0, FLUSH_END);
+    uint8_t *buf = zmalloc(bound);
+    uint8_t *ptr2 = buf;
+    ssize_t ret2 = streamCompressFeed(&sc, &ptr2, bound,
+                                      (const uint8_t *)"test data", 9, FLUSH_END);
+    TEST_ASSERT_MESSAGE("retry after pre-frame error should succeed", ret2 > 0);
+    zfree(buf);
+    streamCompressorDestroy(&sc);
+
+    /* Mid-frame error: start a frame, then force an error — this is permanent. */
+    stream_compressor_t sc2;
+    TEST_ASSERT(streamCompressorInit(&sc2, ALGO_LZ4, 0) == 0);
+
+    /* First call with enough space to start the frame */
+    size_t bound2 = streamCompressOutputBound(ALGO_LZ4, 5, 0, FLUSH_CONTINUE);
+    uint8_t *buf2 = zmalloc(bound2);
+    uint8_t *ptr3 = buf2;
+    ssize_t ret3 = streamCompressFeed(&sc2, &ptr3, bound2,
+                                      (const uint8_t *)"hello", 5, FLUSH_CONTINUE);
+    TEST_ASSERT_MESSAGE("first write should succeed", ret3 >= 0);
+    TEST_ASSERT_MESSAGE("frame should be started", sc2.frame_started == true);
+
+    /* Now force a mid-frame error with a tiny buffer */
+    uint8_t tiny2[1];
+    uint8_t *ptr4 = tiny2;
+    ssize_t ret4 = streamCompressFeed(&sc2, &ptr4, 1,
+                                      (const uint8_t *)"more data to compress", 21,
+                                      FLUSH_END);
+    TEST_ASSERT_MESSAGE("mid-frame error should fail", ret4 == -1);
+    TEST_ASSERT_MESSAGE("errored should be set (mid-frame failure)",
+                        sc2.errored == true);
+
+    /* Subsequent calls must fail immediately */
+    size_t bound3 = streamCompressOutputBound(ALGO_LZ4, 5, 0, FLUSH_END);
+    uint8_t *buf3 = zmalloc(bound3);
+    uint8_t *ptr5 = buf3;
+    ssize_t ret5 = streamCompressFeed(&sc2, &ptr5, bound3,
+                                      (const uint8_t *)"hello", 5, FLUSH_END);
+    TEST_ASSERT_MESSAGE("must fail on errored compressor", ret5 == -1);
+    zfree(buf3);
+    zfree(buf2);
+    streamCompressorDestroy(&sc2);
+
     return 0;
 }

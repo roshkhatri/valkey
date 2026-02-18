@@ -59,7 +59,7 @@ int writeVkcsEnvelope(vkcsEmitFn emit_cb,
  * Returns -1 on error (bad magic, unsupported version, unknown algo,
  * reserved bits set). */
 int readVkcsEnvelope(const uint8_t *buf, size_t len, compression_algo_t *algo, uint8_t *stream_kind) {
-    if (len < VKCS_ENVELOPE_SIZE) return -1;
+    if (!buf || len < VKCS_ENVELOPE_SIZE) return -1;
 
     /* Validate magic */
     if (buf[0] != VKCS_MAGIC_0 || buf[1] != VKCS_MAGIC_1 ||
@@ -98,14 +98,14 @@ int streamCompressorInit(stream_compressor_t *sc, compression_algo_t algo, int l
     memset(sc, 0, sizeof(*sc));
     sc->algo = algo;
     sc->level = level;
-    sc->frame_started = 0;
+    sc->frame_started = false;
 
     switch (algo) {
     case ALGO_LZ4: {
         LZ4F_cctx *cctx = NULL;
         LZ4F_errorCode_t err = LZ4F_createCompressionContext(&cctx, LZ4F_VERSION);
         if (LZ4F_isError(err)) {
-            memset(sc, 0, sizeof(*sc)); /* restore clean zero state */
+            memset(sc, 0, sizeof(*sc));
             return -1;
         }
         sc->ctx.lz4f = cctx;
@@ -113,8 +113,10 @@ int streamCompressorInit(stream_compressor_t *sc, compression_algo_t algo, int l
     }
     case ALGO_ZSTD:
         /* ZSTD support added in task 22.1 */
+        memset(sc, 0, sizeof(*sc));
         return -1;
     default:
+        memset(sc, 0, sizeof(*sc));
         return -1;
     }
 }
@@ -155,7 +157,7 @@ int streamDecompressorInit(stream_decompressor_t *sd, compression_algo_t algo) {
         LZ4F_dctx *dctx = NULL;
         LZ4F_errorCode_t err = LZ4F_createDecompressionContext(&dctx, LZ4F_VERSION);
         if (LZ4F_isError(err)) {
-            memset(sd, 0, sizeof(*sd)); /* restore clean zero state */
+            memset(sd, 0, sizeof(*sd));
             return -1;
         }
         sd->ctx.lz4f = dctx;
@@ -163,8 +165,10 @@ int streamDecompressorInit(stream_decompressor_t *sd, compression_algo_t algo) {
     }
     case ALGO_ZSTD:
         /* ZSTD support added in task 22.2 */
+        memset(sd, 0, sizeof(*sd));
         return -1;
     default:
+        memset(sd, 0, sizeof(*sd));
         return -1;
     }
 }
@@ -232,10 +236,12 @@ size_t streamCompressOutputBound(compression_algo_t algo, size_t input_len, int 
         return bound;
     }
     case ALGO_ZSTD:
-        /* ZSTD support added in task 22.3 */
-        return input_len;
+        /* ZSTD support added in task 22.3. Return 0 to signal unsupported —
+         * callers that allocate based on this will get a zero-size buffer and
+         * streamCompressFeed will fail cleanly rather than writing past end. */
+        return 0;
     default:
-        return input_len;
+        return 0;
     }
 }
 
@@ -252,6 +258,7 @@ ssize_t streamCompressFeed(stream_compressor_t *sc,
                            size_t input_len,
                            compress_flush_mode_t flush_mode) {
     if (!sc || !output_ptr || !*output_ptr) return -1;
+    if (sc->errored) return -1;
 
     switch (sc->algo) {
     case ALGO_LZ4: {
@@ -266,14 +273,19 @@ ssize_t streamCompressFeed(stream_compressor_t *sc,
             prefs.compressionLevel = sc->level;
             size_t r = LZ4F_compressBegin((LZ4F_cctx *)sc->ctx.lz4f,
                                           output, output_capacity, &prefs);
-            if (LZ4F_isError(r)) return -1;
+            if (LZ4F_isError(r)) {
+                /* compressBegin failure before any frame bytes are emitted is
+                 * recoverable — the LZ4F context is still clean. Caller can
+                 * retry with a larger buffer. Don't set errored. */
+                return -1;
+            }
             offset = r;
             sc->frame_started = true;
         }
 
         /* Compress input data */
         if (input_len > 0) {
-            if (offset > output_capacity) return -1;
+            if (offset >= output_capacity) goto lz4_error;
             /* stableSrc is caller-controlled. The async replication path
              * sets sc->stable_src=true because the accumulator sds is swapped
              * out before submission (exclusive ownership). The sync RDB
@@ -284,30 +296,38 @@ ssize_t streamCompressFeed(stream_compressor_t *sc,
                                            output + offset,
                                            output_capacity - offset,
                                            input, input_len, &opts);
-            if (LZ4F_isError(r)) return -1;
+            if (LZ4F_isError(r)) goto lz4_error;
             offset += r;
         }
 
         /* Handle flush/end modes */
         if (flush_mode == FLUSH_SYNC) {
-            if (offset > output_capacity) return -1;
+            if (offset >= output_capacity) goto lz4_error;
             size_t r = LZ4F_flush((LZ4F_cctx *)sc->ctx.lz4f,
                                   output + offset,
                                   output_capacity - offset, NULL);
-            if (LZ4F_isError(r)) return -1;
+            if (LZ4F_isError(r)) goto lz4_error;
             offset += r;
         } else if (flush_mode == FLUSH_END) {
-            if (offset > output_capacity) return -1;
+            if (offset >= output_capacity) goto lz4_error;
             size_t r = LZ4F_compressEnd((LZ4F_cctx *)sc->ctx.lz4f,
                                         output + offset,
                                         output_capacity - offset, NULL);
-            if (LZ4F_isError(r)) return -1;
+            if (LZ4F_isError(r)) goto lz4_error;
             offset += r;
             sc->frame_started = false;
         }
 
-        if (offset > (size_t)SSIZE_MAX) return -1;
+        if (offset > (size_t)SSIZE_MAX) goto lz4_error;
         return (ssize_t)offset;
+
+    lz4_error:
+        /* LZ4F state is undefined after an error (lz4frame.h line 325).
+         * Mark permanently failed — no mid-stream retry is possible because
+         * already-emitted frame bytes cannot be unsent. The caller must
+         * tear down the stream (disconnect replica / abort RDB save). */
+        sc->errored = true;
+        return -1;
     }
     case ALGO_ZSTD:
         /* ZSTD support added in task 22.3 */
@@ -328,7 +348,9 @@ ssize_t streamDecompressFeed(stream_decompressor_t *sd,
                              size_t *input_consumed) {
     if (!sd || !input_consumed) return -1;
     *input_consumed = 0;
-    if (!output || output_capacity == 0) return 0;
+    /* Zero output capacity is a caller bug — returning 0 with no progress
+     * would cause streaming loops to spin forever. */
+    if (!output || output_capacity == 0) return -1;
 
     switch (sd->algo) {
     case ALGO_LZ4: {
