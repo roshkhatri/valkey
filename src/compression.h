@@ -114,12 +114,15 @@ ssize_t streamCompressFeed(stream_compressor_t *sc,
                            compress_flush_mode_t flush_mode);
 
 /* Feed compressed data through streaming decompressor.
- * Returns bytes written to output, 0 for no output, -1 on error. */
+ * Returns bytes written to output, 0 for no output, -1 on error.
+ * If next_input_hint is non-NULL, stores the codec's hint for how many
+ * bytes of compressed input are expected next (0 = frame complete). */
 ssize_t streamDecompressFeed(stream_decompressor_t *sd,
                              uint8_t *output,
                              size_t output_capacity,
                              const uint8_t *input,
                              size_t input_len,
-                             size_t *input_consumed);
+                             size_t *input_consumed,
+                             size_t *next_input_hint);
 
 #endif /* COMPRESSION_H */

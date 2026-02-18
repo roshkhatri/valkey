@@ -53,9 +53,10 @@ typedef struct {
     stream_decompressor_t decompressor;
     uint8_t *read_buf;
     size_t read_buf_size;
-    size_t read_buf_fill; /* Bytes of valid compressed data in read_buf (may
-                           * include unconsumed remainder from previous
-                           * streamDecompressFeed call). */
+    size_t read_buf_pos;    /* Start offset of valid data in read_buf */
+    size_t read_buf_fill;   /* Bytes of valid compressed data in read_buf
+                             * starting at read_buf_pos. */
+    size_t next_input_hint; /* LZ4F hint: expected bytes for next frame chunk */
     uint8_t *decomp_buf;
     size_t decomp_buf_size;
     size_t decomp_buf_pos;

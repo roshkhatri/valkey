@@ -338,9 +338,11 @@ ssize_t streamDecompressFeed(stream_decompressor_t *sd,
                              size_t output_capacity,
                              const uint8_t *input,
                              size_t input_len,
-                             size_t *input_consumed) {
+                             size_t *input_consumed,
+                             size_t *next_input_hint) {
     if (!sd || !input_consumed) return -1;
     *input_consumed = 0;
+    if (next_input_hint) *next_input_hint = 0;
     /* Zero output capacity is a caller bug — returning 0 with no progress
      * would cause streaming loops to spin forever. */
     if (!output || output_capacity == 0) return -1;
@@ -355,6 +357,7 @@ ssize_t streamDecompressFeed(stream_decompressor_t *sd,
                                      input, &src_size, NULL);
         if (LZ4F_isError(ret)) return -1;
         *input_consumed = src_size;
+        if (next_input_hint) *next_input_hint = ret;
         if (dst_size > (size_t)SSIZE_MAX) return -1;
         return (ssize_t)dst_size;
     }

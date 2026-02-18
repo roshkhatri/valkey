@@ -369,7 +369,7 @@ int test_streamCompressDecompressRoundTrip(int argc, char **argv, int flags) {
     size_t input_consumed = 0;
     ssize_t decompressed_len = streamDecompressFeed(&sd, decompressed, sizeof(decompressed),
                                                     compressed, (size_t)compressed_len,
-                                                    &input_consumed);
+                                                    &input_consumed, NULL);
     TEST_ASSERT_MESSAGE("decompress should succeed", decompressed_len > 0);
     TEST_ASSERT_MESSAGE("decompressed length should match input",
                         (size_t)decompressed_len == input_len);
@@ -454,19 +454,19 @@ int test_streamDecompressFeedErrors(int argc, char **argv, int flags) {
     /* NULL decompressor */
     TEST_ASSERT_MESSAGE("NULL sd should return -1",
                         streamDecompressFeed(NULL, buf, sizeof(buf),
-                                             (const uint8_t *)"x", 1, &consumed) == -1);
+                                             (const uint8_t *)"x", 1, &consumed, NULL) == -1);
 
     /* NULL input_consumed */
     stream_decompressor_t sd;
     TEST_ASSERT(streamDecompressorInit(&sd, ALGO_LZ4) == 0);
     TEST_ASSERT_MESSAGE("NULL input_consumed should return -1",
                         streamDecompressFeed(&sd, buf, sizeof(buf),
-                                             (const uint8_t *)"x", 1, NULL) == -1);
+                                             (const uint8_t *)"x", 1, NULL, NULL) == -1);
 
     /* Zero output capacity should return -1 (no-progress prevention) */
     TEST_ASSERT_MESSAGE("zero output capacity should return -1",
                         streamDecompressFeed(&sd, buf, 0,
-                                             (const uint8_t *)"x", 1, &consumed) == -1);
+                                             (const uint8_t *)"x", 1, &consumed, NULL) == -1);
 
     streamDecompressorDestroy(&sd);
     return 0;
@@ -670,7 +670,7 @@ int test_syncCompressRoundTrip(int argc, char **argv, int flags) {
             &sd, decompressed + total_decompressed,
             sizeof(decompressed) - total_decompressed,
             compressed_data + src_offset,
-            compressed_len - src_offset, &consumed);
+            compressed_len - src_offset, &consumed, NULL);
         TEST_ASSERT_MESSAGE("decompression should not fail", produced >= 0);
         total_decompressed += (size_t)produced;
         src_offset += consumed;
@@ -738,7 +738,7 @@ int test_compressRioRoundTrip(int argc, char **argv, int flags) {
             &sd, decompressed + total_decompressed,
             sizeof(decompressed) - total_decompressed,
             comp_data + src_offset,
-            comp_len - src_offset, &consumed);
+            comp_len - src_offset, &consumed, NULL);
         TEST_ASSERT_MESSAGE("decompression should not fail", produced >= 0);
         total_decompressed += (size_t)produced;
         src_offset += consumed;
@@ -916,7 +916,7 @@ int test_compressRioFlushMidStream(int argc, char **argv, int flags) {
             &sd, decompressed + total_decompressed,
             sizeof(decompressed) - total_decompressed,
             comp_data + src_offset,
-            comp_len - src_offset, &consumed);
+            comp_len - src_offset, &consumed, NULL);
         TEST_ASSERT_MESSAGE("decompression should not fail", produced >= 0);
         total_decompressed += (size_t)produced;
         src_offset += consumed;
@@ -1000,6 +1000,61 @@ int test_decompressRioLargePayload(int argc, char **argv, int flags) {
     return 0;
 }
 
+/* --- Test: decompressRioRead direct-to-caller path for large reads.
+ * Reads > DECOMPRESS_DIRECT_THRESHOLD (64KB) should decompress directly
+ * into the caller buffer, bypassing decomp_buf. Verifies correctness
+ * of the direct path with a single large rioRead. --- */
+int test_decompressRioDirectPath(int argc, char **argv, int flags) {
+    UNUSED(argc);
+    UNUSED(argv);
+    UNUSED(flags);
+
+    /* Generate a payload larger than the direct threshold (128KB) */
+    const size_t payload_len = 128 * 1024;
+    uint8_t *payload = zmalloc(payload_len);
+    for (size_t i = 0; i < payload_len; i++) {
+        payload[i] = (uint8_t)((i * 7 + 13) % 256);
+    }
+
+    /* Compress */
+    dynamic_buf_t db;
+    dynamicBufInit(&db);
+
+    sync_compress_config_t cfg = {.algo = ALGO_LZ4, .level = 0, .stream_kind = STREAM_KIND_RDB};
+    sync_compress_ctx_t *t = sync_compress_create(&cfg, emitToDynamicBuf, &db);
+    TEST_ASSERT(t != NULL);
+
+    sync_compress_write(t, payload, payload_len);
+    sync_compress_finish(t);
+    sync_compress_destroy(t);
+
+    /* Strip VKCS envelope */
+    TEST_ASSERT(db.len > VKCS_ENVELOPE_SIZE);
+    uint8_t *comp_data = db.data + VKCS_ENVELOPE_SIZE;
+    size_t comp_len = db.len - VKCS_ENVELOPE_SIZE;
+
+    /* Decompress via decompress_rio with a single large read */
+    sds comp_sds = sdsnewlen(comp_data, comp_len);
+    rio buffer_rio;
+    rioInitWithBuffer(&buffer_rio, comp_sds);
+
+    decompress_rio_t dr;
+    decompress_rio_init(&dr, &buffer_rio, ALGO_LZ4);
+
+    uint8_t *result = zmalloc(payload_len);
+    size_t ret = rioRead((rio *)&dr, result, payload_len);
+    TEST_ASSERT_MESSAGE("single large rioRead should succeed", ret != 0);
+    TEST_ASSERT_MESSAGE("direct-path decompressed data should match original",
+                        memcmp(result, payload, payload_len) == 0);
+
+    decompress_rio_destroy(&dr);
+    sdsfree(comp_sds);
+    zfree(result);
+    zfree(payload);
+    dynamicBufFree(&db);
+    return 0;
+}
+
 /* --- Test: sync_compress_write after finish is silently ignored.
  * Before the fix, writes after finish could start a new LZ4 frame
  * under the same envelope, violating the one-envelope/one-frame
@@ -1044,7 +1099,7 @@ int test_syncCompressWriteAfterFinish(int argc, char **argv, int flags) {
         size_t consumed = 0;
         ssize_t produced = streamDecompressFeed(
             &sd, decompressed + total, sizeof(decompressed) - total,
-            cdata + off, clen - off, &consumed);
+            cdata + off, clen - off, &consumed, NULL);
         TEST_ASSERT(produced >= 0);
         total += (size_t)produced;
         off += consumed;
