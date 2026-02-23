@@ -39,10 +39,11 @@ int test_envelopeRoundTrip(int argc, char **argv, int flags) {
     UNUSED(argv);
     UNUSED(flags);
 
-    compression_algo_t algos[] = {ALGO_LZ4, ALGO_ZSTD};
+    compression_algo_t algos[] = {ALGO_LZ4};
+    size_t algo_count = sizeof(algos) / sizeof(algos[0]);
     uint8_t kinds[] = {STREAM_KIND_RDB, STREAM_KIND_REPL};
 
-    for (int a = 0; a < 2; a++) {
+    for (size_t a = 0; a < algo_count; a++) {
         for (int k = 0; k < 2; k++) {
             emit_buf_t eb = {.pos = 0};
             int wret = writeVkcsEnvelope(emitToBuf, &eb, algos[a], kinds[k]);
@@ -110,9 +111,9 @@ int test_envelopeRejectsUnknownAlgo(int argc, char **argv, int flags) {
     int wret = writeVkcsEnvelope(emitToBuf, &eb, ALGO_LZ4, STREAM_KIND_RDB);
     TEST_ASSERT_MESSAGE("write must succeed", wret == 0);
 
-    /* Try every invalid algo_id value 0..255 except ALGO_LZ4 and ALGO_ZSTD */
+    /* Try every invalid algo_id value 0..255 except ALGO_LZ4 */
     for (int i = 0; i < 256; i++) {
-        if (i == ALGO_LZ4 || i == ALGO_ZSTD) continue;
+        if (i == ALGO_LZ4) continue;
         eb.buf[5] = (uint8_t)i;
         compression_algo_t a;
         uint8_t k;
@@ -220,12 +221,13 @@ int test_envelopeBitFlipFuzz(int argc, char **argv, int flags) {
     UNUSED(argv);
 
     int iterations = (flags & UNIT_TEST_ACCURATE) ? 10000 : 1000;
-    compression_algo_t algos[] = {ALGO_LZ4, ALGO_ZSTD};
+    compression_algo_t algos[] = {ALGO_LZ4};
+    size_t algo_count = sizeof(algos) / sizeof(algos[0]);
     uint8_t kinds[] = {STREAM_KIND_RDB, STREAM_KIND_REPL};
 
     /* Use random() seeded by the test harness for reproducibility via --seed */
     for (int i = 0; i < iterations; i++) {
-        compression_algo_t algo = algos[random() % 2];
+        compression_algo_t algo = algos[random() % algo_count];
         uint8_t kind = kinds[random() % 2];
 
         emit_buf_t eb = {.pos = 0};
@@ -244,8 +246,7 @@ int test_envelopeBitFlipFuzz(int argc, char **argv, int flags) {
          * values are valid enum members. */
         int ret = readVkcsEnvelope(eb.buf, eb.pos, &got_algo, &got_kind);
         if (ret == 0) {
-            TEST_ASSERT_MESSAGE("parsed algo must be LZ4 or ZSTD",
-                                got_algo == ALGO_LZ4 || got_algo == ALGO_ZSTD);
+            TEST_ASSERT_MESSAGE("parsed algo must be LZ4", got_algo == ALGO_LZ4);
             TEST_ASSERT_MESSAGE("parsed kind must be RDB or REPL",
                                 got_kind == STREAM_KIND_RDB || got_kind == STREAM_KIND_REPL);
         }
@@ -291,12 +292,6 @@ int test_streamCompressorInitDestroy(int argc, char **argv, int flags) {
     TEST_ASSERT_MESSAGE("ctx should be NULL after destroy", sc.ctx.lz4f == NULL);
     TEST_ASSERT_MESSAGE("algo should be NONE after destroy", sc.algo == ALGO_NONE);
 
-    /* ZSTD should fail (not yet implemented) */
-    stream_compressor_t sc2;
-    TEST_ASSERT_MESSAGE("ZSTD init should fail",
-                        streamCompressorInit(&sc2, ALGO_ZSTD, 0) == -1);
-    TEST_ASSERT_MESSAGE("algo should be NONE after failed init", sc2.algo == ALGO_NONE);
-
     /* ALGO_NONE should fail */
     stream_compressor_t sc3;
     TEST_ASSERT_MESSAGE("NONE init should fail",
@@ -323,12 +318,6 @@ int test_streamDecompressorInitDestroy(int argc, char **argv, int flags) {
     streamDecompressorDestroy(&sd);
     TEST_ASSERT_MESSAGE("ctx should be NULL after destroy", sd.ctx.lz4f == NULL);
     TEST_ASSERT_MESSAGE("algo should be NONE after destroy", sd.algo == ALGO_NONE);
-
-    /* ZSTD should fail */
-    stream_decompressor_t sd2;
-    TEST_ASSERT_MESSAGE("ZSTD decomp init should fail",
-                        streamDecompressorInit(&sd2, ALGO_ZSTD) == -1);
-    TEST_ASSERT_MESSAGE("algo should be NONE after failed init", sd2.algo == ALGO_NONE);
 
     return 0;
 }
@@ -369,7 +358,7 @@ int test_streamCompressDecompressRoundTrip(int argc, char **argv, int flags) {
     size_t input_consumed = 0;
     ssize_t decompressed_len = streamDecompressFeed(&sd, decompressed, sizeof(decompressed),
                                                     compressed, (size_t)compressed_len,
-                                                    &input_consumed, NULL);
+                                                    &input_consumed);
     TEST_ASSERT_MESSAGE("decompress should succeed", decompressed_len > 0);
     TEST_ASSERT_MESSAGE("decompressed length should match input",
                         (size_t)decompressed_len == input_len);
@@ -454,19 +443,19 @@ int test_streamDecompressFeedErrors(int argc, char **argv, int flags) {
     /* NULL decompressor */
     TEST_ASSERT_MESSAGE("NULL sd should return -1",
                         streamDecompressFeed(NULL, buf, sizeof(buf),
-                                             (const uint8_t *)"x", 1, &consumed, NULL) == -1);
+                                             (const uint8_t *)"x", 1, &consumed) == -1);
 
     /* NULL input_consumed */
     stream_decompressor_t sd;
     TEST_ASSERT(streamDecompressorInit(&sd, ALGO_LZ4) == 0);
     TEST_ASSERT_MESSAGE("NULL input_consumed should return -1",
                         streamDecompressFeed(&sd, buf, sizeof(buf),
-                                             (const uint8_t *)"x", 1, NULL, NULL) == -1);
+                                             (const uint8_t *)"x", 1, NULL) == -1);
 
     /* Zero output capacity should return -1 (no-progress prevention) */
     TEST_ASSERT_MESSAGE("zero output capacity should return -1",
                         streamDecompressFeed(&sd, buf, 0,
-                                             (const uint8_t *)"x", 1, &consumed, NULL) == -1);
+                                             (const uint8_t *)"x", 1, &consumed) == -1);
 
     streamDecompressorDestroy(&sd);
     return 0;
@@ -589,7 +578,7 @@ int test_syncCompressCreateDestroy(int argc, char **argv, int flags) {
     sync_compress_config_t cfg = {.algo = ALGO_LZ4, .level = 0, .stream_kind = STREAM_KIND_RDB};
     sync_compress_ctx_t *t = sync_compress_create(&cfg, emitToDynamicBuf, &db);
     TEST_ASSERT_MESSAGE("create should succeed for LZ4", t != NULL);
-    TEST_ASSERT_MESSAGE("algo should be LZ4", t->algo == ALGO_LZ4);
+    TEST_ASSERT_MESSAGE("algo should be LZ4", t->compressor.algo == ALGO_LZ4);
     TEST_ASSERT_MESSAGE("envelope should not be written yet", t->envelope_written == 0);
     TEST_ASSERT_MESSAGE("should not be errored", t->errored == 0);
 
@@ -608,11 +597,6 @@ int test_syncCompressCreateDestroy(int argc, char **argv, int flags) {
     sync_compress_config_t bad_cfg = {.algo = ALGO_NONE, .level = 0, .stream_kind = STREAM_KIND_RDB};
     TEST_ASSERT_MESSAGE("ALGO_NONE should return NULL",
                         sync_compress_create(&bad_cfg, emitToDynamicBuf, &db) == NULL);
-
-    /* ALGO_ZSTD should fail (not yet implemented) */
-    sync_compress_config_t zstd_cfg = {.algo = ALGO_ZSTD, .level = 0, .stream_kind = STREAM_KIND_RDB};
-    TEST_ASSERT_MESSAGE("ALGO_ZSTD should return NULL (not yet implemented)",
-                        sync_compress_create(&zstd_cfg, emitToDynamicBuf, &db) == NULL);
 
     /* destroy NULL should be safe */
     sync_compress_destroy(NULL);
@@ -670,7 +654,7 @@ int test_syncCompressRoundTrip(int argc, char **argv, int flags) {
             &sd, decompressed + total_decompressed,
             sizeof(decompressed) - total_decompressed,
             compressed_data + src_offset,
-            compressed_len - src_offset, &consumed, NULL);
+            compressed_len - src_offset, &consumed);
         TEST_ASSERT_MESSAGE("decompression should not fail", produced >= 0);
         total_decompressed += (size_t)produced;
         src_offset += consumed;
@@ -701,7 +685,7 @@ int test_compressRioRoundTrip(int argc, char **argv, int flags) {
 
     sync_compress_config_t cfg = {.algo = ALGO_LZ4, .level = 0, .stream_kind = STREAM_KIND_RDB};
     compress_rio_t cr;
-    TEST_ASSERT(rioInitWithCompress(&cr, &buffer_rio, &cfg) == 0);
+    TEST_ASSERT(rioInitWithCompress(&cr, &buffer_rio, &cfg, 0) == 0);
     const char *test_data = "The quick brown fox jumps over the lazy dog. "
                             "Pack my box with five dozen liquor jugs.";
     size_t data_len = strlen(test_data);
@@ -738,7 +722,7 @@ int test_compressRioRoundTrip(int argc, char **argv, int flags) {
             &sd, decompressed + total_decompressed,
             sizeof(decompressed) - total_decompressed,
             comp_data + src_offset,
-            comp_len - src_offset, &consumed, NULL);
+            comp_len - src_offset, &consumed);
         TEST_ASSERT_MESSAGE("decompression should not fail", produced >= 0);
         total_decompressed += (size_t)produced;
         src_offset += consumed;
@@ -852,7 +836,7 @@ int test_compressRioFinishIdempotent(int argc, char **argv, int flags) {
 
     sync_compress_config_t cfg = {.algo = ALGO_LZ4, .level = 0, .stream_kind = STREAM_KIND_RDB};
     compress_rio_t cr;
-    TEST_ASSERT(rioInitWithCompress(&cr, &buffer_rio, &cfg) == 0);
+    TEST_ASSERT(rioInitWithCompress(&cr, &buffer_rio, &cfg, 0) == 0);
 
     rioWrite((rio *)&cr, "test", 4);
     compress_rio_finish(&cr);
@@ -881,7 +865,7 @@ int test_compressRioFlushMidStream(int argc, char **argv, int flags) {
 
     sync_compress_config_t cfg = {.algo = ALGO_LZ4, .level = 0, .stream_kind = STREAM_KIND_RDB};
     compress_rio_t cr;
-    TEST_ASSERT(rioInitWithCompress(&cr, &buffer_rio, &cfg) == 0);
+    TEST_ASSERT(rioInitWithCompress(&cr, &buffer_rio, &cfg, 0) == 0);
 
     /* Write some data */
     TEST_ASSERT(rioWrite((rio *)&cr, "first chunk", 11) != 0);
@@ -916,7 +900,7 @@ int test_compressRioFlushMidStream(int argc, char **argv, int flags) {
             &sd, decompressed + total_decompressed,
             sizeof(decompressed) - total_decompressed,
             comp_data + src_offset,
-            comp_len - src_offset, &consumed, NULL);
+            comp_len - src_offset, &consumed);
         TEST_ASSERT_MESSAGE("decompression should not fail", produced >= 0);
         total_decompressed += (size_t)produced;
         src_offset += consumed;
@@ -1000,16 +984,14 @@ int test_decompressRioLargePayload(int argc, char **argv, int flags) {
     return 0;
 }
 
-/* --- Test: decompressRioRead direct-to-caller path for large reads.
- * Reads > DECOMPRESS_DIRECT_THRESHOLD (64KB) should decompress directly
- * into the caller buffer, bypassing decomp_buf. Verifies correctness
- * of the direct path with a single large rioRead. --- */
+/* --- Test: decompressRioRead handles a large single rioRead request.
+ * Verifies correctness for a single 128KB read through the buffered path. --- */
 int test_decompressRioDirectPath(int argc, char **argv, int flags) {
     UNUSED(argc);
     UNUSED(argv);
     UNUSED(flags);
 
-    /* Generate a payload larger than the direct threshold (128KB) */
+    /* Generate a large payload (128KB). */
     const size_t payload_len = 128 * 1024;
     uint8_t *payload = zmalloc(payload_len);
     for (size_t i = 0; i < payload_len; i++) {
@@ -1044,7 +1026,7 @@ int test_decompressRioDirectPath(int argc, char **argv, int flags) {
     uint8_t *result = zmalloc(payload_len);
     size_t ret = rioRead((rio *)&dr, result, payload_len);
     TEST_ASSERT_MESSAGE("single large rioRead should succeed", ret != 0);
-    TEST_ASSERT_MESSAGE("direct-path decompressed data should match original",
+    TEST_ASSERT_MESSAGE("decompressed data should match original",
                         memcmp(result, payload, payload_len) == 0);
 
     decompress_rio_destroy(&dr);
@@ -1099,7 +1081,7 @@ int test_syncCompressWriteAfterFinish(int argc, char **argv, int flags) {
         size_t consumed = 0;
         ssize_t produced = streamDecompressFeed(
             &sd, decompressed + total, sizeof(decompressed) - total,
-            cdata + off, clen - off, &consumed, NULL);
+            cdata + off, clen - off, &consumed);
         TEST_ASSERT(produced >= 0);
         total += (size_t)produced;
         off += consumed;

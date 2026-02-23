@@ -17,7 +17,6 @@ typedef enum {
     ALGO_NONE = 0x00, /* Disabled */
     ALGO_LZF = 0x01,  /* Per-string LZF (RDB only, existing behavior) */
     ALGO_LZ4 = 0x02,
-    ALGO_ZSTD = 0x03,
 } compression_algo_t;
 
 /* --- VKCS Stream Envelope --- */
@@ -47,21 +46,23 @@ typedef struct {
     int level;
     union {
         void *lz4f; /* LZ4F_cctx* */
-        void *zstd; /* ZSTD_CCtx* */
     } ctx;
     bool frame_started;
-    bool errored;    /* Permanently failed — algorithm state is undefined after
-                      * an error. All subsequent streamCompressFeed calls return
-                      * -1 immediately. The caller must tear down the stream
-                      * (disconnect replica / abort RDB save). No mid-stream
-                      * retry is possible because already-emitted frame bytes
-                      * cannot be unsent. */
-    bool stable_src; /* LZ4F optimization: set to true only when the caller
-                      * guarantees the input buffer remains valid and
-                      * unmodified until the next streamCompressFeed call.
-                      * Default false (safe). The async replication path sets
-                      * this to true because the accumulator sds is swapped
-                      * out before submission, giving exclusive ownership. */
+    bool errored;        /* Permanently failed — algorithm state is undefined after
+                          * an error. All subsequent streamCompressFeed calls return
+                          * -1 immediately. The caller must tear down the stream
+                          * (disconnect replica / abort RDB save). No mid-stream
+                          * retry is possible because already-emitted frame bytes
+                          * cannot be unsent. */
+    bool stable_src;     /* LZ4F optimization: set to true only when the caller
+                          * guarantees the input buffer remains valid and
+                          * unmodified until the next streamCompressFeed call.
+                          * Default false (safe). The async replication path sets
+                          * this to true because the accumulator sds is swapped
+                          * out before submission, giving exclusive ownership. */
+    bool block_checksum; /* LZ4F block checksum toggle.
+                          * When true, each compressed block carries a checksum
+                          * validated automatically during decompression. */
 } stream_compressor_t;
 
 /* --- Streaming decompressor context --- */
@@ -69,10 +70,7 @@ typedef struct {
     compression_algo_t algo;
     union {
         void *lz4f; /* LZ4F_dctx* */
-        void *zstd; /* ZSTD_DCtx* */
     } ctx;
-    uint8_t *out_buf;
-    size_t out_buf_capacity;
 } stream_decompressor_t;
 
 /* --- Envelope API --- */
@@ -115,14 +113,12 @@ ssize_t streamCompressFeed(stream_compressor_t *sc,
 
 /* Feed compressed data through streaming decompressor.
  * Returns bytes written to output, 0 for no output, -1 on error.
- * If next_input_hint is non-NULL, stores the codec's hint for how many
- * bytes of compressed input are expected next (0 = frame complete). */
+ * *input_consumed is set to the number of compressed bytes consumed. */
 ssize_t streamDecompressFeed(stream_decompressor_t *sd,
                              uint8_t *output,
                              size_t output_capacity,
                              const uint8_t *input,
                              size_t input_len,
-                             size_t *input_consumed,
-                             size_t *next_input_hint);
+                             size_t *input_consumed);
 
 #endif /* COMPRESSION_H */

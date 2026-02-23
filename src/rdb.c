@@ -72,8 +72,47 @@
 /* Returns 1 if streaming compression is enabled for RDB saves. */
 static inline int isRdbStreamingCompressionEnabled(void) {
     return server.rdb_compression &&
-           (server.rdb_compression_algo == ALGO_LZ4 ||
-            server.rdb_compression_algo == ALGO_ZSTD);
+           (server.rdb_compression_algo == ALGO_LZ4);
+}
+
+/* Default streaming-compression level for RDB saves. */
+#define RDB_STREAMING_COMPRESSION_DEFAULT_LEVEL (-9)
+
+/* Parse LZ4 frame header flags at current FILE position (start of frame).
+ * Uses pread() at the current offset so the FILE/rio stream position and
+ * buffering state are untouched. On success, sets *has_checksum to 1 when
+ * either block checksum or content checksum is enabled, else 0. */
+static int lz4FrameHasIntegrityChecksum(FILE *fp, int *has_checksum) {
+    if (!fp || !has_checksum) return C_ERR;
+
+    unsigned char hdr[19]; /* LZ4 frame header max size */
+    int fd = fileno(fp);
+    if (fd == -1) return C_ERR;
+
+    off_t pos = ftello(fp);
+    if (pos == (off_t)-1) return C_ERR;
+
+    ssize_t nread = pread(fd, hdr, sizeof(hdr), pos);
+    if (nread < 0) return C_ERR;
+    size_t n = (size_t)nread;
+    if (n < 7) return C_ERR; /* min LZ4 frame header size */
+
+    uint32_t magic = ((uint32_t)hdr[0]) |
+                     ((uint32_t)hdr[1] << 8) |
+                     ((uint32_t)hdr[2] << 16) |
+                     ((uint32_t)hdr[3] << 24);
+    if (magic != 0x184D2204U) return C_ERR;
+
+    uint8_t flg = hdr[4];
+    size_t header_len = 7;                /* magic + FLG + BD + HC */
+    if (flg & (1u << 3)) header_len += 8; /* content size */
+    if (flg & 1u) header_len += 4;        /* dict ID */
+    if (n < header_len) return C_ERR;
+
+    int has_block_checksum = (flg & (1u << 4)) != 0;
+    int has_content_checksum = (flg & (1u << 2)) != 0;
+    *has_checksum = has_block_checksum || has_content_checksum;
+    return C_OK;
 }
 
 /* This macro tells if we are in the context of a RESTORE command, and not loading an RDB or AOF. */
@@ -1489,7 +1528,10 @@ int rdbSaveRio(int req, int rdbver, rio *rdb, int *error, int rdbflags, rdbSaveI
     long key_counter = 0;
     int j;
 
-    if (server.rdb_checksum) rdb->update_cksum = rioGenericUpdateChecksum;
+    /* Set up CRC64 checksum callback for uncompressed streams.
+     * Streaming-compressed paths rely on codec-native checksums. */
+    if (server.rdb_checksum && !(rdb->flags & RIO_FLAG_STREAMING_COMPRESSION))
+        rdb->update_cksum = rioGenericUpdateChecksum;
     const char *magic_prefix = rdbUseValkeyMagic(rdbver) ? "VALKEY" : "REDIS0";
     serverAssert(rdbver >= 0 && rdbver <= RDB_VERSION);
     snprintf(magic, sizeof(magic), "%s%03d", magic_prefix, rdbver);
@@ -1594,10 +1636,10 @@ static int rdbSaveInternal(int req, const char *filename, rdbSaveInfo *rsi, int 
     if (use_streaming_compression) {
         sync_compress_config_t cfg = {
             .algo = (compression_algo_t)server.rdb_compression_algo,
-            .level = 0, /* default level */
+            .level = RDB_STREAMING_COMPRESSION_DEFAULT_LEVEL,
             .stream_kind = STREAM_KIND_RDB,
         };
-        if (rioInitWithCompress(&cr, &rdb, &cfg) != 0) {
+        if (rioInitWithCompress(&cr, &rdb, &cfg, server.rdb_checksum) != 0) {
             errno = EIO; /* Compressor init failure — set errno for werr log */
             err_op = "rioInitWithCompress";
             goto werr;
@@ -1709,9 +1751,7 @@ int rdbSave(int req, char *filename, rdbSaveInfo *rsi, int rdbflags) {
 
     serverLog(LL_NOTICE, "DB saved on disk");
     if (isRdbStreamingCompressionEnabled()) {
-        serverLog(LL_VERBOSE,
-                  "RDB saved with %s streaming compression",
-                  server.rdb_compression_algo == ALGO_LZ4 ? "LZ4" : "ZSTD");
+        serverLog(LL_VERBOSE, "RDB saved with LZ4 streaming compression");
     }
     server.dirty = 0;
     server.lastsave = time(NULL);
@@ -3104,7 +3144,10 @@ void stopSaving(int success) {
 /* Track loading progress in order to serve client's from time to time
    and if needed calculate rdb checksum  */
 void rdbLoadProgressCallback(rio *r, const void *buf, size_t len) {
-    if (server.rdb_checksum) rioGenericUpdateChecksum(r, buf, len);
+    /* Track CRC64 for uncompressed streams only.
+     * Streaming-compressed load integrity is validated by codec checksums. */
+    if (server.rdb_checksum && !(r->flags & RIO_FLAG_STREAMING_COMPRESSION))
+        rioGenericUpdateChecksum(r, buf, len);
     if (server.loading_process_events_interval_bytes &&
         (r->processed_bytes + len) / server.loading_process_events_interval_bytes >
             r->processed_bytes / server.loading_process_events_interval_bytes) {
@@ -3610,7 +3653,12 @@ int rdbLoadRioWithLoadingCtx(rio *rdb, int rdbflags, rdbSaveInfo *rsi, rdbLoadin
         if (rioRead(rdb, &cksum, 8) == 0) goto eoferr;
         if (server.rdb_checksum && !server.skip_checksum_validation) {
             memrev64ifbe(&cksum);
-            if (rdb->flags & RIO_FLAG_SKIP_RDB_CHECKSUM) {
+            if ((rdb->flags & RIO_FLAG_STREAMING_COMPRESSION) &&
+                (rdb->flags & RIO_FLAG_STREAMING_CODEC_CHECKSUM)) {
+                /* VKCS compressed stream — integrity is provided by the
+                 * algorithm's native frame checksums. Skip RDB footer CRC64. */
+                serverLog(LL_NOTICE, "Streaming-compressed RDB: integrity validated by codec checksums, skipping CRC64.");
+            } else if (rdb->flags & RIO_FLAG_SKIP_RDB_CHECKSUM) {
                 serverLog(LL_NOTICE, "RDB file was saved with checksum disabled: skipped checksum for this transfer");
             } else if (cksum == 0) {
                 serverLog(LL_NOTICE, "RDB file was saved with checksum disabled: no check performed.");
@@ -3678,6 +3726,7 @@ int rdbLoad(char *filename, rdbSaveInfo *rsi, int rdbflags) {
     decompress_rio_t dr;
     prefix_replay_rio_t pr;
     int dr_initialized = 0;
+    int codec_checksum_verified = 0;
     rio *load_rio = &rdb;
 
     int vkcs = vkcsDetectFormat(&rdb, header, &algo, &stream_kind);
@@ -3690,11 +3739,25 @@ int rdbLoad(char *filename, rdbSaveInfo *rsi, int rdbflags) {
             serverLog(LL_WARNING, "VKCS stream_kind is not RDB in file %s", filename);
             goto done;
         }
+        if (algo == ALGO_LZ4) {
+            int has_lz4_checksum = 0;
+            if (lz4FrameHasIntegrityChecksum(fp, &has_lz4_checksum) == C_OK) {
+                codec_checksum_verified = has_lz4_checksum;
+            } else {
+                serverLog(LL_WARNING,
+                          "Unable to inspect LZ4 frame checksum flags in %s; "
+                          "codec integrity cannot be assumed.",
+                          filename);
+            }
+        }
         decompress_rio_init(&dr, &rdb, algo);
         dr_initialized = 1;
         if (dr.base.flags & RIO_FLAG_READ_ERROR) {
             serverLog(LL_WARNING, "Failed to initialize decompressor for %s", filename);
             goto done;
+        }
+        if (codec_checksum_verified) {
+            dr.base.flags |= RIO_FLAG_STREAMING_CODEC_CHECKSUM;
         }
         load_rio = (rio *)&dr;
         serverLog(LL_NOTICE, "Loading compressed RDB (algo=%d) from %s", (int)algo, filename);

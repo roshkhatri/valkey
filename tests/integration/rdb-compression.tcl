@@ -82,9 +82,72 @@ start_server {overrides {save "" enable-debug-command local}} {
         assert {$digest eq $newdigest}
     }
 
-    test {ZSTD config is rejected} {
-        catch {r config set rdb-compression-algo zstd} err
-        assert_match "*ZSTD compression is not yet supported*" $err
+    test {Invalid compression algo config is rejected} {
+        catch {r config set rdb-compression-algo snappy} err
+        assert_match "*argument(s) must be one of the following: lzf, lz4*" $err
+    }
+
+    test {LZ4 compressed RDB with rdb-checksum yes uses codec checksum} {
+        r config set rdb-compression-algo lz4
+        r flushall
+        for {set i 0} {$i < 200} {incr i} {
+            r set "cksum:$i" [string repeat "payload$i " 200]
+        }
+
+        set digest [debug_digest]
+        r debug reload
+        set newdigest [debug_digest]
+        assert {$digest eq $newdigest}
+    }
+
+    test {LZ4 compressed RDB detects corruption in compressed payload} {
+        r config set rdb-compression-algo lz4
+        r flushall
+        for {set i 0} {$i < 100} {incr i} {
+            r set "corrupt:$i" [string repeat "testdata$i " 100]
+        }
+
+        # Save to file
+        r bgsave
+        waitForBgsave r
+
+        set rdbfile [file join [lindex [r config get dir] 1] dump.rdb]
+
+        # Read the file, flip a byte in the compressed payload
+        # (skip the VKCS envelope at offset 0-7, corrupt somewhere in the middle)
+        set fd [open $rdbfile r+]
+        fconfigure $fd -translation binary
+        set data [read $fd]
+        set len [string length $data]
+        # Corrupt a byte roughly in the middle of the compressed data
+        set pos [expr {$len / 2}]
+        set byte [string index $data $pos]
+        binary scan $byte c val
+        set newval [expr {($val + 1) & 0xFF}]
+        set newbyte [binary format c $newval]
+        set data [string replace $data $pos $pos $newbyte]
+        seek $fd 0
+        puts -nonewline $fd $data
+        close $fd
+
+        # Reload should fail due to corruption
+        catch {r debug reload nosave} err
+        assert_match "*Error*" $err
+    }
+}
+
+start_server {overrides {save "" enable-debug-command local rdbchecksum no}} {
+    test {LZ4 compressed RDB with rdb-checksum no loads correctly} {
+        r config set rdb-compression-algo lz4
+        r flushall
+        for {set i 0} {$i < 50} {incr i} {
+            r set "nocksum:$i" [string repeat "data$i " 100]
+        }
+
+        set digest [debug_digest]
+        r debug reload
+        set newdigest [debug_digest]
+        assert {$digest eq $newdigest}
     }
 }
 

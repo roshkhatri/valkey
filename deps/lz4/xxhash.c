@@ -57,7 +57,7 @@
 #  elif (defined(__INTEL_COMPILER) && !defined(_WIN32)) || \
   (defined(__GNUC__) && ( defined(__ARM_ARCH_7__) || defined(__ARM_ARCH_7A__) \
                     || defined(__ARM_ARCH_7R__) || defined(__ARM_ARCH_7M__) \
-                    || defined(__ARM_ARCH_7S__) ))
+                    || defined(__ARM_ARCH_7S__) || defined(__aarch64__) ))
 #    define XXH_FORCE_MEMORY_ACCESS 1
 #  endif
 #endif
@@ -92,6 +92,8 @@
  */
 #ifndef XXH_FORCE_ALIGN_CHECK /* can be defined externally */
 #  if defined(__i386) || defined(_M_IX86) || defined(__x86_64__) || defined(_M_X64)
+#    define XXH_FORCE_ALIGN_CHECK 0
+#  elif defined(__aarch64__)
 #    define XXH_FORCE_ALIGN_CHECK 0
 #  else
 #    define XXH_FORCE_ALIGN_CHECK 1

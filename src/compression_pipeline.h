@@ -9,9 +9,6 @@
 
 #include "compression.h"
 #include "rio.h"
-#include "sds.h"
-
-#include <stdatomic.h>
 
 /* --- Sync compress config --- */
 typedef struct {
@@ -24,8 +21,6 @@ typedef struct {
  * Used internally by compress_rio_t. Fork-safe by design: each child
  * creates a fresh context with its own algorithm state. No shared state. */
 typedef struct {
-    compression_algo_t algo;
-    int compression_level;
     stream_compressor_t compressor;
     uint8_t *out_buf;    /* Reusable output buffer, sized via streamCompressOutputBound */
     size_t out_buf_size; /* Current allocation size of out_buf */
@@ -53,10 +48,9 @@ typedef struct {
     stream_decompressor_t decompressor;
     uint8_t *read_buf;
     size_t read_buf_size;
-    size_t read_buf_pos;    /* Start offset of valid data in read_buf */
-    size_t read_buf_fill;   /* Bytes of valid compressed data in read_buf
-                             * starting at read_buf_pos. */
-    size_t next_input_hint; /* LZ4F hint: expected bytes for next frame chunk */
+    size_t read_buf_pos;  /* Start offset of valid data in read_buf */
+    size_t read_buf_fill; /* Bytes of valid compressed data in read_buf
+                           * starting at read_buf_pos. */
     uint8_t *decomp_buf;
     size_t decomp_buf_size;
     size_t decomp_buf_pos;
@@ -72,46 +66,8 @@ typedef struct {
     size_t prefix_pos;
 } prefix_replay_rio_t;
 
-/* --- Accumulator (async path) --- */
-typedef struct {
-    sds buf;
-    size_t target_size;
-    long long first_byte_time; /* Monotonic microseconds */
-} accumulator_t;
-
-/* Forward declaration for async compress context */
-typedef struct async_compress_ctx_t async_compress_ctx_t;
-
-/* --- Async compress config --- */
-typedef struct {
-    compression_algo_t algo;
-    int level;
-    size_t accumulator_size;
-    void (*completion_cb)(void *ctx, uint8_t *data, size_t len);
-    void *cb_ctx;
-    void *replica; /* client* — forward declared to avoid circular include */
-} async_compress_config_t;
-
-/* --- Async compress context (replication) --- */
-struct async_compress_ctx_t {
-    uint64_t generation;
-    atomic_int refcount;
-    atomic_int closed;
-    compression_algo_t algo;
-    int compression_level;
-    size_t accumulator_size;
-    accumulator_t acc;
-    stream_compressor_t compressor;
-    int envelope_written;
-    void (*completion_cb)(void *ctx, uint8_t *data, size_t len);
-    void *cb_ctx;
-    void *replica; /* client* */
-    int inflight_count;
-    size_t inflight_bytes;
-};
-
 /* --- Rio Decorator API --- */
-int rioInitWithCompress(compress_rio_t *cr, rio *inner, const sync_compress_config_t *cfg);
+int rioInitWithCompress(compress_rio_t *cr, rio *inner, const sync_compress_config_t *cfg, int codec_checksum);
 int compress_rio_finish(compress_rio_t *cr);
 void compress_rio_destroy(compress_rio_t *cr);
 
@@ -133,14 +89,5 @@ sync_compress_ctx_t *sync_compress_create(const sync_compress_config_t *cfg,
 void sync_compress_write(sync_compress_ctx_t *t, const void *buf, size_t len);
 void sync_compress_finish(sync_compress_ctx_t *t);
 void sync_compress_destroy(sync_compress_ctx_t *t);
-
-/* --- Async Compress API --- */
-async_compress_ctx_t *async_compress_create(const async_compress_config_t *cfg);
-size_t async_compress_write(async_compress_ctx_t *t, const void *buf, size_t len);
-void async_compress_finish(async_compress_ctx_t *t);
-void async_compress_destroy(async_compress_ctx_t *t);
-void async_compress_check_timeout(async_compress_ctx_t *t, long long now_us);
-void async_compress_retain(async_compress_ctx_t *t);
-void async_compress_release(async_compress_ctx_t *t);
 
 #endif /* COMPRESSION_PIPELINE_H */
