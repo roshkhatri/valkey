@@ -134,6 +134,24 @@ start_server {overrides {save "" enable-debug-command local}} {
         catch {r debug reload nosave} err
         assert_match "*Error*" $err
     }
+
+    test {Invalid non-VKCS/non-RDB file fails reload} {
+        r config set rdb-compression-algo lz4
+        r flushall
+        r set smoke-key smoke-value
+
+        r bgsave
+        waitForBgsave r
+
+        set rdbfile [file join [lindex [r config get dir] 1] dump.rdb]
+        set fd [open $rdbfile w]
+        fconfigure $fd -translation binary
+        puts -nonewline $fd "NOTANRDB"
+        close $fd
+
+        catch {r debug reload nosave} err
+        assert_match "*Error*" $err
+    }
 }
 
 start_server {overrides {save "" enable-debug-command local rdbchecksum no}} {

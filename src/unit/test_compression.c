@@ -14,6 +14,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "../compression.h"
+#include "../compression_stream.h"
 #include "../zmalloc.h"
 #include "test_help.h"
 
@@ -23,6 +24,22 @@ typedef struct {
     size_t pos;
 } emit_buf_t;
 
+typedef struct {
+    const uint8_t *data;
+    size_t len;
+    size_t pos;
+    size_t max_chunk; /* 0 => unbounded */
+} mem_reader_t;
+
+typedef struct {
+    const uint8_t *data;
+    size_t len;
+    size_t pos;
+    size_t max_chunk;
+    int fail_after_success_reads;
+    int success_reads;
+} flaky_reader_t;
+
 static int emitToBuf(void *ctx, const uint8_t *data, size_t len) {
     emit_buf_t *eb = (emit_buf_t *)ctx;
     assert(eb->pos + len <= sizeof(eb->buf)); /* crash loudly in tests */
@@ -31,9 +48,39 @@ static int emitToBuf(void *ctx, const uint8_t *data, size_t len) {
     return 0;
 }
 
+static ssize_t memReaderRead(void *ctx, void *buf, size_t len) {
+    mem_reader_t *r = (mem_reader_t *)ctx;
+    if (!r || !buf) return -1;
+    if (r->pos >= r->len) return 0;
+
+    size_t avail = r->len - r->pos;
+    size_t n = len < avail ? len : avail;
+    if (r->max_chunk && n > r->max_chunk) n = r->max_chunk;
+
+    memcpy(buf, r->data + r->pos, n);
+    r->pos += n;
+    return (ssize_t)n;
+}
+
+static ssize_t flakyReaderRead(void *ctx, void *buf, size_t len) {
+    flaky_reader_t *r = (flaky_reader_t *)ctx;
+    if (!r || !buf) return -1;
+    if (r->success_reads >= r->fail_after_success_reads) return -1;
+    if (r->pos >= r->len) return 0;
+
+    size_t avail = r->len - r->pos;
+    size_t n = len < avail ? len : avail;
+    if (r->max_chunk && n > r->max_chunk) n = r->max_chunk;
+
+    memcpy(buf, r->data + r->pos, n);
+    r->pos += n;
+    r->success_reads++;
+    return (ssize_t)n;
+}
+
 /* --- Property: Envelope round-trip ---
- * For every valid (algo, stream_kind) pair, writeVkcsEnvelope followed by
- * readVkcsEnvelope must recover the original algo and stream_kind. */
+ * For every valid (algo, stream_kind, checksum flag) tuple, writeVkcsEnvelope
+ * followed by readVkcsEnvelope must recover the original fields. */
 int test_envelopeRoundTrip(int argc, char **argv, int flags) {
     UNUSED(argc);
     UNUSED(argv);
@@ -45,17 +92,21 @@ int test_envelopeRoundTrip(int argc, char **argv, int flags) {
 
     for (size_t a = 0; a < algo_count; a++) {
         for (int k = 0; k < 2; k++) {
-            emit_buf_t eb = {.pos = 0};
-            int wret = writeVkcsEnvelope(emitToBuf, &eb, algos[a], kinds[k]);
-            TEST_ASSERT_MESSAGE("writeVkcsEnvelope should succeed for valid params", wret == 0);
-            TEST_ASSERT_MESSAGE("envelope should be exactly 8 bytes", eb.pos == VKCS_ENVELOPE_SIZE);
+            for (int checksum_enabled = 0; checksum_enabled <= 1; checksum_enabled++) {
+                emit_buf_t eb = {.pos = 0};
+                int wret = writeVkcsEnvelope(emitToBuf, &eb, algos[a], kinds[k], checksum_enabled);
+                TEST_ASSERT_MESSAGE("writeVkcsEnvelope should succeed for valid params", wret == 0);
+                TEST_ASSERT_MESSAGE("envelope should be exactly 8 bytes", eb.pos == VKCS_ENVELOPE_SIZE);
 
-            compression_algo_t got_algo = ALGO_NONE;
-            uint8_t got_kind = 0xFF;
-            int rret = readVkcsEnvelope(eb.buf, eb.pos, &got_algo, &got_kind);
-            TEST_ASSERT_MESSAGE("readVkcsEnvelope should succeed", rret == 0);
-            TEST_ASSERT_MESSAGE("round-trip algo must match", got_algo == algos[a]);
-            TEST_ASSERT_MESSAGE("round-trip stream_kind must match", got_kind == kinds[k]);
+                compression_algo_t got_algo = ALGO_NONE;
+                uint8_t got_kind = 0xFF;
+                int got_checksum_enabled = -1;
+                int rret = readVkcsEnvelope(eb.buf, eb.pos, &got_algo, &got_kind, &got_checksum_enabled);
+                TEST_ASSERT_MESSAGE("readVkcsEnvelope should succeed", rret == 0);
+                TEST_ASSERT_MESSAGE("round-trip algo must match", got_algo == algos[a]);
+                TEST_ASSERT_MESSAGE("round-trip stream_kind must match", got_kind == kinds[k]);
+                TEST_ASSERT_MESSAGE("round-trip checksum flag must match", got_checksum_enabled == checksum_enabled);
+            }
         }
     }
     return 0;
@@ -68,7 +119,7 @@ int test_envelopeMagicBytes(int argc, char **argv, int flags) {
     UNUSED(flags);
 
     emit_buf_t eb = {.pos = 0};
-    int ret = writeVkcsEnvelope(emitToBuf, &eb, ALGO_LZ4, STREAM_KIND_RDB);
+    int ret = writeVkcsEnvelope(emitToBuf, &eb, ALGO_LZ4, STREAM_KIND_RDB, 0);
     TEST_ASSERT_MESSAGE("write must succeed", ret == 0);
 
     TEST_ASSERT_MESSAGE("magic[0] == 'V'", eb.buf[0] == 0x56);
@@ -88,15 +139,17 @@ int test_envelopeStreamKindFlag(int argc, char **argv, int flags) {
 
     /* RDB: bit 0 = 0 */
     emit_buf_t eb_rdb = {.pos = 0};
-    int ret = writeVkcsEnvelope(emitToBuf, &eb_rdb, ALGO_LZ4, STREAM_KIND_RDB);
+    int ret = writeVkcsEnvelope(emitToBuf, &eb_rdb, ALGO_LZ4, STREAM_KIND_RDB, 0);
     TEST_ASSERT_MESSAGE("write RDB must succeed", ret == 0);
     TEST_ASSERT_MESSAGE("RDB stream_kind: flags bit 0 == 0", (eb_rdb.buf[6] & 0x01) == 0);
+    TEST_ASSERT_MESSAGE("RDB stream_kind: no extra bits set", (eb_rdb.buf[6] & (uint8_t)~VKCS_FLAG_STREAM_KIND) == 0);
 
     /* REPL: bit 0 = 1 */
     emit_buf_t eb_repl = {.pos = 0};
-    ret = writeVkcsEnvelope(emitToBuf, &eb_repl, ALGO_LZ4, STREAM_KIND_REPL);
+    ret = writeVkcsEnvelope(emitToBuf, &eb_repl, ALGO_LZ4, STREAM_KIND_REPL, 0);
     TEST_ASSERT_MESSAGE("write REPL must succeed", ret == 0);
     TEST_ASSERT_MESSAGE("REPL stream_kind: flags bit 0 == 1", (eb_repl.buf[6] & 0x01) == 1);
+    TEST_ASSERT_MESSAGE("REPL stream_kind: no extra bits set", (eb_repl.buf[6] & (uint8_t)~VKCS_FLAG_STREAM_KIND) == 0);
     return 0;
 }
 
@@ -108,7 +161,7 @@ int test_envelopeRejectsUnknownAlgo(int argc, char **argv, int flags) {
 
     /* Build a valid envelope, then corrupt the algo_id byte */
     emit_buf_t eb = {.pos = 0};
-    int wret = writeVkcsEnvelope(emitToBuf, &eb, ALGO_LZ4, STREAM_KIND_RDB);
+    int wret = writeVkcsEnvelope(emitToBuf, &eb, ALGO_LZ4, STREAM_KIND_RDB, 0);
     TEST_ASSERT_MESSAGE("write must succeed", wret == 0);
 
     /* Try every invalid algo_id value 0..255 except ALGO_LZ4 */
@@ -117,7 +170,7 @@ int test_envelopeRejectsUnknownAlgo(int argc, char **argv, int flags) {
         eb.buf[5] = (uint8_t)i;
         compression_algo_t a;
         uint8_t k;
-        int ret = readVkcsEnvelope(eb.buf, eb.pos, &a, &k);
+        int ret = readVkcsEnvelope(eb.buf, eb.pos, &a, &k, NULL);
         TEST_ASSERT_MESSAGE("readVkcsEnvelope must reject unknown algo_id", ret == -1);
     }
     return 0;
@@ -130,8 +183,8 @@ int test_envelopeRejectsNonStreamingAlgo(int argc, char **argv, int flags) {
     UNUSED(flags);
 
     emit_buf_t eb = {.pos = 0};
-    TEST_ASSERT_MESSAGE("ALGO_NONE rejected", writeVkcsEnvelope(emitToBuf, &eb, ALGO_NONE, STREAM_KIND_RDB) == -1);
-    TEST_ASSERT_MESSAGE("ALGO_LZF rejected", writeVkcsEnvelope(emitToBuf, &eb, ALGO_LZF, STREAM_KIND_RDB) == -1);
+    TEST_ASSERT_MESSAGE("ALGO_NONE rejected", writeVkcsEnvelope(emitToBuf, &eb, ALGO_NONE, STREAM_KIND_RDB, 0) == -1);
+    TEST_ASSERT_MESSAGE("ALGO_LZF rejected", writeVkcsEnvelope(emitToBuf, &eb, ALGO_LZF, STREAM_KIND_RDB, 0) == -1);
     return 0;
 }
 
@@ -142,14 +195,14 @@ int test_envelopeRejectsTruncated(int argc, char **argv, int flags) {
     UNUSED(flags);
 
     emit_buf_t eb = {.pos = 0};
-    int wret = writeVkcsEnvelope(emitToBuf, &eb, ALGO_LZ4, STREAM_KIND_RDB);
+    int wret = writeVkcsEnvelope(emitToBuf, &eb, ALGO_LZ4, STREAM_KIND_RDB, 0);
     TEST_ASSERT_MESSAGE("write must succeed", wret == 0);
 
     /* Every length < 8 must fail */
     for (size_t l = 0; l < VKCS_ENVELOPE_SIZE; l++) {
         compression_algo_t a;
         uint8_t k;
-        int ret = readVkcsEnvelope(eb.buf, l, &a, &k);
+        int ret = readVkcsEnvelope(eb.buf, l, &a, &k, NULL);
         TEST_ASSERT_MESSAGE("truncated envelope must be rejected", ret == -1);
     }
     return 0;
@@ -162,7 +215,7 @@ int test_envelopeRejectsBadMagic(int argc, char **argv, int flags) {
     UNUSED(flags);
 
     emit_buf_t eb = {.pos = 0};
-    int wret = writeVkcsEnvelope(emitToBuf, &eb, ALGO_LZ4, STREAM_KIND_RDB);
+    int wret = writeVkcsEnvelope(emitToBuf, &eb, ALGO_LZ4, STREAM_KIND_RDB, 0);
     TEST_ASSERT_MESSAGE("write must succeed", wret == 0);
 
     /* Flip each magic byte and verify rejection */
@@ -171,7 +224,7 @@ int test_envelopeRejectsBadMagic(int argc, char **argv, int flags) {
         eb.buf[i] = ~orig;
         compression_algo_t a;
         uint8_t k;
-        int ret = readVkcsEnvelope(eb.buf, eb.pos, &a, &k);
+        int ret = readVkcsEnvelope(eb.buf, eb.pos, &a, &k, NULL);
         TEST_ASSERT_MESSAGE("bad magic must be rejected", ret == -1);
         eb.buf[i] = orig;
     }
@@ -185,16 +238,16 @@ int test_envelopeRejectsReservedBits(int argc, char **argv, int flags) {
     UNUSED(flags);
 
     emit_buf_t eb = {.pos = 0};
-    int wret = writeVkcsEnvelope(emitToBuf, &eb, ALGO_LZ4, STREAM_KIND_RDB);
+    int wret = writeVkcsEnvelope(emitToBuf, &eb, ALGO_LZ4, STREAM_KIND_RDB, 0);
     TEST_ASSERT_MESSAGE("write must succeed", wret == 0);
 
-    /* Setting any reserved flag bit (1-7) must cause rejection */
-    for (int bit = 1; bit < 8; bit++) {
+    /* Setting any reserved flag bit (2-7) must cause rejection */
+    for (int bit = 2; bit < 8; bit++) {
         uint8_t orig = eb.buf[6];
         eb.buf[6] = orig | (1 << bit);
         compression_algo_t a;
         uint8_t k;
-        int ret = readVkcsEnvelope(eb.buf, eb.pos, &a, &k);
+        int ret = readVkcsEnvelope(eb.buf, eb.pos, &a, &k, NULL);
         TEST_ASSERT_MESSAGE("reserved flag bits must be rejected", ret == -1);
         eb.buf[6] = orig;
     }
@@ -204,7 +257,7 @@ int test_envelopeRejectsReservedBits(int argc, char **argv, int flags) {
         eb.buf[7] = (uint8_t)val;
         compression_algo_t a;
         uint8_t k;
-        int ret = readVkcsEnvelope(eb.buf, eb.pos, &a, &k);
+        int ret = readVkcsEnvelope(eb.buf, eb.pos, &a, &k, NULL);
         TEST_ASSERT_MESSAGE("non-zero reserved byte must be rejected", ret == -1);
     }
     eb.buf[7] = 0;
@@ -231,7 +284,7 @@ int test_envelopeBitFlipFuzz(int argc, char **argv, int flags) {
         uint8_t kind = kinds[random() % 2];
 
         emit_buf_t eb = {.pos = 0};
-        int wret = writeVkcsEnvelope(emitToBuf, &eb, algo, kind);
+        int wret = writeVkcsEnvelope(emitToBuf, &eb, algo, kind, 0);
         TEST_ASSERT_MESSAGE("write must succeed", wret == 0);
         TEST_ASSERT_MESSAGE("size must be 8", eb.pos == VKCS_ENVELOPE_SIZE);
 
@@ -244,7 +297,7 @@ int test_envelopeBitFlipFuzz(int argc, char **argv, int flags) {
         /* Most flips should cause rejection; some may land on don't-care
          * bits and still parse. When parse succeeds, validate the returned
          * values are valid enum members. */
-        int ret = readVkcsEnvelope(eb.buf, eb.pos, &got_algo, &got_kind);
+        int ret = readVkcsEnvelope(eb.buf, eb.pos, &got_algo, &got_kind, NULL);
         if (ret == 0) {
             TEST_ASSERT_MESSAGE("parsed algo must be LZ4", got_algo == ALGO_LZ4);
             TEST_ASSERT_MESSAGE("parsed kind must be RDB or REPL",
@@ -267,7 +320,7 @@ int test_envelopeEmitFailure(int argc, char **argv, int flags) {
     UNUSED(argv);
     UNUSED(flags);
 
-    int ret = writeVkcsEnvelope(emitAlwaysFail, NULL, ALGO_LZ4, STREAM_KIND_RDB);
+    int ret = writeVkcsEnvelope(emitAlwaysFail, NULL, ALGO_LZ4, STREAM_KIND_RDB, 0);
     TEST_ASSERT_MESSAGE("writeVkcsEnvelope must propagate emit_cb failure", ret == -1);
     return 0;
 }
@@ -437,7 +490,9 @@ int test_streamDecompressFeedErrors(int argc, char **argv, int flags) {
     UNUSED(argv);
     UNUSED(flags);
 
+    const char *payload = "decompress sticky error";
     uint8_t buf[64];
+    uint8_t out[128];
     size_t consumed = 0;
 
     /* NULL decompressor */
@@ -451,11 +506,34 @@ int test_streamDecompressFeedErrors(int argc, char **argv, int flags) {
     TEST_ASSERT_MESSAGE("NULL input_consumed should return -1",
                         streamDecompressFeed(&sd, buf, sizeof(buf),
                                              (const uint8_t *)"x", 1, NULL) == -1);
+    TEST_ASSERT_MESSAGE("decompressor should not be errored by NULL bookkeeping arg",
+                        sd.errored == false);
 
     /* Zero output capacity should return -1 (no-progress prevention) */
     TEST_ASSERT_MESSAGE("zero output capacity should return -1",
                         streamDecompressFeed(&sd, buf, 0,
                                              (const uint8_t *)"x", 1, &consumed) == -1);
+    TEST_ASSERT_MESSAGE("decompressor should enter sticky errored state",
+                        sd.errored == true);
+
+    /* Once errored, all subsequent feeds fail immediately. */
+    stream_compressor_t sc;
+    TEST_ASSERT(streamCompressorInit(&sc, ALGO_LZ4, 0) == 0);
+    size_t bound = streamCompressOutputBound(ALGO_LZ4, strlen(payload), 0, FLUSH_END);
+    uint8_t *compressed = zmalloc(bound);
+    TEST_ASSERT(compressed != NULL);
+    uint8_t *out_ptr = compressed;
+    ssize_t compressed_len = streamCompressFeed(&sc, &out_ptr, bound,
+                                                (const uint8_t *)payload, strlen(payload),
+                                                FLUSH_END);
+    TEST_ASSERT(compressed_len > 0);
+    streamCompressorDestroy(&sc);
+
+    TEST_ASSERT_MESSAGE("errored decompressor should fail even with valid input",
+                        streamDecompressFeed(&sd, out, sizeof(out),
+                                             compressed, (size_t)compressed_len,
+                                             &consumed) == -1);
+    zfree(compressed);
 
     streamDecompressorDestroy(&sd);
     return 0;
@@ -529,11 +607,112 @@ int test_streamCompressFeedErrorRecovery(int argc, char **argv, int flags) {
     return 0;
 }
 
+/* --- Test: stream_reader passes through truncated non-VKCS input. --- */
+int test_streamReaderTruncatedPassthrough(int argc, char **argv, int flags) {
+    UNUSED(argc);
+    UNUSED(argv);
+    UNUSED(flags);
+
+    const uint8_t input[] = {'H', 'E', 'L', 'L', 'O'};
+    mem_reader_t mr = {.data = input, .len = sizeof(input), .pos = 0, .max_chunk = 2};
+    stream_reader_config_t cfg = {
+        .algo = ALGO_NONE,
+        .expected_stream_kind = STREAM_KIND_ANY,
+        .raw_frame = 0,
+        .allow_passthrough = 1,
+        .batch_size = 0,
+    };
+
+    stream_reader_t *t = stream_reader_create(&cfg, memReaderRead, &mr);
+    TEST_ASSERT_MESSAGE("stream_reader_create should succeed", t != NULL);
+
+    stream_reader_info_t info;
+    TEST_ASSERT_MESSAGE("stream_reader_get_info should succeed", stream_reader_get_info(t, &info) == 0);
+    TEST_ASSERT_MESSAGE("truncated input should be treated as passthrough", info.compressed == 0);
+
+    uint8_t out[16];
+    size_t out_len = 0;
+    while (out_len < sizeof(input)) {
+        ssize_t n = stream_reader_read(t, out + out_len, sizeof(out) - out_len);
+        TEST_ASSERT_MESSAGE("stream_reader_read should produce bytes", n > 0);
+        out_len += (size_t)n;
+    }
+    TEST_ASSERT_MESSAGE("passthrough bytes should match",
+                        out_len == sizeof(input) &&
+                            memcmp(out, input, sizeof(input)) == 0);
+    TEST_ASSERT_MESSAGE("stream_reader_read should return EOF after payload",
+                        stream_reader_read(t, out, sizeof(out)) == 0);
+
+    stream_reader_destroy(t);
+    return 0;
+}
+
+/* --- Test: stream_reader rejects malformed VKCS envelope. --- */
+int test_streamReaderRejectsInvalidVkcs(int argc, char **argv, int flags) {
+    UNUSED(argc);
+    UNUSED(argv);
+    UNUSED(flags);
+
+    /* Valid magic + invalid version (0) */
+    const uint8_t input[VKCS_ENVELOPE_SIZE] = {
+        VKCS_MAGIC_0, VKCS_MAGIC_1, VKCS_MAGIC_2, VKCS_MAGIC_3,
+        0, ALGO_LZ4, STREAM_KIND_RDB, 0};
+    mem_reader_t mr = {.data = input, .len = sizeof(input), .pos = 0, .max_chunk = 0};
+    stream_reader_config_t cfg = {
+        .algo = ALGO_NONE,
+        .expected_stream_kind = STREAM_KIND_ANY,
+        .raw_frame = 0,
+        .allow_passthrough = 1,
+        .batch_size = 0,
+    };
+
+    stream_reader_t *t = stream_reader_create(&cfg, memReaderRead, &mr);
+    TEST_ASSERT_MESSAGE("stream_reader_create should succeed", t != NULL);
+
+    TEST_ASSERT_MESSAGE("stream_reader_probe should fail on malformed VKCS",
+                        stream_reader_probe(t) == -1);
+    stream_reader_info_t info;
+    TEST_ASSERT_MESSAGE("stream_reader_get_info should fail after malformed VKCS",
+                        stream_reader_get_info(t, &info) == -1);
+
+    stream_reader_destroy(t);
+    return 0;
+}
+
+/* --- Test: stream_reader rejects non-VKCS input when passthrough is disabled. --- */
+int test_streamReaderRejectsNonVkcsWhenPassthroughDisabled(int argc, char **argv, int flags) {
+    UNUSED(argc);
+    UNUSED(argv);
+    UNUSED(flags);
+
+    const uint8_t input[VKCS_ENVELOPE_SIZE] = {'R', 'E', 'D', 'I', 'S', '0', '0', '1'};
+    mem_reader_t mr = {.data = input, .len = sizeof(input), .pos = 0, .max_chunk = 0};
+    stream_reader_config_t cfg = {
+        .algo = ALGO_NONE,
+        .expected_stream_kind = STREAM_KIND_RDB,
+        .raw_frame = 0,
+        .allow_passthrough = 0,
+        .batch_size = 0,
+    };
+
+    stream_reader_t *t = stream_reader_create(&cfg, memReaderRead, &mr);
+    TEST_ASSERT_MESSAGE("stream_reader_create should succeed", t != NULL);
+
+    TEST_ASSERT_MESSAGE("stream_reader_probe should reject non-VKCS when passthrough disabled",
+                        stream_reader_probe(t) == -1);
+    TEST_ASSERT_MESSAGE("stream_reader_read should fail after probe error",
+                        stream_reader_read(t, (uint8_t[8]){0}, 8) == -1);
+
+    stream_reader_destroy(t);
+    return 0;
+}
+
 /* ===================================================================
  * Tests for stream writer API and rio decorators (Tasks 3.1-3.6)
  * =================================================================== */
 
 #include "../compression_rio.h"
+void rdbLoadProgressCallback(rio *r, const void *buf, size_t len);
 
 /* --- Emit callback that appends to a dynamically growing buffer --- */
 typedef struct {
@@ -566,6 +745,78 @@ static int emitToDynamicBuf(void *ctx, const uint8_t *data, size_t len) {
     return 0;
 }
 
+static int initRawLz4DecompressRio(decompress_rio_t *dr, rio *inner) {
+    stream_reader_config_t cfg = {
+        .algo = ALGO_LZ4,
+        .expected_stream_kind = STREAM_KIND_ANY,
+        .raw_frame = 1,
+        .allow_passthrough = 0,
+        .batch_size = 0,
+    };
+    return decompress_rio_init_with_config(dr, inner, &cfg);
+}
+
+/* --- Test: stream_reader marks errored on partial output + read error.
+ * Regression for direct-path error accounting (partial bytes were returned
+ * without sticky errored state). */
+int test_streamReaderPartialThenErrorSetsErrored(int argc, char **argv, int flags) {
+    UNUSED(argc);
+    UNUSED(argv);
+    UNUSED(flags);
+
+    const size_t payload_len = 256 * 1024;
+    uint8_t *payload = zmalloc(payload_len);
+    uint32_t x = 0x12345678u;
+    for (size_t i = 0; i < payload_len; i++) {
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        payload[i] = (uint8_t)(x & 0xFF);
+    }
+
+    dynamic_buf_t db;
+    dynamicBufInit(&db);
+    stream_writer_config_t wcfg = {
+        .algo = ALGO_LZ4,
+        .level = 0,
+        .stream_kind = STREAM_KIND_RDB,
+    };
+    stream_writer_t *w = stream_writer_create(&wcfg, emitToDynamicBuf, &db);
+    TEST_ASSERT_MESSAGE("stream_writer_create should succeed", w != NULL);
+    TEST_ASSERT(stream_writer_write(w, payload, payload_len) == 0);
+    TEST_ASSERT(stream_writer_finish(w) == 0);
+    stream_writer_destroy(w);
+
+    flaky_reader_t fr = {
+        .data = db.data,
+        .len = db.len,
+        .pos = 0,
+        .max_chunk = 4096,
+        .fail_after_success_reads = 2, /* probe + one payload read, then error */
+        .success_reads = 0,
+    };
+    stream_reader_config_t rcfg = {
+        .algo = ALGO_NONE,
+        .expected_stream_kind = STREAM_KIND_RDB,
+        .raw_frame = 0,
+        .allow_passthrough = 0,
+        .batch_size = 64 * 1024,
+    };
+    stream_reader_t *r = stream_reader_create(&rcfg, flakyReaderRead, &fr);
+    TEST_ASSERT_MESSAGE("stream_reader_create should succeed", r != NULL);
+
+    uint8_t out[128 * 1024];
+    ssize_t n1 = stream_reader_read(r, out, sizeof(out));
+    TEST_ASSERT_MESSAGE("first read should return partial output", n1 > 0);
+    TEST_ASSERT_MESSAGE("second read should fail immediately",
+                        stream_reader_read(r, out, sizeof(out)) == -1);
+
+    stream_reader_destroy(r);
+    dynamicBufFree(&db);
+    zfree(payload);
+    return 0;
+}
+
 /* --- Test: stream_writer_create/destroy (Task 3.1) --- */
 int test_streamWriterCreateDestroy(int argc, char **argv, int flags) {
     UNUSED(argc);
@@ -579,7 +830,6 @@ int test_streamWriterCreateDestroy(int argc, char **argv, int flags) {
     stream_writer_t *t = stream_writer_create(&cfg, emitToDynamicBuf, &db);
     TEST_ASSERT_MESSAGE("create should succeed for LZ4", t != NULL);
     TEST_ASSERT_MESSAGE("should not be errored", stream_writer_is_errored(t) == 0);
-    TEST_ASSERT_MESSAGE("should not be finished", stream_writer_is_finished(t) == 0);
 
     stream_writer_destroy(t);
     dynamicBufFree(&db);
@@ -795,25 +1045,23 @@ int test_streamWriterRawFrameRoundTrip(int argc, char **argv, int flags) {
 
 static int lz4FrameIntegrityChecksumFlagFromBlob(const uint8_t *data, size_t len, int *has_checksum) {
     if (!data || !has_checksum) return -1;
-    FILE *fp = tmpfile();
-    if (!fp) return -1;
-    if (fwrite(data, 1, len, fp) != len) {
-        fclose(fp);
-        return -1;
-    }
-    fflush(fp);
-    if (fseeko(fp, 0, SEEK_SET) != 0) {
-        fclose(fp);
-        return -1;
-    }
-    int fd = fileno(fp);
-    off_t frame_offset = ftello(fp);
-    int rc = -1;
-    if (fd != -1 && frame_offset != (off_t)-1) {
-        rc = compressionFrameHasIntegrityChecksum(ALGO_LZ4, fd, frame_offset, has_checksum);
-    }
-    fclose(fp);
-    return rc;
+    if (len < 7) return -1;
+
+    uint32_t magic = ((uint32_t)data[0]) |
+                     ((uint32_t)data[1] << 8) |
+                     ((uint32_t)data[2] << 16) |
+                     ((uint32_t)data[3] << 24);
+    if (magic != 0x184D2204U) return -1;
+
+    uint8_t flg = data[4];
+    size_t header_len = 7;                /* magic + FLG + BD + HC */
+    if (flg & (1u << 3)) header_len += 8; /* content size */
+    if (flg & 1u) header_len += 4;        /* dict ID */
+    if (len < header_len) return -1;
+
+    *has_checksum = ((flg & (1u << 4)) != 0) || /* FLG bit 4 */
+                    ((flg & (1u << 2)) != 0);   /* FLG bit 2 */
+    return 0;
 }
 
 /* --- Test: block_checksum config toggles integrity flag in LZ4 frame. --- */
@@ -826,29 +1074,49 @@ int test_streamWriterContentChecksumToggle(int argc, char **argv, int flags) {
     size_t payload_len = strlen(payload);
 
     for (int checksum_on = 0; checksum_on <= 1; checksum_on++) {
-        dynamic_buf_t db;
-        dynamicBufInit(&db);
+        dynamic_buf_t raw_db;
+        dynamicBufInit(&raw_db);
 
-        stream_writer_config_t cfg = {
+        stream_writer_config_t raw_cfg = {
             .algo = ALGO_LZ4,
             .level = 0,
             .stream_kind = STREAM_KIND_RDB,
             .raw_frame = 1, /* make frame start at byte 0 for parser helper */
             .block_checksum = checksum_on,
         };
-        stream_writer_t *t = stream_writer_create(&cfg, emitToDynamicBuf, &db);
+        stream_writer_t *t = stream_writer_create(&raw_cfg, emitToDynamicBuf, &raw_db);
         TEST_ASSERT(t != NULL);
         TEST_ASSERT(stream_writer_write(t, payload, payload_len) == 0);
         TEST_ASSERT(stream_writer_finish(t) == 0);
 
         int has_checksum = -1;
         TEST_ASSERT_MESSAGE("frame parser should succeed",
-                            lz4FrameIntegrityChecksumFlagFromBlob(db.data, db.len, &has_checksum) == 0);
+                            lz4FrameIntegrityChecksumFlagFromBlob(raw_db.data, raw_db.len, &has_checksum) == 0);
         TEST_ASSERT_MESSAGE("frame integrity checksum flag should match config",
                             has_checksum == checksum_on);
 
         stream_writer_destroy(t);
-        dynamicBufFree(&db);
+        dynamicBufFree(&raw_db);
+
+        dynamic_buf_t env_db;
+        dynamicBufInit(&env_db);
+        stream_writer_config_t env_cfg = {
+            .algo = ALGO_LZ4,
+            .level = 0,
+            .stream_kind = STREAM_KIND_RDB,
+            .raw_frame = 0,
+            .block_checksum = checksum_on,
+        };
+        stream_writer_t *env_t = stream_writer_create(&env_cfg, emitToDynamicBuf, &env_db);
+        TEST_ASSERT(env_t != NULL);
+        TEST_ASSERT(stream_writer_write(env_t, payload, payload_len) == 0);
+        TEST_ASSERT(stream_writer_finish(env_t) == 0);
+        TEST_ASSERT(env_db.len > VKCS_ENVELOPE_SIZE);
+        int envelope_checksum = (env_db.data[6] & VKCS_FLAG_CODEC_CHECKSUM) != 0;
+        TEST_ASSERT_MESSAGE("VKCS checksum flag should match config",
+                            envelope_checksum == checksum_on);
+        stream_writer_destroy(env_t);
+        dynamicBufFree(&env_db);
     }
 
     return 0;
@@ -955,7 +1223,7 @@ int test_decompressRioRoundTrip(int argc, char **argv, int flags) {
 
     /* Create decompress rio */
     decompress_rio_t dr;
-    decompress_rio_init(&dr, &buffer_rio, ALGO_LZ4);
+    TEST_ASSERT(initRawLz4DecompressRio(&dr, &buffer_rio) == 0);
 
     /* Read decompressed data */
     char result[256];
@@ -971,37 +1239,40 @@ int test_decompressRioRoundTrip(int argc, char **argv, int flags) {
     return 0;
 }
 
-/* --- Test: prefix_replay_rio_t (Task 3.6) --- */
+/* --- Test: passthrough stream mode (non-VKCS input) --- */
 int test_prefixReplayRio(int argc, char **argv, int flags) {
     UNUSED(argc);
     UNUSED(argv);
     UNUSED(flags);
 
-    /* Create a buffer rio with some data */
-    const char *remaining = "remaining data after prefix";
-    sds buf = sdsnewlen(remaining, strlen(remaining));
+    const char *payload = "REDIS001remaining data after prefix";
+    size_t payload_len = strlen(payload);
+    sds buf = sdsnewlen(payload, payload_len);
     rio buffer_rio;
     rioInitWithBuffer(&buffer_rio, buf);
 
-    /* Create prefix replay rio with a prefix */
-    const char *prefix = "REDIS001";
-    prefix_replay_rio_t pr;
-    prefix_replay_rio_init(&pr, &buffer_rio, prefix, 8);
+    stream_reader_config_t cfg = {
+        .algo = ALGO_NONE,
+        .expected_stream_kind = STREAM_KIND_ANY,
+        .raw_frame = 0,
+        .allow_passthrough = 1,
+        .batch_size = 0,
+    };
+    decompress_rio_t dr;
+    TEST_ASSERT(decompress_rio_init_with_config(&dr, &buffer_rio, &cfg) == 0);
 
-    /* Read should serve prefix first, then inner rio data */
+    stream_reader_info_t info;
+    TEST_ASSERT(decompress_rio_get_info(&dr, &info) == 0);
+    TEST_ASSERT_MESSAGE("passthrough stream should not be compressed", info.compressed == 0);
+
     char result[64];
     memset(result, 0, sizeof(result));
-    size_t total_len = 8 + strlen(remaining);
     TEST_ASSERT_MESSAGE("rioRead should succeed",
-                        rioRead((rio *)&pr, result, total_len) != 0);
+                        rioRead((rio *)&dr, result, payload_len) != 0);
+    TEST_ASSERT_MESSAGE("payload should be replayed exactly",
+                        memcmp(result, payload, payload_len) == 0);
 
-    /* Verify prefix bytes */
-    TEST_ASSERT_MESSAGE("prefix should match",
-                        memcmp(result, prefix, 8) == 0);
-    /* Verify remaining data */
-    TEST_ASSERT_MESSAGE("remaining data should match",
-                        memcmp(result + 8, remaining, strlen(remaining)) == 0);
-
+    decompress_rio_destroy(&dr);
     sdsfree(buf);
     return 0;
 }
@@ -1100,6 +1371,33 @@ int test_compressRioFlushMidStream(int argc, char **argv, int flags) {
     return 0;
 }
 
+/* --- Test: rdbLoadProgressCallback does not cast write-side streaming rios
+ * to decompress_rio_t. This protects save/async paths that also use
+ * RIO_FLAG_STREAMING_COMPRESSION. --- */
+int test_rdbLoadProgressCallbackStreamingGuard(int argc, char **argv, int flags) {
+    UNUSED(argc);
+    UNUSED(argv);
+    UNUSED(flags);
+
+    sds buf = sdsempty();
+    rio inner;
+    rioInitWithBuffer(&inner, buf);
+
+    stream_writer_config_t cfg = {.algo = ALGO_LZ4, .level = 0, .stream_kind = STREAM_KIND_RDB};
+    compress_rio_t cr;
+    TEST_ASSERT(rioInitWithCompress(&cr, &inner, &cfg) == 0);
+
+    const char sample[] = "progress-guard";
+    rdbLoadProgressCallback((rio *)&cr, sample, sizeof(sample) - 1);
+
+    TEST_ASSERT_MESSAGE("write-side streaming rio must not set read error",
+                        (cr.base.flags & RIO_FLAG_READ_ERROR) == 0);
+
+    compress_rio_destroy(&cr);
+    sdsfree(inner.io.buffer.ptr);
+    return 0;
+}
+
 /* --- Test: decompress_rio with large payload (>64KB) exercises partial
  * consume in the large-chunk read path. Before the fix, unconsumed
  * compressed bytes were dropped between iterations, causing false EOF
@@ -1141,7 +1439,7 @@ int test_decompressRioLargePayload(int argc, char **argv, int flags) {
     rioInitWithBuffer(&buffer_rio, comp_sds);
 
     decompress_rio_t dr;
-    decompress_rio_init(&dr, &buffer_rio, ALGO_LZ4);
+    TEST_ASSERT(initRawLz4DecompressRio(&dr, &buffer_rio) == 0);
 
     /* Read in small chunks (4KB) to force multiple iterations through
      * the decompression state machine. */
@@ -1203,7 +1501,7 @@ int test_decompressRioDirectPath(int argc, char **argv, int flags) {
     rioInitWithBuffer(&buffer_rio, comp_sds);
 
     decompress_rio_t dr;
-    decompress_rio_init(&dr, &buffer_rio, ALGO_LZ4);
+    TEST_ASSERT(initRawLz4DecompressRio(&dr, &buffer_rio) == 0);
 
     uint8_t *result = zmalloc(payload_len);
     size_t ret = rioRead((rio *)&dr, result, payload_len);
@@ -1319,7 +1617,7 @@ int test_independentStreamsCoexist(int argc, char **argv, int flags) {
         rioInitWithBuffer(&buf_rio, comp);
 
         decompress_rio_t dr;
-        decompress_rio_init(&dr, &buf_rio, ALGO_LZ4);
+        TEST_ASSERT(initRawLz4DecompressRio(&dr, &buf_rio) == 0);
 
         char result[256];
         memset(result, 0, sizeof(result));

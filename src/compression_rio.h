@@ -22,41 +22,18 @@ typedef struct {
 typedef struct {
     rio base; /* Must be first */
     rio *inner;
-    stream_decompressor_t decompressor;
-    uint8_t *read_buf;
-    size_t read_buf_size;
-    size_t read_buf_pos;  /* Start offset of valid data in read_buf */
-    size_t read_buf_fill; /* Bytes of valid compressed data in read_buf
-                           * starting at read_buf_pos. */
-    uint8_t *decomp_buf;
-    size_t decomp_buf_size;
-    size_t decomp_buf_pos;
-    size_t decomp_buf_len;
+    stream_reader_t *reader;
 } decompress_rio_t;
-
-/* --- Prefix-replay rio decorator (format detection) --- */
-typedef struct {
-    rio base; /* Must be first */
-    rio *inner;
-    char prefix[8];
-    size_t prefix_len;
-    size_t prefix_pos;
-} prefix_replay_rio_t;
 
 /* --- Rio Decorator API --- */
 int rioInitWithCompress(compress_rio_t *cr, rio *inner, const stream_writer_config_t *cfg);
 int compress_rio_finish(compress_rio_t *cr);
 void compress_rio_destroy(compress_rio_t *cr);
 
-void decompress_rio_init(decompress_rio_t *dr, rio *inner, compression_algo_t algo);
+/* Initialize with explicit reader config (auto-detect or raw frame). */
+int decompress_rio_init_with_config(decompress_rio_t *dr, rio *inner, const stream_reader_config_t *cfg);
+/* Retrieve probed stream metadata (compressed/algo/kind). */
+int decompress_rio_get_info(decompress_rio_t *dr, stream_reader_info_t *info);
 void decompress_rio_destroy(decompress_rio_t *dr);
-
-void prefix_replay_rio_init(prefix_replay_rio_t *pr, rio *inner, const char *prefix, size_t prefix_len);
-
-/* --- Stream Format Detection --- */
-int vkcsDetectFormat(rio *inner,
-                     uint8_t *header_out,
-                     compression_algo_t *algo_out,
-                     uint8_t *stream_kind_out);
 
 #endif /* COMPRESSION_RIO_H */

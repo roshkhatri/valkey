@@ -26,9 +26,12 @@ typedef enum {
 #define VKCS_MAGIC_3 0x53 /* 'S' */
 #define VKCS_ENVELOPE_SIZE 8
 #define VKCS_VERSION 1
+#define VKCS_FLAG_STREAM_KIND 0x01
+#define VKCS_FLAG_CODEC_CHECKSUM 0x02
 
 #define STREAM_KIND_RDB 0x00
 #define STREAM_KIND_REPL 0x01
+#define STREAM_KIND_ANY 0xFF
 
 /* --- Emit callback type --- */
 typedef int (*vkcsEmitFn)(void *ctx, const uint8_t *data, size_t len);
@@ -71,6 +74,9 @@ typedef struct {
     union {
         void *lz4f; /* LZ4F_dctx* */
     } ctx;
+    bool errored; /* Permanently failed — algorithm state is undefined after
+                   * an error. All subsequent streamDecompressFeed calls
+                   * return -1 immediately until reinitialized. */
 } stream_decompressor_t;
 
 /* --- Envelope API --- */
@@ -86,11 +92,17 @@ const char *compressionAlgoName(compression_algo_t algo);
 int writeVkcsEnvelope(vkcsEmitFn emit_cb,
                       void *ctx,
                       compression_algo_t algo,
-                      uint8_t stream_kind);
+                      uint8_t stream_kind,
+                      int codec_checksum_enabled);
 
 /* Parse VKCS envelope from buffer.  Returns 0 on success, -1 on error.
- * On success, *algo and *stream_kind are populated. */
-int readVkcsEnvelope(const uint8_t *buf, size_t len, compression_algo_t *algo, uint8_t *stream_kind);
+ * On success, *algo, *stream_kind, and *codec_checksum_enabled are populated
+ * when corresponding pointers are non-NULL. */
+int readVkcsEnvelope(const uint8_t *buf,
+                     size_t len,
+                     compression_algo_t *algo,
+                     uint8_t *stream_kind,
+                     int *codec_checksum_enabled);
 
 /* --- Streaming compression API --- */
 
@@ -119,18 +131,13 @@ ssize_t streamCompressFeed(stream_compressor_t *sc,
 
 /* Feed compressed data through streaming decompressor.
  * Returns bytes written to output, 0 for no output, -1 on error.
- * *input_consumed is set to the number of compressed bytes consumed. */
+ * *input_consumed is set to the number of compressed bytes consumed.
+ * Fatal errors latch stream_decompressor_t.errored until reinit. */
 ssize_t streamDecompressFeed(stream_decompressor_t *sd,
                              uint8_t *output,
                              size_t output_capacity,
                              const uint8_t *input,
                              size_t input_len,
                              size_t *input_consumed);
-
-/* Parse codec frame flags at file offset `frame_offset` (frame start)
- * without changing stream state. On success, sets *has_checksum to 1 when
- * integrity checksums are enabled for the frame, else 0.
- * Returns 0 on success, -1 when unsupported/invalid/error. */
-int compressionFrameHasIntegrityChecksum(compression_algo_t algo, int fd, off_t frame_offset, int *has_checksum);
 
 #endif /* COMPRESSION_H */

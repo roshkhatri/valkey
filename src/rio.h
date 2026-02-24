@@ -43,6 +43,7 @@
 #define RIO_FLAG_SKIP_RDB_CHECKSUM (1 << 3)
 #define RIO_FLAG_STREAMING_COMPRESSION (1 << 4)    /* Streaming compression active — skip per-string LZF */
 #define RIO_FLAG_STREAMING_CODEC_CHECKSUM (1 << 5) /* Streaming frame has integrity checksums enabled */
+#define RIO_FLAG_STREAMING_DECOMPRESSION (1 << 6)  /* rio is a stream decompression adapter */
 
 #define RIO_TYPE_FILE (1 << 0)
 #define RIO_TYPE_BUFFER (1 << 1)
