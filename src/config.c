@@ -3319,6 +3319,7 @@ standardConfig static_configs[] = {
     createEnumConfig("rdb-compression-algo", NULL, MODIFIABLE_CONFIG, rdb_compression_algo_enum, server.rdb_compression_algo, ALGO_LZF, NULL, NULL),
 
     /* Integer configs */
+    createIntConfig("rdb-streaming-compression-level", NULL, MODIFIABLE_CONFIG, -1000, 22, server.rdb_streaming_compression_level, -5, INTEGER_CONFIG, NULL, NULL),
     createIntConfig("databases", NULL, IMMUTABLE_CONFIG, 1, INT_MAX, server.config_databases, 16, INTEGER_CONFIG, NULL, NULL),
     createIntConfig("cluster-databases", NULL, IMMUTABLE_CONFIG, 1, INT_MAX, server.config_databases_cluster, 1, INTEGER_CONFIG, NULL, NULL),
     createIntConfig("port", NULL, MODIFIABLE_CONFIG, 0, 65535, server.port, 6379, INTEGER_CONFIG, NULL, updatePort),                                               /* TCP port. */

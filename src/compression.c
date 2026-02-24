@@ -11,6 +11,24 @@
 #include <limits.h>
 #include <lz4frame.h>
 #include <string.h>
+#include <unistd.h>
+
+int compressionAlgoSupportsStreaming(compression_algo_t algo) {
+    return algo == ALGO_LZ4;
+}
+
+const char *compressionAlgoName(compression_algo_t algo) {
+    switch (algo) {
+    case ALGO_NONE:
+        return "none";
+    case ALGO_LZF:
+        return "lzf";
+    case ALGO_LZ4:
+        return "lz4";
+    default:
+        return "unknown";
+    }
+}
 
 /* --- Envelope --- */
 
@@ -32,7 +50,7 @@ int writeVkcsEnvelope(vkcsEmitFn emit_cb,
                       uint8_t stream_kind) {
     /* Only streaming algorithms are valid in the envelope. */
     if (!emit_cb) return -1;
-    if (algo != ALGO_LZ4) return -1;
+    if (!compressionAlgoSupportsStreaming(algo)) return -1;
     if (stream_kind != STREAM_KIND_RDB && stream_kind != STREAM_KIND_REPL) return -1;
 
     uint8_t envelope[VKCS_ENVELOPE_SIZE];
@@ -70,7 +88,7 @@ int readVkcsEnvelope(const uint8_t *buf, size_t len, compression_algo_t *algo, u
 
     /* Extract and validate algorithm */
     uint8_t algo_id = buf[5];
-    if (algo_id != ALGO_LZ4) return -1;
+    if (!compressionAlgoSupportsStreaming((compression_algo_t)algo_id)) return -1;
 
     /* Reject envelopes with reserved bits/bytes set (strict reader pattern) */
     uint8_t flags = buf[6];
@@ -94,7 +112,7 @@ int streamCompressorInit(stream_compressor_t *sc, compression_algo_t algo, int l
     if (!sc) return -1;
     memset(sc, 0, sizeof(*sc));
 
-    if (algo != ALGO_LZ4) return -1; /* Not yet implemented for other codecs */
+    if (!compressionAlgoSupportsStreaming(algo)) return -1;
 
     LZ4F_cctx *cctx = NULL;
     LZ4F_errorCode_t err = LZ4F_createCompressionContext(&cctx, LZ4F_VERSION);
@@ -126,7 +144,7 @@ int streamDecompressorInit(stream_decompressor_t *sd, compression_algo_t algo) {
     if (!sd) return -1;
     memset(sd, 0, sizeof(*sd));
 
-    if (algo != ALGO_LZ4) return -1; /* Not yet implemented for other codecs */
+    if (!compressionAlgoSupportsStreaming(algo)) return -1;
 
     LZ4F_dctx *dctx = NULL;
     LZ4F_errorCode_t err = LZ4F_createDecompressionContext(&dctx, LZ4F_VERSION);
@@ -150,19 +168,17 @@ void streamDecompressorDestroy(stream_decompressor_t *sd) {
 }
 
 /* Shared LZ4F preferences template.
- * - Used by streamCompressOutputBound() for conservative bounds.
+ * - Used by streamCompressOutputBound() for bounds.
  * - Copied and selectively overridden in streamCompressFeed() before
  *   LZ4F_compressBegin() (compression level, checksum mode).
  *
- * Keep this template conservative for bound calculations:
- * block checksums enabled and 64KB blocks. Note that this does NOT force
- * checksums at runtime: streamCompressFeed() overrides blockChecksumFlag from
- * sc->block_checksum per stream. */
+ * Bounds are computed with block checksum enabled (worst-case). */
 static const LZ4F_preferences_t lz4f_prefs = {
     .frameInfo = {
         .blockChecksumFlag = LZ4F_blockChecksumEnabled,
+        .contentChecksumFlag = LZ4F_noContentChecksum,
         .blockSizeID = LZ4F_max64KB,
-        .blockMode = LZ4F_blockIndependent,
+        .blockMode = LZ4F_blockLinked,
     },
     .compressionLevel = 0, /* bound calculation uses 0 (worst-case); actual
                             * compression uses sc->level via a local copy */
@@ -309,6 +325,51 @@ ssize_t streamDecompressFeed(stream_decompressor_t *sd,
         if (dst_size > (size_t)SSIZE_MAX) return -1;
         return (ssize_t)dst_size;
     }
+    default:
+        return -1;
+    }
+}
+
+/* Parse LZ4 frame flags at `frame_offset` (frame start) without
+ * advancing stream state.
+ * Requires a seekable fd (regular file); returns -1 for pipes/sockets.
+ * On success, sets *has_checksum to 1 when an integrity checksum flag is
+ * enabled, else 0. */
+static int lz4FrameHasIntegrityChecksum(int fd, off_t frame_offset, int *has_checksum) {
+    if (fd < 0 || frame_offset < 0 || !has_checksum) return -1;
+
+    unsigned char hdr[19]; /* LZ4 frame header max size */
+    ssize_t nread = pread(fd, hdr, sizeof(hdr), frame_offset);
+    if (nread < 0) return -1;
+
+    size_t n = (size_t)nread;
+    if (n < 7) return -1; /* min LZ4 frame header size */
+
+    uint32_t magic = ((uint32_t)hdr[0]) |
+                     ((uint32_t)hdr[1] << 8) |
+                     ((uint32_t)hdr[2] << 16) |
+                     ((uint32_t)hdr[3] << 24);
+    if (magic != 0x184D2204U) return -1;
+
+    uint8_t flg = hdr[4];
+    size_t header_len = 7;                /* magic + FLG + BD + HC */
+    if (flg & (1u << 3)) header_len += 8; /* content size */
+    if (flg & 1u) header_len += 4;        /* dict ID */
+    if (n < header_len) return -1;
+
+    int has_integrity_checksum = ((flg & (1u << 4)) != 0) || /* FLG bit 4 */
+                                 ((flg & (1u << 2)) != 0);   /* FLG bit 2 */
+    *has_checksum = has_integrity_checksum;
+    return 0;
+}
+
+int compressionFrameHasIntegrityChecksum(compression_algo_t algo, int fd, off_t frame_offset, int *has_checksum) {
+    if (!has_checksum) return -1;
+    *has_checksum = 0;
+
+    switch (algo) {
+    case ALGO_LZ4:
+        return lz4FrameHasIntegrityChecksum(fd, frame_offset, has_checksum);
     default:
         return -1;
     }

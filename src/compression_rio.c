@@ -4,98 +4,17 @@
  * SPDX-License-Identifier: BSD-3-Clause
  */
 
-/* Rio decorators (compress_rio, decompress_rio, prefix_replay_rio) and
- * async compress context for replication compression pipeline. */
+/* Rio decorators (compress_rio, decompress_rio, prefix_replay_rio). */
 
-#include "compression_pipeline.h"
+#include "compression_rio.h"
 #include "zmalloc.h"
 #include <string.h>
 
-/* Shared initializer for sync compression contexts.
- * Used by both heap-allocated sync_compress_ctx_t and embedded
- * compress_rio_t::compressor to keep behavior identical. */
-static int syncCompressInitContext(sync_compress_ctx_t *t,
-                                   const sync_compress_config_t *cfg,
-                                   vkcsEmitFn emit_cb,
-                                   void *emit_ctx,
-                                   int block_checksum) {
-    if (!t || !cfg || !emit_cb) return -1;
-    /* Only LZ4 is supported for now. */
-    if (cfg->algo != ALGO_LZ4) return -1;
-
-    memset(t, 0, sizeof(*t));
-    t->emit_cb = emit_cb;
-    t->emit_ctx = emit_ctx;
-    t->stream_kind = cfg->stream_kind;
-
-    if (streamCompressorInit(&t->compressor, cfg->algo, cfg->level) != 0) {
-        return -1;
-    }
-    t->compressor.block_checksum = block_checksum != 0;
-    return 0;
-}
-
-/* Emit envelope lazily on first write/finish.
- * Returns 0 on success, -1 on error (and sets t->errored). */
-static int syncCompressEnsureEnvelope(sync_compress_ctx_t *t) {
-    if (t->envelope_written) return 0;
-    if (writeVkcsEnvelope(t->emit_cb, t->emit_ctx, t->compressor.algo, t->stream_kind) != 0) {
-        t->errored = 1;
-        return -1;
-    }
-    t->envelope_written = 1;
-    return 0;
-}
-
-/* Emit compressed bytes to the output sink.
- * Returns 0 on success, -1 on error (and sets t->errored). */
-static int syncCompressEmit(sync_compress_ctx_t *t, const uint8_t *buf, size_t len) {
-    if (len == 0) return 0;
-    if (t->emit_cb(t->emit_ctx, buf, len) != 0) {
-        t->errored = 1;
-        return -1;
-    }
-    return 0;
-}
-
-static void syncCompressEnsureOutBuf(sync_compress_ctx_t *t, size_t input_len, compress_flush_mode_t flush_mode);
-
-/* Release stream compressor state owned by sync_compress_ctx_t.
- * Does not free the context object itself. */
-static void syncCompressReleaseContext(sync_compress_ctx_t *t) {
-    if (!t) return;
-    streamCompressorDestroy(&t->compressor);
-    if (t->out_buf) {
-        zfree(t->out_buf);
-        t->out_buf = NULL;
-    }
-    t->out_buf_size = 0;
-}
-
-/* Compress one chunk with the requested flush mode and emit produced bytes.
- * Returns 0 on success, -1 on error (and sets t->errored). */
-static int syncCompressFeedAndEmit(sync_compress_ctx_t *t,
-                                   const uint8_t *input,
-                                   size_t input_len,
-                                   compress_flush_mode_t flush_mode) {
-    syncCompressEnsureOutBuf(t, input_len, flush_mode);
-
-    uint8_t *out_ptr = t->out_buf;
-    ssize_t compressed = streamCompressFeed(&t->compressor, &out_ptr,
-                                            t->out_buf_size,
-                                            input, input_len, flush_mode);
-    if (compressed < 0) {
-        t->errored = 1;
-        return -1;
-    }
-    return syncCompressEmit(t, out_ptr, (size_t)compressed);
-}
-
-/* Flush the wrapped inner rio and map failure to the sync compressor's
+/* Flush the wrapped inner rio and map failure to the stream writer's
  * sticky error state. */
-static int syncCompressFlushInner(sync_compress_ctx_t *t, rio *inner) {
+static int compressRioFlushInner(stream_writer_t *t, rio *inner) {
     if (inner->flush && inner->flush(inner) == 0) {
-        t->errored = 1;
+        stream_writer_set_error(t);
         return -1;
     }
     return 0;
@@ -140,91 +59,16 @@ static void rioInitBase(rio *base,
 }
 
 /* ===================================================================
- * Sync Compress API
- * Used internally by compress_rio_t. Fork-safe by design.
- * =================================================================== */
-
-/* Allocate a sync compress context with a fresh algorithm context.
- * No shared state — each context is independent and fork-safe.
- * Returns NULL on error (bad config, algorithm init failure). */
-sync_compress_ctx_t *sync_compress_create(const sync_compress_config_t *cfg,
-                                          vkcsEmitFn emit_cb,
-                                          void *emit_ctx) {
-    sync_compress_ctx_t *t = zmalloc(sizeof(*t));
-    if (syncCompressInitContext(t, cfg, emit_cb, emit_ctx, 0) != 0) {
-        zfree(t);
-        return NULL;
-    }
-    return t;
-}
-
-/* Destroy a sync compress context, freeing the compressor and buffers.
- * Does NOT finalize the frame — call sync_compress_finish first.
- * Safe to call on NULL. */
-void sync_compress_destroy(sync_compress_ctx_t *t) {
-    if (!t) return;
-    syncCompressReleaseContext(t);
-    zfree(t);
-}
-
-/* Ensure the output buffer is large enough for the given input.
- * Reuses the existing buffer when possible to avoid per-write allocation.
- * zmalloc aborts on OOM, so this cannot fail. */
-static void syncCompressEnsureOutBuf(sync_compress_ctx_t *t, size_t input_len, compress_flush_mode_t flush_mode) {
-    size_t needed = streamCompressOutputBound(t->compressor.algo, input_len,
-                                              t->compressor.frame_started, flush_mode);
-    if (needed == 0) {
-        /* Ensure a minimal valid buffer so streamCompressFeed never gets NULL */
-        if (t->out_buf == NULL) {
-            t->out_buf = zmalloc(64);
-            t->out_buf_size = 64;
-        }
-        return;
-    }
-    if (needed > t->out_buf_size) {
-        t->out_buf = zrealloc(t->out_buf, needed);
-        t->out_buf_size = needed;
-    }
-}
-
-/* Write data through the sync compressor.
- * On first call, emits the VKCS stream envelope before any compressed data.
- * Feeds data through streamCompressFeed with flush_mode=FLUSH_CONTINUE.
- * Emits compressed output via the emit callback.
- * On error, sets the sticky error flag — all subsequent writes fail. */
-void sync_compress_write(sync_compress_ctx_t *t, const void *buf, size_t len) {
-    if (!t || t->errored || t->finished) return;
-    if (len == 0) return;
-
-    /* Emit envelope on first write */
-    if (syncCompressEnsureEnvelope(t) != 0) return;
-    if (syncCompressFeedAndEmit(t, (const uint8_t *)buf, len, FLUSH_CONTINUE) != 0) return;
-}
-
-/* Finalize the compression frame (flush_mode=FLUSH_END).
- * Emits the final compressed output including the frame end mark.
- * After this call, the compressor cannot be used for further writes. */
-void sync_compress_finish(sync_compress_ctx_t *t) {
-    if (!t || t->errored || t->finished) return;
-    t->finished = 1;
-
-    /* If nothing was ever written, emit envelope + empty frame end */
-    if (syncCompressEnsureEnvelope(t) != 0) return;
-    if (syncCompressFeedAndEmit(t, NULL, 0, FLUSH_END) != 0) return;
-}
-
-/* ===================================================================
  * Compression Rio Decorator
  * Wraps an inner rio for transparent compression on write.
  * Used by BGSAVE (fork child) and diskless sync.
  *
- * RDB CHECKSUM SEMANTICS: When streaming compression is active, the
- * RDB CRC64 is NOT computed on uncompressed bytes. Instead, integrity
- * is provided by codec-native frame checksums (for LZ4, block checksums),
- * validated automatically during decompression.
- * The RDB footer CRC64 will be 0, which the loader treats as
- * "checksum disabled". This avoids hashing ~1GB of decompressed data
- * on load.
+ * RDB CHECKSUM SEMANTICS: When streaming compression is active, integrity
+ * may come from either:
+ * - codec-native frame checksums (RIO_FLAG_STREAMING_CODEC_CHECKSUM), or
+ * - the standard RDB CRC64 footer.
+ *
+ * The save/load paths decide which checksum source to use based on flags.
  * =================================================================== */
 
 /* Emit callback for compress_rio: writes compressed bytes to inner rio.
@@ -238,16 +82,15 @@ static int compressRioEmit(void *ctx, const uint8_t *data, size_t len) {
 /* rio vtable: write callback — compress then delegate to inner rio */
 static size_t compressRioWrite(rio *r, const void *buf, size_t len) {
     compress_rio_t *cr = (compress_rio_t *)r;
-    if (cr->finalized || cr->compressor.errored) {
+    if (!cr->compressor || cr->finalized || stream_writer_is_errored(cr->compressor)) {
         r->flags |= RIO_FLAG_WRITE_ERROR;
         return 0;
     }
-    sync_compress_write(&cr->compressor, buf, len);
-    if (cr->compressor.errored) {
+    if (stream_writer_write(cr->compressor, buf, len) != 0) {
         r->flags |= RIO_FLAG_WRITE_ERROR;
         return 0;
     }
-    return len; /* rio write returns 0 on error, non-zero on success */
+    return 1; /* rio write callback contract: 0 on error, non-zero on success */
 }
 
 /* rio vtable: tell callback — returns processed bytes from base */
@@ -260,18 +103,13 @@ static off_t compressRioTell(rio *r) {
  * This is critical because some call sites flush mid-stream. */
 static int compressRioFlush(rio *r) {
     compress_rio_t *cr = (compress_rio_t *)r;
-    if (cr->compressor.errored) return 0;
+    if (!cr->compressor || stream_writer_is_errored(cr->compressor)) return 0;
     if (cr->finalized) return 1;
 
-    /* Only flush if we've started writing (envelope + frame exist) */
-    if (cr->compressor.envelope_written && cr->compressor.compressor.frame_started) {
-        if (syncCompressFeedAndEmit(&cr->compressor, NULL, 0, FLUSH_SYNC) != 0) {
-            return 0;
-        }
-    }
+    if (stream_writer_flush(cr->compressor) != 0) return 0;
 
     /* Flush inner rio */
-    if (syncCompressFlushInner(&cr->compressor, cr->inner) != 0) return 0;
+    if (compressRioFlushInner(cr->compressor, cr->inner) != 0) return 0;
     return 1;
 }
 
@@ -279,20 +117,21 @@ static int compressRioFlush(rio *r) {
  * Sets up the rio vtable so callers can use standard rioWrite/rioFlush.
  * The compressor is initialized with a fresh algorithm context (fork-safe). */
 /* Returns 0 on success, -1 on failure (e.g., compressor init failed). */
-int rioInitWithCompress(compress_rio_t *cr, rio *inner, const sync_compress_config_t *cfg, int codec_checksum) {
+int rioInitWithCompress(compress_rio_t *cr, rio *inner, const stream_writer_config_t *cfg) {
     if (!cr || !inner || !cfg) return -1;
 
     memset(cr, 0, sizeof(*cr));
 
-    /* Checksum strategy: streaming-compressed paths use codec-native
-     * frame checksums, so we do not compute RDB CRC64 on this wrapper. */
+    uint64_t flags = RIO_FLAG_STREAMING_COMPRESSION;
+    if (cfg->block_checksum) flags |= RIO_FLAG_STREAMING_CODEC_CHECKSUM;
+
     rioInitBase(&cr->base, rioReadUnsupported, compressRioWrite, compressRioTell,
-                compressRioFlush, RIO_FLAG_STREAMING_COMPRESSION);
+                compressRioFlush, flags);
 
     cr->inner = inner;
     cr->finalized = 0;
-
-    return syncCompressInitContext(&cr->compressor, cfg, compressRioEmit, cr, codec_checksum);
+    cr->compressor = stream_writer_create(cfg, compressRioEmit, cr);
+    return cr->compressor ? 0 : -1;
 }
 
 /* Finalize the compression frame and flush inner rio.
@@ -301,23 +140,29 @@ int rioInitWithCompress(compress_rio_t *cr, rio *inner, const sync_compress_conf
 /* Returns 0 on success, -1 if the compressor or inner flush errored. */
 int compress_rio_finish(compress_rio_t *cr) {
     if (!cr) return -1;
-    if (cr->finalized) return cr->compressor.errored ? -1 : 0;
+    if (!cr->compressor) return -1;
+    if (cr->finalized) return stream_writer_is_errored(cr->compressor) ? -1 : 0;
     cr->finalized = 1;
 
-    sync_compress_finish(&cr->compressor);
+    if (stream_writer_finish(cr->compressor) != 0) {
+        return -1;
+    }
 
     /* Flush inner rio to ensure all bytes reach the destination.
      * Propagate flush failure to the compressor error state so
      * callers can detect it. */
-    syncCompressFlushInner(&cr->compressor, cr->inner);
-    return cr->compressor.errored ? -1 : 0;
+    compressRioFlushInner(cr->compressor, cr->inner);
+    return stream_writer_is_errored(cr->compressor) ? -1 : 0;
 }
 
 /* Free compressor context and buffers. Does NOT finalize the frame.
  * Call compress_rio_finish() first on all exit paths. */
 void compress_rio_destroy(compress_rio_t *cr) {
     if (!cr) return;
-    syncCompressReleaseContext(&cr->compressor);
+    if (cr->compressor) {
+        stream_writer_destroy(cr->compressor);
+        cr->compressor = NULL;
+    }
 }
 
 /* ===================================================================
@@ -364,8 +209,7 @@ int vkcsDetectFormat(rio *inner,
 /* Decompression buffer sizing: one base constant drives everything.
  * DECOMPRESS_BATCH_SIZE controls the decode window, compressed read chunk,
  * and initial buffer sizes. */
-#define DECOMPRESS_BATCH_SIZE (256 * 1024)          /* 256KB: ~4x 64KB LZ4 blocks per window fill */
-#define DECOMPRESS_MAX_BUF_SIZE (256 * 1024 * 1024) /* 256MB safety limit for read_buf growth */
+#define DECOMPRESS_BATCH_SIZE (1024 * 1024) /* 1MB: ~16x 64KB LZ4 blocks per window fill */
 
 /* Read up to `len` bytes from the inner rio.
  * Returns bytes actually read (may be less than len). 0 on EOF/error.
@@ -417,27 +261,23 @@ static int decompressDrainReadBuf(decompress_rio_t *dr,
     return 0;
 }
 
-/* Ensure read_buf has room for `need` more bytes after existing data.
- * Compacts (memmove) only when tail space is insufficient. */
-static int decompressEnsureReadBuf(decompress_rio_t *dr, size_t need) {
+/* Return writable bytes at the tail of read_buf.
+ * Compacts buffered data to the front only when the tail is full. */
+static size_t decompressReadBufTailSpace(decompress_rio_t *dr) {
     size_t tail_space = dr->read_buf_size - dr->read_buf_pos - dr->read_buf_fill;
-    if (tail_space >= need) return 0;
+    if (tail_space > 0) return tail_space;
+
+    if (dr->read_buf_fill == 0) {
+        dr->read_buf_pos = 0;
+        return dr->read_buf_size;
+    }
 
     if (dr->read_buf_pos > 0) {
         memmove(dr->read_buf, dr->read_buf + dr->read_buf_pos, dr->read_buf_fill);
         dr->read_buf_pos = 0;
-        tail_space = dr->read_buf_size - dr->read_buf_fill;
-        if (tail_space >= need) return 0;
+        return dr->read_buf_size - dr->read_buf_fill;
     }
 
-    size_t new_size = dr->read_buf_size;
-    while (new_size - dr->read_buf_fill < need) {
-        size_t doubled = new_size * 2;
-        if (doubled < new_size || doubled > DECOMPRESS_MAX_BUF_SIZE) return -1;
-        new_size = doubled;
-    }
-    dr->read_buf = zrealloc(dr->read_buf, new_size);
-    dr->read_buf_size = new_size;
     return 0;
 }
 
@@ -462,10 +302,12 @@ static int decompressPump(decompress_rio_t *dr,
             /* Drain consumed everything but produced nothing — need more input */
         }
 
-        /* Fixed-size compressed reads keep the pump loop predictable. */
-        size_t read_size = DECOMPRESS_BATCH_SIZE;
-
-        if (decompressEnsureReadBuf(dr, read_size) < 0) return -1;
+        size_t read_size = decompressReadBufTailSpace(dr);
+        if (read_size == 0) {
+            /* With 64KB LZ4 blocks and a 1MB read buffer, this should not
+             * happen for valid streams. Treat as decode/input corruption. */
+            return -1;
+        }
 
         size_t got = decompressRioReadPartial(
             dr->inner,
@@ -482,6 +324,7 @@ static int decompressPump(decompress_rio_t *dr,
  * Resets the window position and length, then fills up to decomp_buf_size.
  * Returns bytes decoded into the window, 0 on EOF, -1 on error. */
 static ssize_t decompressFillWindow(decompress_rio_t *dr) {
+    if (!dr || !dr->decomp_buf || dr->decomp_buf_size == 0) return -1;
     dr->decomp_buf_pos = 0;
     dr->decomp_buf_len = 0;
     size_t written = 0;
@@ -493,6 +336,7 @@ static ssize_t decompressFillWindow(decompress_rio_t *dr) {
 
 /* Return available decoded bytes in the window. */
 static inline size_t decompressWindowAvail(const decompress_rio_t *dr) {
+    if (!dr || dr->decomp_buf_len <= dr->decomp_buf_pos) return 0;
     return dr->decomp_buf_len - dr->decomp_buf_pos;
 }
 
@@ -501,6 +345,7 @@ static inline size_t decompressWindowAvail(const decompress_rio_t *dr) {
 static size_t decompressCopyFromWindow(decompress_rio_t *dr,
                                        uint8_t **dst,
                                        size_t *remaining) {
+    if (!dr || !dst || !*dst || !remaining || !dr->decomp_buf) return 0;
     size_t avail = decompressWindowAvail(dr);
     if (avail == 0 || *remaining == 0) return 0;
 
@@ -526,6 +371,19 @@ static size_t decompressRioRead(rio *r, void *buf, size_t len) {
     /* Decode into the window and serve via memcpy.
      * This keeps the read path simple and predictable. */
     while (remaining > 0) {
+        /* For large reads, decode directly into caller buffer to avoid one
+         * extra memcpy through the decode window. */
+        if (decompressWindowAvail(dr) == 0 &&
+            dr->decomp_buf_size > 0 &&
+            remaining >= dr->decomp_buf_size) {
+            size_t direct_written = 0;
+            if (decompressPump(dr, dst, remaining, &direct_written) < 0) return 0;
+            if (direct_written == 0) return 0; /* EOF */
+            dst += direct_written;
+            remaining -= direct_written;
+            continue;
+        }
+
         if (decompressWindowAvail(dr) == 0) {
             ssize_t filled = decompressFillWindow(dr);
             if (filled < 0) return 0;
@@ -548,7 +406,7 @@ static off_t decompressRioTell(rio *r) {
 
 /* Initialize a decompression rio decorator wrapping an inner rio.
  * The VKCS envelope must already be consumed by the caller.
- * Both read_buf and decomp_buf are sized to DECOMPRESS_BATCH_SIZE (256KB).
+ * Both read_buf and decomp_buf are sized to DECOMPRESS_BATCH_SIZE (1MB).
  * The decode window (decomp_buf) is the key performance structure: LZ4F
  * decodes full blocks into it, and multiple rioRead calls are served via
  * memcpy. At 10KB values, ~25 reads per window fill. */

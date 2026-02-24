@@ -469,7 +469,8 @@ ENGINE_SERVER_OBJ = \
     commandlog.o \
     commands.o \
     compression.o \
-    compression_pipeline.o \
+    compression_stream.o \
+    compression_rio.o \
     config.o \
     connection.o \
     crc16.o \
@@ -703,6 +704,7 @@ $(SERVER_NAME): $(ENGINE_SERVER_OBJ) $(LUA_MODULE)
 
 # Valkey static library, used to compile against for unit testing
 $(ENGINE_LIB_NAME): $(ENGINE_SERVER_OBJ)
+	rm -f $@
 	$(SERVER_AR) rcs $@ $^
 
 # valkey-unit-tests

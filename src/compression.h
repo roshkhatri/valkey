@@ -60,9 +60,9 @@ typedef struct {
                           * Default false (safe). The async replication path sets
                           * this to true because the accumulator sds is swapped
                           * out before submission, giving exclusive ownership. */
-    bool block_checksum; /* LZ4F block checksum toggle.
-                          * When true, each compressed block carries a checksum
-                          * validated automatically during decompression. */
+    bool block_checksum; /* Codec integrity checksum toggle.
+                          * For LZ4 streams this enables per-block checksums
+                          * (checksumming compressed block payloads). */
 } stream_compressor_t;
 
 /* --- Streaming decompressor context --- */
@@ -74,6 +74,12 @@ typedef struct {
 } stream_decompressor_t;
 
 /* --- Envelope API --- */
+
+/* Returns 1 if the algorithm supports streaming codec framing. */
+int compressionAlgoSupportsStreaming(compression_algo_t algo);
+
+/* Returns a stable name for logging/debugging. */
+const char *compressionAlgoName(compression_algo_t algo);
 
 /* Write VKCS envelope via callback.  Returns 0 on success, -1 on error
  * (invalid algo or emit_cb failure). */
@@ -120,5 +126,11 @@ ssize_t streamDecompressFeed(stream_decompressor_t *sd,
                              const uint8_t *input,
                              size_t input_len,
                              size_t *input_consumed);
+
+/* Parse codec frame flags at file offset `frame_offset` (frame start)
+ * without changing stream state. On success, sets *has_checksum to 1 when
+ * integrity checksums are enabled for the frame, else 0.
+ * Returns 0 on success, -1 when unsupported/invalid/error. */
+int compressionFrameHasIntegrityChecksum(compression_algo_t algo, int fd, off_t frame_offset, int *has_checksum);
 
 #endif /* COMPRESSION_H */

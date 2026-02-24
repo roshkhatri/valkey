@@ -530,10 +530,10 @@ int test_streamCompressFeedErrorRecovery(int argc, char **argv, int flags) {
 }
 
 /* ===================================================================
- * Tests for sync compress API and rio decorators (Tasks 3.1-3.6)
+ * Tests for stream writer API and rio decorators (Tasks 3.1-3.6)
  * =================================================================== */
 
-#include "../compression_pipeline.h"
+#include "../compression_rio.h"
 
 /* --- Emit callback that appends to a dynamically growing buffer --- */
 typedef struct {
@@ -566,8 +566,8 @@ static int emitToDynamicBuf(void *ctx, const uint8_t *data, size_t len) {
     return 0;
 }
 
-/* --- Test: sync_compress_create/destroy (Task 3.1) --- */
-int test_syncCompressCreateDestroy(int argc, char **argv, int flags) {
+/* --- Test: stream_writer_create/destroy (Task 3.1) --- */
+int test_streamWriterCreateDestroy(int argc, char **argv, int flags) {
     UNUSED(argc);
     UNUSED(argv);
     UNUSED(flags);
@@ -575,37 +575,47 @@ int test_syncCompressCreateDestroy(int argc, char **argv, int flags) {
     dynamic_buf_t db;
     dynamicBufInit(&db);
 
-    sync_compress_config_t cfg = {.algo = ALGO_LZ4, .level = 0, .stream_kind = STREAM_KIND_RDB};
-    sync_compress_ctx_t *t = sync_compress_create(&cfg, emitToDynamicBuf, &db);
+    stream_writer_config_t cfg = {.algo = ALGO_LZ4, .level = 0, .stream_kind = STREAM_KIND_RDB};
+    stream_writer_t *t = stream_writer_create(&cfg, emitToDynamicBuf, &db);
     TEST_ASSERT_MESSAGE("create should succeed for LZ4", t != NULL);
-    TEST_ASSERT_MESSAGE("algo should be LZ4", t->compressor.algo == ALGO_LZ4);
-    TEST_ASSERT_MESSAGE("envelope should not be written yet", t->envelope_written == 0);
-    TEST_ASSERT_MESSAGE("should not be errored", t->errored == 0);
+    TEST_ASSERT_MESSAGE("should not be errored", stream_writer_is_errored(t) == 0);
+    TEST_ASSERT_MESSAGE("should not be finished", stream_writer_is_finished(t) == 0);
 
-    sync_compress_destroy(t);
+    stream_writer_destroy(t);
     dynamicBufFree(&db);
 
     /* NULL config should fail */
     TEST_ASSERT_MESSAGE("NULL config should return NULL",
-                        sync_compress_create(NULL, emitToDynamicBuf, &db) == NULL);
+                        stream_writer_create(NULL, emitToDynamicBuf, &db) == NULL);
 
     /* NULL emit_cb should fail */
     TEST_ASSERT_MESSAGE("NULL emit_cb should return NULL",
-                        sync_compress_create(&cfg, NULL, NULL) == NULL);
+                        stream_writer_create(&cfg, NULL, NULL) == NULL);
 
     /* ALGO_NONE should fail */
-    sync_compress_config_t bad_cfg = {.algo = ALGO_NONE, .level = 0, .stream_kind = STREAM_KIND_RDB};
+    stream_writer_config_t bad_cfg = {.algo = ALGO_NONE, .level = 0, .stream_kind = STREAM_KIND_RDB};
     TEST_ASSERT_MESSAGE("ALGO_NONE should return NULL",
-                        sync_compress_create(&bad_cfg, emitToDynamicBuf, &db) == NULL);
+                        stream_writer_create(&bad_cfg, emitToDynamicBuf, &db) == NULL);
+
+    /* Invalid stream_kind should fail when envelope is enabled. */
+    stream_writer_config_t bad_kind_cfg = {.algo = ALGO_LZ4, .level = 0, .stream_kind = 0x7f, .raw_frame = 0};
+    TEST_ASSERT_MESSAGE("invalid stream_kind should fail with envelope",
+                        stream_writer_create(&bad_kind_cfg, emitToDynamicBuf, &db) == NULL);
+
+    /* For raw frame mode, stream_kind is ignored. */
+    stream_writer_config_t raw_cfg = {.algo = ALGO_LZ4, .level = 0, .stream_kind = 0x7f, .raw_frame = 1};
+    stream_writer_t *raw_t = stream_writer_create(&raw_cfg, emitToDynamicBuf, &db);
+    TEST_ASSERT_MESSAGE("raw frame should allow ignored stream_kind", raw_t != NULL);
+    stream_writer_destroy(raw_t);
 
     /* destroy NULL should be safe */
-    sync_compress_destroy(NULL);
+    stream_writer_destroy(NULL);
 
     return 0;
 }
 
-/* --- Test: sync_compress write + finish round-trip (Tasks 3.2, 3.3) --- */
-int test_syncCompressRoundTrip(int argc, char **argv, int flags) {
+/* --- Test: stream_writer write + finish round-trip (Tasks 3.2, 3.3) --- */
+int test_streamWriterRoundTrip(int argc, char **argv, int flags) {
     UNUSED(argc);
     UNUSED(argv);
     UNUSED(flags);
@@ -613,20 +623,20 @@ int test_syncCompressRoundTrip(int argc, char **argv, int flags) {
     dynamic_buf_t db;
     dynamicBufInit(&db);
 
-    sync_compress_config_t cfg = {.algo = ALGO_LZ4, .level = 0, .stream_kind = STREAM_KIND_RDB};
-    sync_compress_ctx_t *t = sync_compress_create(&cfg, emitToDynamicBuf, &db);
+    stream_writer_config_t cfg = {.algo = ALGO_LZ4, .level = 0, .stream_kind = STREAM_KIND_RDB};
+    stream_writer_t *t = stream_writer_create(&cfg, emitToDynamicBuf, &db);
     TEST_ASSERT(t != NULL);
 
     /* Write some data */
-    const char *test_data = "Hello, compression world! This is a test of the sync compress API.";
+    const char *test_data = "Hello, compression world! This is a test of the stream writer API.";
     size_t data_len = strlen(test_data);
-    sync_compress_write(t, test_data, data_len);
-    TEST_ASSERT_MESSAGE("should not be errored after write", t->errored == 0);
-    TEST_ASSERT_MESSAGE("envelope should be written after first write", t->envelope_written == 1);
+    TEST_ASSERT(stream_writer_write(t, test_data, data_len) == 0);
+    TEST_ASSERT_MESSAGE("should not be errored after write", stream_writer_is_errored(t) == 0);
+    TEST_ASSERT_MESSAGE("write should emit envelope", db.len >= VKCS_ENVELOPE_SIZE);
 
     /* Finalize */
-    sync_compress_finish(t);
-    TEST_ASSERT_MESSAGE("should not be errored after finish", t->errored == 0);
+    TEST_ASSERT(stream_writer_finish(t) == 0);
+    TEST_ASSERT_MESSAGE("should not be errored after finish", stream_writer_is_errored(t) == 0);
 
     /* Verify output starts with VKCS envelope */
     TEST_ASSERT_MESSAGE("output should have at least envelope size", db.len >= VKCS_ENVELOPE_SIZE);
@@ -667,8 +677,180 @@ int test_syncCompressRoundTrip(int argc, char **argv, int flags) {
                         memcmp(decompressed, test_data, data_len) == 0);
 
     streamDecompressorDestroy(&sd);
-    sync_compress_destroy(t);
+    stream_writer_destroy(t);
     dynamicBufFree(&db);
+    return 0;
+}
+
+/* --- Test: stream_writer_flush semantics (no-op before writes, valid mid-stream) --- */
+int test_streamWriterFlushBehavior(int argc, char **argv, int flags) {
+    UNUSED(argc);
+    UNUSED(argv);
+    UNUSED(flags);
+
+    dynamic_buf_t db;
+    dynamicBufInit(&db);
+
+    stream_writer_config_t cfg = {.algo = ALGO_LZ4, .level = 0, .stream_kind = STREAM_KIND_RDB};
+    stream_writer_t *t = stream_writer_create(&cfg, emitToDynamicBuf, &db);
+    TEST_ASSERT(t != NULL);
+
+    TEST_ASSERT_MESSAGE("flush before write should be no-op success", stream_writer_flush(t) == 0);
+    TEST_ASSERT_MESSAGE("flush before write should not emit bytes", db.len == 0);
+
+    TEST_ASSERT(stream_writer_write(t, "first chunk", 11) == 0);
+    TEST_ASSERT(stream_writer_flush(t) == 0);
+    TEST_ASSERT(stream_writer_write(t, "second chunk", 12) == 0);
+    TEST_ASSERT(stream_writer_finish(t) == 0);
+
+    TEST_ASSERT(db.len > VKCS_ENVELOPE_SIZE);
+    stream_decompressor_t sd;
+    TEST_ASSERT(streamDecompressorInit(&sd, ALGO_LZ4) == 0);
+
+    uint8_t decompressed[256];
+    size_t total_decompressed = 0;
+    uint8_t *comp_data = db.data + VKCS_ENVELOPE_SIZE;
+    size_t comp_len = db.len - VKCS_ENVELOPE_SIZE;
+    size_t src_offset = 0;
+
+    while (src_offset < comp_len) {
+        size_t consumed = 0;
+        ssize_t produced = streamDecompressFeed(
+            &sd, decompressed + total_decompressed,
+            sizeof(decompressed) - total_decompressed,
+            comp_data + src_offset,
+            comp_len - src_offset, &consumed);
+        TEST_ASSERT(produced >= 0);
+        total_decompressed += (size_t)produced;
+        src_offset += consumed;
+        if (consumed == 0 && produced == 0) break;
+    }
+
+    TEST_ASSERT(total_decompressed == 23);
+    TEST_ASSERT(memcmp(decompressed, "first chunksecond chunk", 23) == 0);
+
+    streamDecompressorDestroy(&sd);
+    stream_writer_destroy(t);
+    dynamicBufFree(&db);
+    return 0;
+}
+
+/* --- Test: raw_frame mode emits only codec frame (no VKCS envelope). --- */
+int test_streamWriterRawFrameRoundTrip(int argc, char **argv, int flags) {
+    UNUSED(argc);
+    UNUSED(argv);
+    UNUSED(flags);
+
+    dynamic_buf_t db;
+    dynamicBufInit(&db);
+
+    stream_writer_config_t cfg = {
+        .algo = ALGO_LZ4,
+        .level = 0,
+        .stream_kind = STREAM_KIND_RDB,
+        .raw_frame = 1,
+    };
+    stream_writer_t *t = stream_writer_create(&cfg, emitToDynamicBuf, &db);
+    TEST_ASSERT(t != NULL);
+
+    const char *test_data = "raw frame payload";
+    size_t data_len = strlen(test_data);
+    TEST_ASSERT(stream_writer_write(t, test_data, data_len) == 0);
+    TEST_ASSERT(stream_writer_finish(t) == 0);
+
+    TEST_ASSERT_MESSAGE("raw frame output should not start with VKCS magic",
+                        !(db.len >= 4 &&
+                          db.data[0] == VKCS_MAGIC_0 &&
+                          db.data[1] == VKCS_MAGIC_1 &&
+                          db.data[2] == VKCS_MAGIC_2 &&
+                          db.data[3] == VKCS_MAGIC_3));
+
+    stream_decompressor_t sd;
+    TEST_ASSERT(streamDecompressorInit(&sd, ALGO_LZ4) == 0);
+
+    uint8_t decompressed[128];
+    size_t total_decompressed = 0;
+    size_t src_offset = 0;
+    while (src_offset < db.len) {
+        size_t consumed = 0;
+        ssize_t produced = streamDecompressFeed(
+            &sd, decompressed + total_decompressed,
+            sizeof(decompressed) - total_decompressed,
+            db.data + src_offset,
+            db.len - src_offset, &consumed);
+        TEST_ASSERT(produced >= 0);
+        total_decompressed += (size_t)produced;
+        src_offset += consumed;
+        if (consumed == 0 && produced == 0) break;
+    }
+
+    TEST_ASSERT(total_decompressed == data_len);
+    TEST_ASSERT(memcmp(decompressed, test_data, data_len) == 0);
+
+    streamDecompressorDestroy(&sd);
+    stream_writer_destroy(t);
+    dynamicBufFree(&db);
+    return 0;
+}
+
+static int lz4FrameIntegrityChecksumFlagFromBlob(const uint8_t *data, size_t len, int *has_checksum) {
+    if (!data || !has_checksum) return -1;
+    FILE *fp = tmpfile();
+    if (!fp) return -1;
+    if (fwrite(data, 1, len, fp) != len) {
+        fclose(fp);
+        return -1;
+    }
+    fflush(fp);
+    if (fseeko(fp, 0, SEEK_SET) != 0) {
+        fclose(fp);
+        return -1;
+    }
+    int fd = fileno(fp);
+    off_t frame_offset = ftello(fp);
+    int rc = -1;
+    if (fd != -1 && frame_offset != (off_t)-1) {
+        rc = compressionFrameHasIntegrityChecksum(ALGO_LZ4, fd, frame_offset, has_checksum);
+    }
+    fclose(fp);
+    return rc;
+}
+
+/* --- Test: block_checksum config toggles integrity flag in LZ4 frame. --- */
+int test_streamWriterContentChecksumToggle(int argc, char **argv, int flags) {
+    UNUSED(argc);
+    UNUSED(argv);
+    UNUSED(flags);
+
+    const char *payload = "block checksum toggle payload for LZ4 frame";
+    size_t payload_len = strlen(payload);
+
+    for (int checksum_on = 0; checksum_on <= 1; checksum_on++) {
+        dynamic_buf_t db;
+        dynamicBufInit(&db);
+
+        stream_writer_config_t cfg = {
+            .algo = ALGO_LZ4,
+            .level = 0,
+            .stream_kind = STREAM_KIND_RDB,
+            .raw_frame = 1, /* make frame start at byte 0 for parser helper */
+            .block_checksum = checksum_on,
+        };
+        stream_writer_t *t = stream_writer_create(&cfg, emitToDynamicBuf, &db);
+        TEST_ASSERT(t != NULL);
+        TEST_ASSERT(stream_writer_write(t, payload, payload_len) == 0);
+        TEST_ASSERT(stream_writer_finish(t) == 0);
+
+        int has_checksum = -1;
+        TEST_ASSERT_MESSAGE("frame parser should succeed",
+                            lz4FrameIntegrityChecksumFlagFromBlob(db.data, db.len, &has_checksum) == 0);
+        TEST_ASSERT_MESSAGE("frame integrity checksum flag should match config",
+                            has_checksum == checksum_on);
+
+        stream_writer_destroy(t);
+        dynamicBufFree(&db);
+    }
+
     return 0;
 }
 
@@ -683,9 +865,9 @@ int test_compressRioRoundTrip(int argc, char **argv, int flags) {
     rio buffer_rio;
     rioInitWithBuffer(&buffer_rio, buf);
 
-    sync_compress_config_t cfg = {.algo = ALGO_LZ4, .level = 0, .stream_kind = STREAM_KIND_RDB};
+    stream_writer_config_t cfg = {.algo = ALGO_LZ4, .level = 0, .stream_kind = STREAM_KIND_RDB};
     compress_rio_t cr;
-    TEST_ASSERT(rioInitWithCompress(&cr, &buffer_rio, &cfg, 0) == 0);
+    TEST_ASSERT(rioInitWithCompress(&cr, &buffer_rio, &cfg) == 0);
     const char *test_data = "The quick brown fox jumps over the lazy dog. "
                             "Pack my box with five dozen liquor jugs.";
     size_t data_len = strlen(test_data);
@@ -746,20 +928,20 @@ int test_decompressRioRoundTrip(int argc, char **argv, int flags) {
     UNUSED(argv);
     UNUSED(flags);
 
-    /* First, produce compressed data using sync compress */
+    /* First, produce compressed data using stream writer */
     dynamic_buf_t db;
     dynamicBufInit(&db);
 
-    sync_compress_config_t cfg = {.algo = ALGO_LZ4, .level = 0, .stream_kind = STREAM_KIND_RDB};
-    sync_compress_ctx_t *t = sync_compress_create(&cfg, emitToDynamicBuf, &db);
+    stream_writer_config_t cfg = {.algo = ALGO_LZ4, .level = 0, .stream_kind = STREAM_KIND_RDB};
+    stream_writer_t *t = stream_writer_create(&cfg, emitToDynamicBuf, &db);
     TEST_ASSERT(t != NULL);
 
     const char *test_data = "Decompression rio test data. "
                             "This should round-trip through compress then decompress.";
     size_t data_len = strlen(test_data);
-    sync_compress_write(t, test_data, data_len);
-    sync_compress_finish(t);
-    sync_compress_destroy(t);
+    stream_writer_write(t, test_data, data_len);
+    stream_writer_finish(t);
+    stream_writer_destroy(t);
 
     /* Skip the VKCS envelope — decompress_rio expects it already consumed */
     TEST_ASSERT(db.len > VKCS_ENVELOPE_SIZE);
@@ -834,9 +1016,9 @@ int test_compressRioFinishIdempotent(int argc, char **argv, int flags) {
     rio buffer_rio;
     rioInitWithBuffer(&buffer_rio, buf);
 
-    sync_compress_config_t cfg = {.algo = ALGO_LZ4, .level = 0, .stream_kind = STREAM_KIND_RDB};
+    stream_writer_config_t cfg = {.algo = ALGO_LZ4, .level = 0, .stream_kind = STREAM_KIND_RDB};
     compress_rio_t cr;
-    TEST_ASSERT(rioInitWithCompress(&cr, &buffer_rio, &cfg, 0) == 0);
+    TEST_ASSERT(rioInitWithCompress(&cr, &buffer_rio, &cfg) == 0);
 
     rioWrite((rio *)&cr, "test", 4);
     compress_rio_finish(&cr);
@@ -863,9 +1045,9 @@ int test_compressRioFlushMidStream(int argc, char **argv, int flags) {
     rio buffer_rio;
     rioInitWithBuffer(&buffer_rio, buf);
 
-    sync_compress_config_t cfg = {.algo = ALGO_LZ4, .level = 0, .stream_kind = STREAM_KIND_RDB};
+    stream_writer_config_t cfg = {.algo = ALGO_LZ4, .level = 0, .stream_kind = STREAM_KIND_RDB};
     compress_rio_t cr;
-    TEST_ASSERT(rioInitWithCompress(&cr, &buffer_rio, &cfg, 0) == 0);
+    TEST_ASSERT(rioInitWithCompress(&cr, &buffer_rio, &cfg) == 0);
 
     /* Write some data */
     TEST_ASSERT(rioWrite((rio *)&cr, "first chunk", 11) != 0);
@@ -936,17 +1118,17 @@ int test_decompressRioLargePayload(int argc, char **argv, int flags) {
         payload[i] = (uint8_t)(i % 251); /* prime modulus for variety */
     }
 
-    /* Compress via sync_compress */
+    /* Compress via stream_writer */
     dynamic_buf_t db;
     dynamicBufInit(&db);
 
-    sync_compress_config_t cfg = {.algo = ALGO_LZ4, .level = 0, .stream_kind = STREAM_KIND_RDB};
-    sync_compress_ctx_t *t = sync_compress_create(&cfg, emitToDynamicBuf, &db);
+    stream_writer_config_t cfg = {.algo = ALGO_LZ4, .level = 0, .stream_kind = STREAM_KIND_RDB};
+    stream_writer_t *t = stream_writer_create(&cfg, emitToDynamicBuf, &db);
     TEST_ASSERT(t != NULL);
 
-    sync_compress_write(t, payload, payload_len);
-    sync_compress_finish(t);
-    sync_compress_destroy(t);
+    stream_writer_write(t, payload, payload_len);
+    stream_writer_finish(t);
+    stream_writer_destroy(t);
 
     /* Strip VKCS envelope */
     TEST_ASSERT(db.len > VKCS_ENVELOPE_SIZE);
@@ -1002,13 +1184,13 @@ int test_decompressRioDirectPath(int argc, char **argv, int flags) {
     dynamic_buf_t db;
     dynamicBufInit(&db);
 
-    sync_compress_config_t cfg = {.algo = ALGO_LZ4, .level = 0, .stream_kind = STREAM_KIND_RDB};
-    sync_compress_ctx_t *t = sync_compress_create(&cfg, emitToDynamicBuf, &db);
+    stream_writer_config_t cfg = {.algo = ALGO_LZ4, .level = 0, .stream_kind = STREAM_KIND_RDB};
+    stream_writer_t *t = stream_writer_create(&cfg, emitToDynamicBuf, &db);
     TEST_ASSERT(t != NULL);
 
-    sync_compress_write(t, payload, payload_len);
-    sync_compress_finish(t);
-    sync_compress_destroy(t);
+    stream_writer_write(t, payload, payload_len);
+    stream_writer_finish(t);
+    stream_writer_destroy(t);
 
     /* Strip VKCS envelope */
     TEST_ASSERT(db.len > VKCS_ENVELOPE_SIZE);
@@ -1037,11 +1219,9 @@ int test_decompressRioDirectPath(int argc, char **argv, int flags) {
     return 0;
 }
 
-/* --- Test: sync_compress_write after finish is silently ignored.
- * Before the fix, writes after finish could start a new LZ4 frame
- * under the same envelope, violating the one-envelope/one-frame
- * contract. (P2 regression test) --- */
-int test_syncCompressWriteAfterFinish(int argc, char **argv, int flags) {
+/* --- Test: stream_writer_write after finish is rejected.
+ * Writes after finish must fail and must not emit bytes. --- */
+int test_streamWriterWriteAfterFinish(int argc, char **argv, int flags) {
     UNUSED(argc);
     UNUSED(argv);
     UNUSED(flags);
@@ -1049,21 +1229,21 @@ int test_syncCompressWriteAfterFinish(int argc, char **argv, int flags) {
     dynamic_buf_t db;
     dynamicBufInit(&db);
 
-    sync_compress_config_t cfg = {.algo = ALGO_LZ4, .level = 0, .stream_kind = STREAM_KIND_RDB};
-    sync_compress_ctx_t *t = sync_compress_create(&cfg, emitToDynamicBuf, &db);
+    stream_writer_config_t cfg = {.algo = ALGO_LZ4, .level = 0, .stream_kind = STREAM_KIND_RDB};
+    stream_writer_t *t = stream_writer_create(&cfg, emitToDynamicBuf, &db);
     TEST_ASSERT(t != NULL);
 
-    sync_compress_write(t, "hello", 5);
-    sync_compress_finish(t);
+    stream_writer_write(t, "hello", 5);
+    stream_writer_finish(t);
     size_t len_after_finish = db.len;
 
-    /* Write after finish — should be silently ignored */
-    sync_compress_write(t, "world", 5);
+    /* Write after finish must fail and emit no output. */
+    TEST_ASSERT(stream_writer_write(t, "world", 5) != 0);
     TEST_ASSERT_MESSAGE("write after finish should not produce output",
                         db.len == len_after_finish);
 
     /* Second finish — should also be a no-op */
-    sync_compress_finish(t);
+    stream_writer_finish(t);
     TEST_ASSERT_MESSAGE("second finish should not produce output",
                         db.len == len_after_finish);
 
@@ -1092,7 +1272,7 @@ int test_syncCompressWriteAfterFinish(int argc, char **argv, int flags) {
                         total == 5 && memcmp(decompressed, "hello", 5) == 0);
 
     streamDecompressorDestroy(&sd);
-    sync_compress_destroy(t);
+    stream_writer_destroy(t);
     dynamicBufFree(&db);
     return 0;
 }
@@ -1109,22 +1289,22 @@ int test_independentStreamsCoexist(int argc, char **argv, int flags) {
     dynamicBufInit(&db1);
     dynamicBufInit(&db2);
 
-    sync_compress_config_t cfg = {.algo = ALGO_LZ4, .level = 0, .stream_kind = STREAM_KIND_RDB};
-    sync_compress_ctx_t *t1 = sync_compress_create(&cfg, emitToDynamicBuf, &db1);
-    sync_compress_ctx_t *t2 = sync_compress_create(&cfg, emitToDynamicBuf, &db2);
+    stream_writer_config_t cfg = {.algo = ALGO_LZ4, .level = 0, .stream_kind = STREAM_KIND_RDB};
+    stream_writer_t *t1 = stream_writer_create(&cfg, emitToDynamicBuf, &db1);
+    stream_writer_t *t2 = stream_writer_create(&cfg, emitToDynamicBuf, &db2);
     TEST_ASSERT(t1 != NULL && t2 != NULL);
 
     const char *data1 = "Stream one data - unique content for first stream AAAA";
     const char *data2 = "Stream two data - different content for second stream BBBB";
 
     /* Interleave writes to both streams */
-    sync_compress_write(t1, data1, strlen(data1));
-    sync_compress_write(t2, data2, strlen(data2));
-    sync_compress_write(t1, data1, strlen(data1)); /* write again to stream 1 */
-    sync_compress_write(t2, data2, strlen(data2)); /* write again to stream 2 */
+    stream_writer_write(t1, data1, strlen(data1));
+    stream_writer_write(t2, data2, strlen(data2));
+    stream_writer_write(t1, data1, strlen(data1)); /* write again to stream 1 */
+    stream_writer_write(t2, data2, strlen(data2)); /* write again to stream 2 */
 
-    sync_compress_finish(t1);
-    sync_compress_finish(t2);
+    stream_writer_finish(t1);
+    stream_writer_finish(t2);
 
     /* Decompress both and verify independently */
     for (int i = 0; i < 2; i++) {
@@ -1154,8 +1334,8 @@ int test_independentStreamsCoexist(int argc, char **argv, int flags) {
         sdsfree(comp);
     }
 
-    sync_compress_destroy(t1);
-    sync_compress_destroy(t2);
+    stream_writer_destroy(t1);
+    stream_writer_destroy(t2);
     dynamicBufFree(&db1);
     dynamicBufFree(&db2);
     return 0;
