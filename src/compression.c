@@ -189,7 +189,7 @@ static const LZ4F_preferences_t lz4f_prefs = {
         .blockChecksumFlag = LZ4F_blockChecksumEnabled,
         .contentChecksumFlag = LZ4F_noContentChecksum,
         .blockSizeID = LZ4F_max64KB,
-        .blockMode = LZ4F_blockLinked,
+        .blockMode = LZ4F_blockIndependent,
     },
     .compressionLevel = 0, /* bound calculation uses 0 (worst-case); actual
                             * compression uses sc->level via a local copy */
