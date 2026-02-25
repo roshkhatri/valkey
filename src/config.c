@@ -182,6 +182,10 @@ configEnum rdb_compression_algo_enum[] = {{"lzf", ALGO_LZF},
                                           {"lz4", ALGO_LZ4},
                                           {NULL, 0}};
 
+/* Default for rdb-streaming-compression-level.
+ * Kept centralized to avoid drift between config table and validation logic. */
+#define RDB_STREAMING_COMPRESSION_LEVEL_DEFAULT (-5)
+
 /* Output buffer limits presets. */
 clientBufferLimitsConfig clientBufferLimitsDefaults[CLIENT_TYPE_OBUF_COUNT] = {
     {0, 0, 0},                                 /* normal */
@@ -455,6 +459,9 @@ static int updateClientOutputBufferLimit(sds *args, int arg_len, const char **er
  * within conf file parsing. This is only needed to support the deprecated
  * abnormal aggregate `save T C` functionality. Remove in the future. */
 static int reading_config_file;
+/* Tracks nested config parsing depth (top-level + includes). */
+static int config_parse_depth;
+static int validateRdbCompressionSettings(const char **err);
 
 void loadServerConfigFromString(sds config) {
     deprecatedConfig deprecated_configs[] = {
@@ -473,6 +480,7 @@ void loadServerConfigFromString(sds config) {
     int argc;
 
     reading_config_file = 1;
+    config_parse_depth++;
     lines = sdssplitlen(config, sdslen(config), "\n", 1, &totlines);
 
     for (i = 0; i < totlines; i++) {
@@ -625,16 +633,24 @@ void loadServerConfigFromString(sds config) {
         err = "replicaof directive not allowed in cluster mode";
         goto loaderr;
     }
+    /* Validate cross-option consistency once at top-level parse end, after
+     * all include files have been processed. */
+    if (config_parse_depth == 1 && !validateRdbCompressionSettings(&err)) {
+        goto loaderr;
+    }
 
     /* To ensure backward compatibility and work while hz is out of range */
     if (server.hz < CONFIG_MIN_HZ) server.hz = CONFIG_MIN_HZ;
     if (server.hz > CONFIG_MAX_HZ) server.hz = CONFIG_MAX_HZ;
 
     sdsfreesplitres(lines, totlines);
-    reading_config_file = 0;
+    config_parse_depth--;
+    reading_config_file = config_parse_depth > 0;
     return;
 
 loaderr:
+    config_parse_depth--;
+    reading_config_file = config_parse_depth > 0;
     if (argv) sdsfreesplitres(argv, argc);
     fprintf(stderr, "\n*** FATAL CONFIG FILE ERROR (Version %s) ***\n", VALKEY_VERSION);
     if (i < totlines) {
@@ -3204,6 +3220,18 @@ static int isValidDbHashSeed(sds val, const char **err) {
     return 1;
 }
 
+/* Keep RDB compression settings coherent.
+ * Streaming level tuning applies only to LZ4. For non-LZ4 algorithms, only
+ * the default level is allowed. */
+static int validateRdbCompressionSettings(const char **err) {
+    if (server.rdb_compression_algo != ALGO_LZ4 &&
+        server.rdb_streaming_compression_level != RDB_STREAMING_COMPRESSION_LEVEL_DEFAULT) {
+        *err = "rdb-streaming-compression-level is supported only when rdb-compression-algo is lz4";
+        return 0;
+    }
+    return 1;
+}
+
 standardConfig static_configs[] = {
     /* Bool configs */
     createBoolConfig("rdbchecksum", NULL, IMMUTABLE_CONFIG, server.rdb_checksum, 1, NULL, NULL),
@@ -3316,10 +3344,10 @@ standardConfig static_configs[] = {
     createEnumConfig("log-format", NULL, MODIFIABLE_CONFIG, log_format_enum, server.log_format, LOG_FORMAT_LEGACY, NULL, NULL),
     createEnumConfig("log-timestamp-format", NULL, MODIFIABLE_CONFIG, log_timestamp_format_enum, server.log_timestamp_format, LOG_TIMESTAMP_LEGACY, NULL, NULL),
     createEnumConfig("rdb-version-check", NULL, MODIFIABLE_CONFIG, rdb_version_check_enum, server.rdb_version_check, RDB_VERSION_CHECK_STRICT, NULL, NULL),
-    createEnumConfig("rdb-compression-algo", NULL, MODIFIABLE_CONFIG, rdb_compression_algo_enum, server.rdb_compression_algo, ALGO_LZF, NULL, NULL),
+    createEnumConfig("rdb-compression-algo", NULL, MODIFIABLE_CONFIG, rdb_compression_algo_enum, server.rdb_compression_algo, ALGO_LZF, NULL, validateRdbCompressionSettings),
 
     /* Integer configs */
-    createIntConfig("rdb-streaming-compression-level", NULL, MODIFIABLE_CONFIG, -1000, 22, server.rdb_streaming_compression_level, -5, INTEGER_CONFIG, NULL, NULL),
+    createIntConfig("rdb-streaming-compression-level", NULL, MODIFIABLE_CONFIG, -1000, 22, server.rdb_streaming_compression_level, RDB_STREAMING_COMPRESSION_LEVEL_DEFAULT, INTEGER_CONFIG, NULL, validateRdbCompressionSettings),
     createIntConfig("databases", NULL, IMMUTABLE_CONFIG, 1, INT_MAX, server.config_databases, 16, INTEGER_CONFIG, NULL, NULL),
     createIntConfig("cluster-databases", NULL, IMMUTABLE_CONFIG, 1, INT_MAX, server.config_databases_cluster, 1, INTEGER_CONFIG, NULL, NULL),
     createIntConfig("port", NULL, MODIFIABLE_CONFIG, 0, 65535, server.port, 6379, INTEGER_CONFIG, NULL, updatePort),                                               /* TCP port. */

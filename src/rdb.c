@@ -1488,9 +1488,9 @@ int rdbSaveRio(int req, int rdbver, rio *rdb, int *error, int rdbflags, rdbSaveI
     long key_counter = 0;
     int j;
 
-    /* Set up CRC64 checksum callback for uncompressed streams.
-     * Streaming-compressed paths rely on codec-native checksums. */
-    if (server.rdb_checksum && !(rdb->flags & RIO_FLAG_STREAMING_COMPRESSION))
+    /* Set up CRC64 checksum callback unless codec-native integrity checks are
+     * active for this stream. */
+    if (server.rdb_checksum && !(rdb->flags & RIO_FLAG_STREAMING_CODEC_CHECKSUM))
         rdb->update_cksum = rioGenericUpdateChecksum;
     const char *magic_prefix = rdbUseValkeyMagic(rdbver) ? "VALKEY" : "REDIS0";
     serverAssert(rdbver >= 0 && rdbver <= RDB_VERSION);
@@ -3106,9 +3106,8 @@ void stopSaving(int success) {
 /* Track loading progress in order to serve client's from time to time
    and if needed calculate rdb checksum  */
 void rdbLoadProgressCallback(rio *r, const void *buf, size_t len) {
-    /* Track CRC64 for uncompressed streams only.
-     * Streaming-compressed load integrity is validated by codec checksums. */
-    if (server.rdb_checksum && !(r->flags & RIO_FLAG_STREAMING_COMPRESSION))
+    /* Track CRC64 unless codec-native integrity checks are active. */
+    if (server.rdb_checksum && !(r->flags & RIO_FLAG_STREAMING_CODEC_CHECKSUM))
         rioGenericUpdateChecksum(r, buf, len);
 
     /* For streaming-compressed load paths, processed_bytes counts bytes
@@ -3630,8 +3629,7 @@ int rdbLoadRioWithLoadingCtx(rio *rdb, int rdbflags, rdbSaveInfo *rsi, rdbLoadin
         if (rioRead(rdb, &cksum, 8) == 0) goto eoferr;
         if (server.rdb_checksum && !server.skip_checksum_validation) {
             memrev64ifbe(&cksum);
-            if ((rdb->flags & RIO_FLAG_STREAMING_COMPRESSION) &&
-                (rdb->flags & RIO_FLAG_STREAMING_CODEC_CHECKSUM)) {
+            if (rdb->flags & RIO_FLAG_STREAMING_CODEC_CHECKSUM) {
                 /* VKCS compressed stream — integrity is provided by the
                  * algorithm's native frame checksums. Skip RDB footer CRC64. */
                 serverLog(LL_NOTICE, "Streaming-compressed RDB: integrity validated by codec checksums, skipping CRC64.");
@@ -3721,9 +3719,6 @@ int rdbLoad(char *filename, rdbSaveInfo *rsi, int rdbflags) {
     serverAssert(stream_info_rc == 0);
 
     if (stream_info.compressed) {
-        if (stream_info.codec_checksum_enabled) {
-            dr.base.flags |= RIO_FLAG_STREAMING_CODEC_CHECKSUM;
-        }
         serverLog(LL_NOTICE, "Loading compressed RDB (algo=%s) from %s",
                   compressionAlgoName(stream_info.algo), filename);
     }

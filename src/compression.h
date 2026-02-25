@@ -43,6 +43,12 @@ typedef enum {
     FLUSH_END = 2,      /* Finalize frame */
 } compress_flush_mode_t;
 
+/* --- LZ4 block mode (maps to LZ4F_blockMode_t) --- */
+typedef enum {
+    COMPRESS_BLOCK_INDEPENDENT = 0, /* LZ4F_blockIndependent — no inter-block deps */
+    COMPRESS_BLOCK_LINKED = 1,      /* LZ4F_blockLinked — better ratio, needs history */
+} compress_block_mode_t;
+
 /* --- Streaming compressor context --- */
 typedef struct {
     compression_algo_t algo;
@@ -51,21 +57,25 @@ typedef struct {
         void *lz4f; /* LZ4F_cctx* */
     } ctx;
     bool frame_started;
-    bool errored;        /* Permanently failed — algorithm state is undefined after
-                          * an error. All subsequent streamCompressFeed calls return
-                          * -1 immediately. The caller must tear down the stream
-                          * (disconnect replica / abort RDB save). No mid-stream
-                          * retry is possible because already-emitted frame bytes
-                          * cannot be unsent. */
-    bool stable_src;     /* LZ4F optimization: set to true only when the caller
-                          * guarantees the input buffer remains valid and
-                          * unmodified until the next streamCompressFeed call.
-                          * Default false (safe). The async replication path sets
-                          * this to true because the accumulator sds is swapped
-                          * out before submission, giving exclusive ownership. */
-    bool block_checksum; /* Codec integrity checksum toggle.
-                          * For LZ4 streams this enables per-block checksums
-                          * (checksumming compressed block payloads). */
+    bool errored;                     /* Permanently failed — algorithm state is undefined after
+                                       * an error. All subsequent streamCompressFeed calls return
+                                       * -1 immediately. The caller must tear down the stream
+                                       * (disconnect replica / abort RDB save). No mid-stream
+                                       * retry is possible because already-emitted frame bytes
+                                       * cannot be unsent. */
+    bool stable_src;                  /* LZ4F optimization: set to true only when the caller
+                                       * guarantees the input buffer remains valid and
+                                       * unmodified until the next streamCompressFeed call.
+                                       * Default false (safe). The async replication path sets
+                                       * this to true because the accumulator sds is swapped
+                                       * out before submission, giving exclusive ownership. */
+    bool block_checksum;              /* Codec integrity checksum toggle.
+                                       * For LZ4 streams this enables per-block checksums
+                                       * (checksumming compressed block payloads). */
+    compress_block_mode_t block_mode; /* LZ4 block mode: independent (default) or
+                                       * linked. Independent blocks allow random
+                                       * access; linked blocks improve ratio for
+                                       * small values at the cost of history. */
 } stream_compressor_t;
 
 /* --- Streaming decompressor context --- */

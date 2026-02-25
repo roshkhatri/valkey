@@ -19,9 +19,10 @@
 typedef struct {
     compression_algo_t algo;
     int level;
-    uint8_t stream_kind; /* STREAM_KIND_RDB or STREAM_KIND_REPL */
-    bool block_checksum; /* Codec checksum toggle (LZ4 block checksum) */
-    bool raw_frame;      /* true => emit raw codec frame (no VKCS envelope) */
+    uint8_t stream_kind;              /* STREAM_KIND_RDB or STREAM_KIND_REPL */
+    bool block_checksum;              /* Codec checksum toggle (LZ4 block checksum) */
+    bool raw_frame;                   /* true => emit raw codec frame (no VKCS envelope) */
+    compress_block_mode_t block_mode; /* LZ4 block mode (default: independent) */
 } stream_writer_config_t;
 
 /* Generic caller-agnostic streaming reader config.

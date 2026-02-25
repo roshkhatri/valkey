@@ -253,6 +253,9 @@ int decompress_rio_init_with_config(decompress_rio_t *dr, rio *inner, const stre
     }
     if (info.compressed) {
         dr->base.flags |= RIO_FLAG_STREAMING_COMPRESSION;
+        if (info.codec_checksum_enabled) {
+            dr->base.flags |= RIO_FLAG_STREAMING_CODEC_CHECKSUM;
+        }
     }
 
     return 0;

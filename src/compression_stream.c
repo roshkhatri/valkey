@@ -27,6 +27,10 @@ struct stream_writer {
 static int streamWriterValidateConfig(const stream_writer_config_t *cfg) {
     if (!cfg) return -1;
     if (!compressionAlgoSupportsStreaming(cfg->algo)) return -1;
+    if (cfg->block_mode != COMPRESS_BLOCK_INDEPENDENT &&
+        cfg->block_mode != COMPRESS_BLOCK_LINKED) {
+        return -1;
+    }
     if (!cfg->raw_frame &&
         cfg->stream_kind != STREAM_KIND_RDB &&
         cfg->stream_kind != STREAM_KIND_REPL) {
@@ -52,6 +56,7 @@ static int streamWriterInitContext(stream_writer_t *t,
         return -1;
     }
     t->compressor.block_checksum = cfg->block_checksum;
+    t->compressor.block_mode = cfg->block_mode;
     return 0;
 }
 

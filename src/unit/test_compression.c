@@ -1638,3 +1638,78 @@ int test_independentStreamsCoexist(int argc, char **argv, int flags) {
     dynamicBufFree(&db2);
     return 0;
 }
+
+int test_streamWriterBlockModeLinked(int argc, char **argv, int flags) {
+    UNUSED(argc);
+    UNUSED(argv);
+    UNUSED(flags);
+
+    /* Verify that block_mode=COMPRESS_BLOCK_LINKED produces a valid
+     * LZ4 frame that decompresses correctly. Linked mode should yield
+     * better compression ratio for repetitive data. */
+    dynamic_buf_t db_ind, db_linked;
+    dynamicBufInit(&db_ind);
+    dynamicBufInit(&db_linked);
+
+    /* Independent mode (default) */
+    stream_writer_config_t cfg_ind = {
+        .algo = ALGO_LZ4,
+        .level = 0,
+        .stream_kind = STREAM_KIND_RDB,
+        .block_mode = COMPRESS_BLOCK_INDEPENDENT,
+    };
+    stream_writer_t *t_ind = stream_writer_create(&cfg_ind, emitToDynamicBuf, &db_ind);
+    TEST_ASSERT(t_ind != NULL);
+
+    /* Linked mode */
+    stream_writer_config_t cfg_linked = {
+        .algo = ALGO_LZ4,
+        .level = 0,
+        .stream_kind = STREAM_KIND_RDB,
+        .block_mode = COMPRESS_BLOCK_LINKED,
+    };
+    stream_writer_t *t_linked = stream_writer_create(&cfg_linked, emitToDynamicBuf, &db_linked);
+    TEST_ASSERT(t_linked != NULL);
+
+    /* Write identical repetitive data to both streams */
+    char pattern[4096];
+    memset(pattern, 'X', sizeof(pattern));
+    for (int i = 0; i < 32; i++) {
+        TEST_ASSERT(stream_writer_write(t_ind, pattern, sizeof(pattern)) == 0);
+        TEST_ASSERT(stream_writer_write(t_linked, pattern, sizeof(pattern)) == 0);
+    }
+    TEST_ASSERT(stream_writer_finish(t_ind) == 0);
+    TEST_ASSERT(stream_writer_finish(t_linked) == 0);
+
+    /* Both should produce valid output */
+    TEST_ASSERT(db_ind.len > VKCS_ENVELOPE_SIZE);
+    TEST_ASSERT(db_linked.len > VKCS_ENVELOPE_SIZE);
+
+    /* Decompress linked-mode output and verify round-trip */
+    sds comp = sdsnewlen(db_linked.data + VKCS_ENVELOPE_SIZE,
+                         db_linked.len - VKCS_ENVELOPE_SIZE);
+    rio buf_rio;
+    rioInitWithBuffer(&buf_rio, comp);
+
+    decompress_rio_t dr;
+    TEST_ASSERT(initRawLz4DecompressRio(&dr, &buf_rio) == 0);
+
+    size_t total_len = sizeof(pattern) * 32;
+    char *result = zmalloc(total_len);
+    TEST_ASSERT_MESSAGE("linked-mode decompression should succeed",
+                        rioRead((rio *)&dr, result, total_len) != 0);
+
+    /* Verify all bytes match */
+    for (size_t i = 0; i < total_len; i++) {
+        TEST_ASSERT(result[i] == 'X');
+    }
+
+    decompress_rio_destroy(&dr);
+    sdsfree(comp);
+    zfree(result);
+    stream_writer_destroy(t_ind);
+    stream_writer_destroy(t_linked);
+    dynamicBufFree(&db_ind);
+    dynamicBufFree(&db_linked);
+    return 0;
+}
