@@ -9,14 +9,14 @@
  * **Property: Envelope Format Compliance**
  * **Validates: Requirements 2.2, 2.3, 2.4, 2.15, 2.19** */
 
-#include <assert.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
 #include "../compression.h"
 #include "../compression_stream.h"
 #include "../zmalloc.h"
 #include "test_help.h"
+#include <assert.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
 /* --- Emit callback that writes into a flat buffer --- */
 typedef struct {
@@ -812,6 +812,37 @@ int test_streamReaderPartialThenErrorSetsErrored(int argc, char **argv, int flag
                         stream_reader_read(r, out, sizeof(out)) == -1);
 
     stream_reader_destroy(r);
+
+    /* Passthrough mode should also preserve partial bytes when backend read
+     * fails after probe/prefix buffering, then latch sticky error state. */
+    const uint8_t plain[] = "NOTVKCS-passthrough-regression";
+    flaky_reader_t fr_passthrough = {
+        .data = plain,
+        .len = sizeof(plain) - 1,
+        .pos = 0,
+        .max_chunk = 0,
+        .fail_after_success_reads = 1, /* probe succeeds, next read fails */
+        .success_reads = 0,
+    };
+    stream_reader_config_t pass_cfg = {
+        .algo = ALGO_NONE,
+        .expected_stream_kind = STREAM_KIND_ANY,
+        .raw_frame = 0,
+        .allow_passthrough = 1,
+        .batch_size = 0,
+    };
+    stream_reader_t *rp = stream_reader_create(&pass_cfg, flakyReaderRead, &fr_passthrough);
+    TEST_ASSERT_MESSAGE("passthrough reader create should succeed", rp != NULL);
+
+    uint8_t pass_out[64];
+    ssize_t p1 = stream_reader_read(rp, pass_out, sizeof(pass_out));
+    TEST_ASSERT_MESSAGE("passthrough first read should return partial output", p1 > 0);
+    TEST_ASSERT_MESSAGE("passthrough partial bytes should match input prefix",
+                        memcmp(pass_out, plain, (size_t)p1) == 0);
+    TEST_ASSERT_MESSAGE("passthrough second read should fail immediately",
+                        stream_reader_read(rp, pass_out, sizeof(pass_out)) == -1);
+    stream_reader_destroy(rp);
+
     dynamicBufFree(&db);
     zfree(payload);
     return 0;

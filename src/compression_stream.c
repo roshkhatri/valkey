@@ -6,6 +6,7 @@
 
 #include "compression_stream.h"
 #include "zmalloc.h"
+#include <limits.h>
 #include <string.h>
 
 /* Generic streaming writer implementation. */
@@ -433,8 +434,14 @@ static size_t streamReaderPrefixAvail(const stream_reader_t *t) {
     return t->prefix_len - t->prefix_pos;
 }
 
-static size_t streamReaderReadPassthrough(stream_reader_t *t, uint8_t *dst, size_t len) {
+/* Returns produced bytes (>=0). If *read_error is set, the caller should
+ * latch sticky error state after returning any partial bytes. */
+static ssize_t streamReaderReadPassthrough(stream_reader_t *t,
+                                           uint8_t *dst,
+                                           size_t len,
+                                           bool *read_error) {
     size_t total = 0;
+    if (read_error) *read_error = false;
 
     size_t prefix_avail = streamReaderPrefixAvail(t);
     if (prefix_avail > 0) {
@@ -446,13 +453,24 @@ static size_t streamReaderReadPassthrough(stream_reader_t *t, uint8_t *dst, size
         total += from_prefix;
     }
 
-    if (len == 0) return total;
+    if (len == 0) {
+        if (total > (size_t)SSIZE_MAX) return -1;
+        return (ssize_t)total;
+    }
 
     ssize_t got = t->read_cb(t->read_ctx, dst, len);
-    if (got < 0) return (size_t)-1;
-    if (got == 0) return total;
-    if ((size_t)got > len) return (size_t)-1;
-    return total + (size_t)got;
+    if (got < 0) {
+        if (read_error) *read_error = true;
+        if (total > (size_t)SSIZE_MAX) return -1;
+        return (ssize_t)total;
+    }
+    if (got == 0) {
+        if (total > (size_t)SSIZE_MAX) return -1;
+        return (ssize_t)total;
+    }
+    if ((size_t)got > len) return -1;
+    if (total + (size_t)got > (size_t)SSIZE_MAX) return -1;
+    return (ssize_t)(total + (size_t)got);
 }
 
 static int streamReaderDrainReadBuf(stream_reader_t *t,
@@ -601,11 +619,14 @@ ssize_t stream_reader_read(stream_reader_t *t, void *buf, size_t len) {
 
     ssize_t nread;
     if (!t->compressed) {
-        size_t got = streamReaderReadPassthrough(t, (uint8_t *)buf, len);
-        if (got == (size_t)-1) {
+        bool read_error = false;
+        nread = streamReaderReadPassthrough(t, (uint8_t *)buf, len, &read_error);
+        if (nread < 0) {
             return streamReaderFail(t, 0);
         }
-        nread = (ssize_t)got;
+        if (read_error) {
+            return streamReaderFail(t, (size_t)nread);
+        }
     } else {
         nread = streamReaderReadCompressed(t, (uint8_t *)buf, len);
         if (nread < 0) return streamReaderFail(t, 0);
