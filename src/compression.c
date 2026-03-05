@@ -221,20 +221,19 @@ size_t streamCompressOutputBound(compression_algo_t algo, size_t input_len, int 
 /* Feed data through the streaming compressor.
  * flush_mode: 0=continue (buffer internally), 1=flush (emit all buffered),
  *             2=end (finalize frame).
- * Returns bytes written to *output_ptr, 0 for no output, -1 on error. */
+ * Returns bytes written to output, 0 for no output, -1 on error. */
 ssize_t streamCompressFeed(stream_compressor_t *sc,
-                           uint8_t **output_ptr,
+                           uint8_t *output,
                            size_t output_capacity,
                            const uint8_t *input,
                            size_t input_len,
                            compress_flush_mode_t flush_mode) {
-    if (!sc || !output_ptr || !*output_ptr) return -1;
+    if (!sc || !output) return -1;
     if (sc->errored) return -1;
 
     switch (sc->algo) {
     case ALGO_LZ4: {
         if (!sc->ctx.lz4f) return -1;
-        uint8_t *output = *output_ptr;
         size_t offset = 0;
 
         /* Begin frame on first call */

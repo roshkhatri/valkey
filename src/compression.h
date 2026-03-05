@@ -66,9 +66,10 @@ typedef struct {
     bool stable_src;                  /* LZ4F optimization: set to true only when the caller
                                        * guarantees the input buffer remains valid and
                                        * unmodified until the next streamCompressFeed call.
-                                       * Default false (safe). The async replication path sets
-                                       * this to true because the accumulator sds is swapped
-                                       * out before submission, giving exclusive ownership. */
+                                       * Default false (safe). Deferred async replication
+                                       * paths may set this to true when feeding from
+                                       * per-call input slices whose lifetime is guaranteed
+                                       * across the compressor call boundary. */
     bool block_checksum;              /* Codec integrity checksum toggle.
                                        * For LZ4 streams this enables per-block checksums
                                        * (checksumming compressed block payloads). */
@@ -131,9 +132,9 @@ size_t streamCompressOutputBound(compression_algo_t algo, size_t input_len, int 
 
 /* Feed data through streaming compressor.
  * flush_mode: FLUSH_CONTINUE, FLUSH_SYNC, or FLUSH_END.
- * Returns bytes written to *output_ptr, 0 for no output, -1 on error. */
+ * Returns bytes written to output, 0 for no output, -1 on error. */
 ssize_t streamCompressFeed(stream_compressor_t *sc,
-                           uint8_t **output_ptr,
+                           uint8_t *output,
                            size_t output_capacity,
                            const uint8_t *input,
                            size_t input_len,

@@ -1,5 +1,14 @@
 tags {"rdb-compression external:skip needs:debug"} {
 
+proc read_dump_rdb_header_bytes {client} {
+    set rdbfile [file join [lindex [$client config get dir] 1] dump.rdb]
+    set fd [open $rdbfile r]
+    fconfigure $fd -translation binary
+    set header [read $fd 8]
+    close $fd
+    return $header
+}
+
 start_server {overrides {save "" enable-debug-command local}} {
     test {RDB save and load round-trip with LZ4 compression} {
         r config set rdb-compression-algo lz4
@@ -183,12 +192,18 @@ start_server {overrides {save "" enable-debug-command local}} {
         assert_equal "-9" [lindex [r config get rdb-streaming-compression-level] 1]
     }
 
-    test {LZ4 compressed RDB with rdb-checksum yes uses codec checksum} {
+    test {LZ4 compressed RDB with rdb-checksum yes sets VKCS codec checksum flag} {
         r config set rdb-compression-algo lz4
         r flushall
         for {set i 0} {$i < 200} {incr i} {
             r set "cksum:$i" [string repeat "payload$i " 200]
         }
+
+        r save
+        set header [read_dump_rdb_header_bytes r]
+        assert_equal "VKCS" [string range $header 0 3]
+        binary scan [string index $header 6] cu flags
+        assert {($flags & 0x02) != 0}
 
         set digest [debug_digest]
         r debug reload
@@ -251,12 +266,18 @@ start_server {overrides {save "" enable-debug-command local}} {
 }
 
 start_server {overrides {save "" enable-debug-command local rdbchecksum no}} {
-    test {LZ4 compressed RDB with rdb-checksum no loads correctly} {
+    test {LZ4 compressed RDB with rdb-checksum no clears VKCS codec checksum flag and loads correctly} {
         r config set rdb-compression-algo lz4
         r flushall
         for {set i 0} {$i < 50} {incr i} {
             r set "nocksum:$i" [string repeat "data$i " 100]
         }
+
+        r save
+        set header [read_dump_rdb_header_bytes r]
+        assert_equal "VKCS" [string range $header 0 3]
+        binary scan [string index $header 6] cu flags
+        assert {($flags & 0x02) == 0}
 
         set digest [debug_digest]
         r debug reload
@@ -275,7 +296,7 @@ start_server {tags {"rdb-compression repl external:skip"}} {
         set primary_host [srv 0 host]
         set primary_port [srv 0 port]
 
-        test {Full sync replication works with LZ4-compressed RDB snapshot} {
+        test {Disk-based full sync replication works with LZ4-compressed RDB snapshot} {
             $primary config set rdbcompression yes
             $primary config set rdb-compression-algo lz4
             $primary config set rdb-streaming-compression-level -5
@@ -297,7 +318,7 @@ start_server {tags {"rdb-compression repl external:skip"}} {
             assert_equal [string repeat "payload42 " 40] [$replica get repl:42]
         }
 
-        test {Replication continues after LZ4 full sync} {
+        test {Incremental replication continues after LZ4 full sync} {
             $primary set repl:post-sync "after-sync"
             wait_for_condition 50 100 {
                 [$replica get repl:post-sync] eq "after-sync"
@@ -306,7 +327,7 @@ start_server {tags {"rdb-compression repl external:skip"}} {
             }
         }
 
-        test {Diskless full sync replication works with LZ4-compressed RDB snapshot} {
+        test {Diskless full sync remains compatible when rdb-compression-algo is lz4} {
             $replica replicaof no one
             $primary config set repl-diskless-sync yes
             $primary config set repl-diskless-sync-delay 0

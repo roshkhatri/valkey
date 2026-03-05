@@ -45,7 +45,8 @@ static void rioInitBase(rio *base,
                         size_t (*write_fn)(rio *, const void *, size_t),
                         off_t (*tell_fn)(rio *),
                         int (*flush_fn)(rio *),
-                        uint64_t flags) {
+                        uint64_t flags,
+                        uint8_t type) {
     base->read = read_fn;
     base->write = write_fn;
     base->tell = tell_fn;
@@ -55,12 +56,14 @@ static void rioInitBase(rio *base,
     base->flags = flags;
     base->processed_bytes = 0;
     base->max_processing_chunk = 0;
+    base->type = type;
 }
 
 /* ===================================================================
  * Compression Rio Decorator
  * Wraps an inner rio for transparent compression on write.
- * Used by BGSAVE (fork child) and diskless sync.
+ * Currently used by file-backed RDB save paths. Replication wiring will
+ * reuse the same writer abstraction once that path lands.
  *
  * RDB CHECKSUM SEMANTICS: When streaming compression is active, integrity
  * may come from either:
@@ -85,7 +88,7 @@ static size_t compressRioWrite(rio *r, const void *buf, size_t len) {
         r->flags |= RIO_FLAG_WRITE_ERROR;
         return 0;
     }
-    if (stream_writer_write(cr->compressor, buf, len) != 0) {
+    if (stream_writer_write(cr->compressor, buf, len) < 0) {
         r->flags |= RIO_FLAG_WRITE_ERROR;
         return 0;
     }
@@ -125,7 +128,7 @@ int rioInitWithCompress(compress_rio_t *cr, rio *inner, const stream_writer_conf
     if (cfg->block_checksum) flags |= RIO_FLAG_STREAMING_CODEC_CHECKSUM;
 
     rioInitBase(&cr->base, rioReadUnsupported, compressRioWrite, compressRioTell,
-                compressRioFlush, flags);
+                compressRioFlush, flags, rioCheckType(inner));
 
     cr->inner = inner;
     cr->finalized = 0;
@@ -235,7 +238,7 @@ int decompress_rio_init_with_config(decompress_rio_t *dr, rio *inner, const stre
 
     memset(dr, 0, sizeof(*dr));
     rioInitBase(&dr->base, decompressRioRead, rioWriteUnsupported, decompressRioTell,
-                rioFlushNoop, RIO_FLAG_STREAMING_DECOMPRESSION);
+                rioFlushNoop, RIO_FLAG_STREAMING_DECOMPRESSION, rioCheckType(inner));
     dr->inner = inner;
 
     dr->reader = stream_reader_create(cfg, decompressRioReadPartial, dr);

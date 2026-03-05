@@ -21,6 +21,8 @@ typedef struct {
     int level;
     uint8_t stream_kind;              /* STREAM_KIND_RDB or STREAM_KIND_REPL */
     bool block_checksum;              /* Codec checksum toggle (LZ4 block checksum) */
+    bool stable_src;                  /* Caller guarantees input remains valid until the
+                                       * next write/flush on this writer. */
     bool raw_frame;                   /* true => emit raw codec frame (no VKCS envelope) */
     compress_block_mode_t block_mode; /* LZ4 block mode (default: independent) */
 } stream_writer_config_t;
@@ -60,13 +62,15 @@ typedef struct {
 typedef ssize_t (*stream_reader_read_fn)(void *ctx, void *buf, size_t len);
 
 /* Generic streaming writer API.
- * Ownership: returned context is owned by caller and must be destroyed. */
+ * Ownership: returned context is owned by caller and must be destroyed.
+ * Threading: stream_writer_t is NOT thread-safe; all API calls on a given
+ * instance must be externally serialized and single-owner at any instant. */
 stream_writer_t *stream_writer_create(const stream_writer_config_t *cfg,
                                       vkcsEmitFn emit_cb,
                                       void *emit_ctx);
-/* Returns 0 on success, -1 on error.
+/* Returns emitted bytes for this call (>=0), -1 on error.
  * After stream_writer_finish(), write returns -1 and does not emit bytes. */
-int stream_writer_write(stream_writer_t *t, const void *buf, size_t len);
+ssize_t stream_writer_write(stream_writer_t *t, const void *buf, size_t len);
 /* Returns 0 on success, -1 on error.
  * Flush-after-finish is a no-op success. */
 int stream_writer_flush(stream_writer_t *t);
@@ -74,6 +78,10 @@ int stream_writer_flush(stream_writer_t *t);
  * Calling finish more than once is a no-op success. */
 int stream_writer_finish(stream_writer_t *t);
 void stream_writer_destroy(stream_writer_t *t);
+/* Returns cumulative bytes successfully passed to emit_cb for this writer. */
+uint64_t stream_writer_bytes_emitted(const stream_writer_t *t);
+/* Snapshot only; cross-thread readers must synchronize externally
+ * (for example via waitForClientIO-equivalent quiesce). */
 int stream_writer_is_errored(const stream_writer_t *t);
 void stream_writer_set_error(stream_writer_t *t);
 

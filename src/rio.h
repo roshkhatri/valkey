@@ -74,6 +74,9 @@ struct _rio {
     /* maximum single read or write chunk size */
     size_t max_processing_chunk;
 
+    /* Backend type (RIO_TYPE_*). Decorators should preserve the wrapped type. */
+    uint8_t type;
+
     /* Backend-specific vars. */
     union {
         /* In-memory buffer target. */

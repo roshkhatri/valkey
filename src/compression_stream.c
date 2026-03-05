@@ -20,9 +20,10 @@ struct stream_writer {
     uint8_t stream_kind; /* STREAM_KIND_RDB or STREAM_KIND_REPL */
     bool raw_frame;      /* true => skip VKCS envelope and emit raw codec frame */
     bool envelope_written;
-    bool finished; /* Set by stream_writer_finish — blocks further writes.
-                    * Prevents accidental multi-frame output under one envelope. */
-    bool errored;  /* Sticky error flag — once set, all writes fail */
+    bool finished;          /* Set by stream_writer_finish — blocks further writes.
+                             * Prevents accidental multi-frame output under one envelope. */
+    bool errored;           /* Sticky error flag — once set, all writes fail */
+    uint64_t bytes_emitted; /* Running total of bytes successfully emitted */
 };
 
 static int streamWriterValidateConfig(const stream_writer_config_t *cfg) {
@@ -58,6 +59,7 @@ static int streamWriterInitContext(stream_writer_t *t,
     }
     t->compressor.block_checksum = cfg->block_checksum;
     t->compressor.block_mode = cfg->block_mode;
+    t->compressor.stable_src = cfg->stable_src;
     return 0;
 }
 
@@ -74,6 +76,7 @@ static int streamWriterEnsureEnvelope(stream_writer_t *t) {
         t->errored = true;
         return -1;
     }
+    t->bytes_emitted += VKCS_ENVELOPE_SIZE;
     t->envelope_written = true;
     return 0;
 }
@@ -86,6 +89,7 @@ static int streamWriterEmit(stream_writer_t *t, const uint8_t *buf, size_t len) 
         t->errored = true;
         return -1;
     }
+    t->bytes_emitted += len;
     return 0;
 }
 
@@ -117,15 +121,14 @@ static int streamWriterFeedAndEmit(stream_writer_t *t,
                                    compress_flush_mode_t flush_mode) {
     streamWriterEnsureOutBuf(t, input_len, flush_mode);
 
-    uint8_t *out_ptr = t->out_buf;
-    ssize_t compressed = streamCompressFeed(&t->compressor, &out_ptr,
+    ssize_t compressed = streamCompressFeed(&t->compressor, t->out_buf,
                                             t->out_buf_size,
                                             input, input_len, flush_mode);
     if (compressed < 0) {
         t->errored = true;
         return -1;
     }
-    return streamWriterEmit(t, out_ptr, (size_t)compressed);
+    return streamWriterEmit(t, t->out_buf, (size_t)compressed);
 }
 
 /* Release stream compressor state owned by stream_writer_t.
@@ -151,7 +154,7 @@ stream_writer_t *stream_writer_create(const stream_writer_config_t *cfg,
     return t;
 }
 
-int stream_writer_write(stream_writer_t *t, const void *buf, size_t len) {
+ssize_t stream_writer_write(stream_writer_t *t, const void *buf, size_t len) {
     if (!t) return -1;
     if (t->errored) return -1;
     /* Writes after finish are always a caller bug. Returning an error
@@ -159,9 +162,15 @@ int stream_writer_write(stream_writer_t *t, const void *buf, size_t len) {
     if (t->finished) return -1;
     if (len == 0) return 0;
 
+    uint64_t emitted_before = t->bytes_emitted;
     if (streamWriterEnsureEnvelope(t) != 0) return -1;
     if (streamWriterFeedAndEmit(t, (const uint8_t *)buf, len, FLUSH_CONTINUE) != 0) return -1;
-    return 0;
+    uint64_t emitted_delta = t->bytes_emitted - emitted_before;
+    if (emitted_delta > (uint64_t)SSIZE_MAX) {
+        t->errored = true;
+        return -1;
+    }
+    return (ssize_t)emitted_delta;
 }
 
 int stream_writer_flush(stream_writer_t *t) {
@@ -191,6 +200,11 @@ void stream_writer_destroy(stream_writer_t *t) {
     if (!t) return;
     streamWriterReleaseContext(t);
     zfree(t);
+}
+
+uint64_t stream_writer_bytes_emitted(const stream_writer_t *t) {
+    if (!t) return 0;
+    return t->bytes_emitted;
 }
 
 int stream_writer_is_errored(const stream_writer_t *t) {

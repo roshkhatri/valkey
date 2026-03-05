@@ -91,11 +91,12 @@ static const rio rioBufferIO = {
     rioBufferWrite,
     rioBufferTell,
     rioBufferFlush,
-    NULL,       /* update_checksum */
-    0,          /* current checksum */
-    0,          /* flags */
-    0,          /* bytes read or written */
-    0,          /* read/write chunk size */
+    NULL, /* update_checksum */
+    0,    /* current checksum */
+    0,    /* flags */
+    0,    /* bytes read or written */
+    0,    /* read/write chunk size */
+    RIO_TYPE_BUFFER,
     {{NULL, 0}} /* union for io-specific vars */
 };
 
@@ -186,11 +187,12 @@ static const rio rioFileIO = {
     rioFileWrite,
     rioFileTell,
     rioFileFlush,
-    NULL,       /* update_checksum */
-    0,          /* current checksum */
-    0,          /* flags */
-    0,          /* bytes read or written */
-    0,          /* read/write chunk size */
+    NULL, /* update_checksum */
+    0,    /* current checksum */
+    0,    /* flags */
+    0,    /* bytes read or written */
+    0,    /* read/write chunk size */
+    RIO_TYPE_FILE,
     {{NULL, 0}} /* union for io-specific vars */
 };
 
@@ -284,11 +286,12 @@ static const rio rioConnIO = {
     rioConnWrite,
     rioConnTell,
     rioConnFlush,
-    NULL,       /* update_checksum */
-    0,          /* current checksum */
-    0,          /* flags */
-    0,          /* bytes read or written */
-    0,          /* read/write chunk size */
+    NULL, /* update_checksum */
+    0,    /* current checksum */
+    0,    /* flags */
+    0,    /* bytes read or written */
+    0,    /* read/write chunk size */
+    RIO_TYPE_CONN,
     {{NULL, 0}} /* union for io-specific vars */
 };
 
@@ -400,11 +403,12 @@ static const rio rioFdIO = {
     rioFdWrite,
     rioFdTell,
     rioFdFlush,
-    NULL,       /* update_checksum */
-    0,          /* current checksum */
-    0,          /* flags */
-    0,          /* bytes read or written */
-    0,          /* read/write chunk size */
+    NULL, /* update_checksum */
+    0,    /* current checksum */
+    0,    /* flags */
+    0,    /* bytes read or written */
+    0,    /* read/write chunk size */
+    RIO_TYPE_FD,
     {{NULL, 0}} /* union for io-specific vars */
 };
 
@@ -453,16 +457,7 @@ void rioSetReclaimCache(rio *r, int enabled) {
 
 /* Check the type of rio. */
 uint8_t rioCheckType(rio *r) {
-    if (r->read == rioFileRead) {
-        return RIO_TYPE_FILE;
-    } else if (r->read == rioBufferRead) {
-        return RIO_TYPE_BUFFER;
-    } else if (r->read == rioConnRead) {
-        return RIO_TYPE_CONN;
-    } else {
-        /* r->read == rioFdRead */
-        return RIO_TYPE_FD;
-    }
+    return r->type;
 }
 
 /* --------------------------- Higher level interface --------------------------
@@ -608,11 +603,12 @@ static const rio rioConnsetIO = {
     rioConnsetWrite,
     rioConnsetTell,
     rioConnsetFlush,
-    NULL,       /* update_checksum */
-    0,          /* current checksum */
-    0,          /* flags */
-    0,          /* bytes read or written */
-    0,          /* read/write chunk size */
+    NULL, /* update_checksum */
+    0,    /* current checksum */
+    0,    /* flags */
+    0,    /* bytes read or written */
+    0,    /* read/write chunk size */
+    RIO_TYPE_CONN,
     {{NULL, 0}} /* union for io-specific vars */
 };
 
