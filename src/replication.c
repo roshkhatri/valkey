@@ -844,6 +844,53 @@ int replicationSetupReplicaForFullResync(client *replica, long long offset) {
     return C_OK;
 }
 
+/* Check if replication compression should be enabled for a replica.
+ * Returns 1 if compression should be enabled, 0 otherwise.
+ * Requires: server.repl_compression enabled AND a valid streaming algorithm. */
+static int shouldEnableReplicaCompression(client *c) {
+    UNUSED(c);
+    if (!server.repl_compression) return 0;
+    if (server.repl_compression_algo == ALGO_NONE) return 0;
+    return 1;
+}
+
+/* Send VKCS envelope and initialize compression for a replica at PSYNC completion.
+ * The VKCS envelope is sent once via direct connWrite (before raw_frame streaming begins).
+ * Returns C_OK on success, C_ERR on failure (caller should disconnect the replica). */
+static int replicaInitCompressionOnPsync(client *c) {
+    compression_algo_t algo = (compression_algo_t)server.repl_compression_algo;
+    int level = server.repl_streaming_compression_level;
+
+    /* Build and send the VKCS envelope directly to the socket.
+     * We build the envelope manually using the documented format. */
+    uint8_t envelope[VKCS_ENVELOPE_SIZE];
+    envelope[0] = VKCS_MAGIC_0;
+    envelope[1] = VKCS_MAGIC_1;
+    envelope[2] = VKCS_MAGIC_2;
+    envelope[3] = VKCS_MAGIC_3;
+    envelope[4] = VKCS_VERSION;
+    envelope[5] = (uint8_t)algo;
+    envelope[6] = STREAM_KIND_REPL & VKCS_FLAG_STREAM_KIND;
+    envelope[7] = 0; /* reserved */
+
+    if (connWrite(c->conn, envelope, VKCS_ENVELOPE_SIZE) != VKCS_ENVELOPE_SIZE) {
+        serverLog(LL_WARNING, "Failed to send VKCS envelope to replica %s",
+                  replicationGetReplicaName(c));
+        return C_ERR;
+    }
+
+    /* Initialize the compression context (raw_frame=true, no per-write envelope) */
+    if (replInitCompression(c, algo, level) != C_OK) {
+        serverLog(LL_WARNING, "Failed to initialize compression for replica %s",
+                  replicationGetReplicaName(c));
+        return C_ERR;
+    }
+
+    serverLog(LL_NOTICE, "Replication compression enabled for replica %s (algo=%s, level=%d)",
+              replicationGetReplicaName(c), compressionAlgoName(algo), level);
+    return C_OK;
+}
+
 /* This function handles the PSYNC command from the point of view of a
  * primary receiving a request for partial resynchronization.
  *
@@ -938,6 +985,17 @@ int primaryTryPartialResynchronization(client *c, long long psync_offset) {
         freeClientAsync(c);
         return C_OK;
     }
+
+    /* Initialize replication compression if negotiated.
+     * Must happen after +CONTINUE (plaintext) and before addReplyReplicationBacklog
+     * so the backlog data goes through the compressed path. */
+    if (c->repl_data->repl_state == REPLICA_STATE_ONLINE && shouldEnableReplicaCompression(c)) {
+        if (replicaInitCompressionOnPsync(c) != C_OK) {
+            freeClientAsync(c);
+            return C_OK;
+        }
+    }
+
     psync_len = addReplyReplicationBacklog(c, psync_offset);
     serverLog(
         LL_NOTICE,
@@ -1295,6 +1353,7 @@ int anyOtherReplicaWaitRdb(client *except_me) {
 void initClientReplicationData(client *c) {
     if (c->repl_data) return;
     c->repl_data = (ClientReplicationData *)zcalloc(sizeof(ClientReplicationData));
+    c->repl_data->affinity_tid = -1;
 }
 
 void freeClientReplicationData(client *c) {
@@ -1591,6 +1650,16 @@ int replicaPutOnline(client *replica) {
     }
     replica->repl_data->repl_state = REPLICA_STATE_ONLINE;
     replica->repl_data->repl_ack_time = server.unixtime; /* Prevent false timeout. */
+
+    /* Initialize replication compression if configured.
+     * Must happen after state is ONLINE and before any replication data is sent. */
+    if (shouldEnableReplicaCompression(replica)) {
+        if (replicaInitCompressionOnPsync(replica) != C_OK) {
+            serverLog(LL_WARNING, "Failed to init compression for replica %s during full sync, disconnecting",
+                      replicationGetReplicaName(replica));
+            return 0; /* Signal caller to disconnect */
+        }
+    }
 
     refreshGoodReplicasCount();
     /* Fire the replica change modules event. */

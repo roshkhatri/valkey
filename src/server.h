@@ -80,6 +80,7 @@
 #include "expire.h"     /* Expiration public API */
 #include "rax.h"        /* Radix tree */
 #include "connection.h" /* Connection abstraction */
+#include "compression.h" /* Compression algorithm types */
 #include "memory_prefetch.h"
 #include "vset.h"
 #include "trace/trace.h"
@@ -1247,6 +1248,9 @@ typedef struct ClientPubSubData {
                                       context of client side caching. */
 } ClientPubSubData;
 
+/* Forward declaration for streaming compression writer (defined in compression_stream.h) */
+typedef struct stream_writer stream_writer_t;
+
 typedef struct ClientReplicationData {
     int repl_state;                      /* Replication state if this is a replica. */
     int repl_start_cmd_stream_on_ack;    /* Install replica write handler on first ACK. */
@@ -1278,6 +1282,14 @@ typedef struct ClientReplicationData {
     size_t ref_block_pos;                /* Access position of referenced buffer block,
                                            i.e. the next offset to send. */
     sds replica_nodeid;                  /* Node id in cluster mode. */
+
+    /* Inline compression state (for IO thread replication compression) */
+    stream_writer_t *repl_compressor;    /* Compression context, NULL when inactive */
+    sds compressed_buf;                  /* Per-client compressed output buffer */
+    size_t compressed_buf_pos;           /* Write cursor into compressed_buf */
+    size_t compressed_raw_bytes;         /* Raw bytes compressed in current batch */
+    int affinity_tid;                    /* Sticky IO thread ID, -1 if unset */
+    int compression_error;               /* Error flag set by IO thread */
 } ClientReplicationData;
 
 typedef struct ClientModuleData {
@@ -2054,6 +2066,11 @@ struct valkeyServer {
     int rdb_compression_algo;             /* RDB compression algorithm (compression_algo_t):
                                            * ALGO_LZF (default), ALGO_LZ4 */
     int rdb_streaming_compression_level;  /* Streaming compressor level (LZ4). */
+    int repl_compression;                 /* Enable replication stream compression? */
+    int repl_compression_algo;            /* Replication compression algorithm (compression_algo_t):
+                                           * ALGO_NONE (default), ALGO_LZ4 */
+    int repl_streaming_compression_level; /* Replication streaming compressor level (LZ4). */
+    int repl_compression_thread_affinity; /* Sticky IO thread affinity for compressed replicas? */
     int rdb_checksum;                     /* Use RDB checksum? */
     int rdb_del_sync_files;               /* Remove RDB files used only for SYNC if
                                              the instance does not use persistence. */
@@ -3227,6 +3244,8 @@ int replicaRdbVersion(client *replica);
 void addRdbReplicaToPsyncWait(client *replica);
 void initClientReplicationData(client *c);
 void freeClientReplicationData(client *c);
+int replInitCompression(client *c, compression_algo_t algo, int level);
+void replDestroyCompression(client *c);
 void replicaReceiveRDBFromPrimaryToDisk(connection *conn, int is_dual_channel);
 sds replicationSendAuth(connection *conn);
 sds receiveSynchronousResponse(connection *conn);

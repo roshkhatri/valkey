@@ -7,6 +7,7 @@
 #include "io_threads.h"
 
 static _Thread_local int thread_id = 0; /* Thread local var */
+static int repl_affinity_next_tid = 1; /* Round-robin counter for replica thread affinity */
 static pthread_t io_threads[IO_THREADS_MAX_NUM] = {0};
 static pthread_mutex_t io_threads_mutex[IO_THREADS_MAX_NUM];
 
@@ -382,6 +383,51 @@ void initIOThreads(void) {
     }
 }
 
+/* Assign a sticky IO thread ID to a compression-enabled replica via round-robin.
+ * Called from PSYNC handshake completion when compression is negotiated.
+ * When affinity is disabled or there are no IO threads, sets affinity_tid to -1. */
+void replAssignAffinityTid(client *c) {
+    if (!server.repl_compression_thread_affinity || server.io_threads_num <= 1) {
+        c->repl_data->affinity_tid = -1;
+        return;
+    }
+    c->repl_data->affinity_tid = repl_affinity_next_tid;
+    repl_affinity_next_tid++;
+    if (repl_affinity_next_tid >= server.io_threads_num) {
+        repl_affinity_next_tid = 1;
+    }
+}
+
+/* Wrapper for gtest to reset the round-robin counter to its initial state. */
+void testOnlyResetReplAffinityNextTid(void) {
+    repl_affinity_next_tid = 1;
+}
+
+/* Test-only helper: extract the thread-selection logic from trySendWriteToIOThreads()
+ * so property tests can verify affinity dispatch without triggering side effects
+ * (queue pushes, list manipulations, etc.).
+ *
+ * Returns the thread ID that trySendWriteToIOThreads() would select for the given client,
+ * or -1 if the client would not be eligible for IO thread dispatch. */
+int testOnlyComputeWriteThreadId(client *c) {
+    if (server.active_io_threads_num <= 1) return -1;
+
+    size_t tid;
+    if (getClientType(c) == CLIENT_TYPE_REPLICA &&
+        c->repl_data->affinity_tid > 0 &&
+        c->repl_data->affinity_tid < server.active_io_threads_num)
+    {
+        tid = c->repl_data->affinity_tid;
+    } else {
+        tid = (c->id % (server.active_io_threads_num - 1)) + 1;
+    }
+
+    /* Mirror the pending-read pinning logic */
+    if (c->io_read_state == CLIENT_PENDING_IO && c->cur_tid != (uint8_t)tid) tid = c->cur_tid;
+
+    return (int)tid;
+}
+
 int trySendReadToIOThreads(client *c) {
     if (server.active_io_threads_num <= 1) return C_ERR;
     /* If IO thread is already reading, return C_OK to make sure the main thread will not handle it. */
@@ -393,6 +439,7 @@ int trySendReadToIOThreads(client *c) {
     /* For simplicity let the main-thread handle the blocked clients */
     if (c->flag.blocked || c->flag.unblocked) return C_ERR;
     if (c->flag.close_asap) return C_ERR;
+
     size_t tid = (c->id % (server.active_io_threads_num - 1)) + 1;
 
     /* Handle case where client has a pending IO write job on a different thread:
@@ -434,7 +481,17 @@ int trySendWriteToIOThreads(client *c) {
     /* We can't offload debugged clients as the main-thread may read at the same time  */
     if (c->flag.lua_debug) return C_ERR;
 
-    size_t tid = (c->id % (server.active_io_threads_num - 1)) + 1;
+    size_t tid;
+    /* Use affinity thread for compressed replicas with valid affinity_tid */
+    if (getClientType(c) == CLIENT_TYPE_REPLICA &&
+        c->repl_data->affinity_tid > 0 &&
+        c->repl_data->affinity_tid < server.active_io_threads_num)
+    {
+        tid = c->repl_data->affinity_tid;
+    } else {
+        tid = (c->id % (server.active_io_threads_num - 1)) + 1;
+    }
+
     /* Handle case where client has a pending IO read job on a different thread:
      * 1. A read job is still pending (io_read_state == CLIENT_PENDING_IO)
      * 2. The pending job is on a different thread (c->cur_tid != tid)
@@ -628,10 +685,11 @@ void trySendPollJobToIOThreads(void) {
         return;
     }
 
-    /* The poll is sent to the last thread. While a random thread could have been selected,
-     * the last thread has a slightly better chance of being less loaded compared to other threads,
-     * As we activate the lowest threads first. */
+    /* The poll is sent to the last active thread. While a random thread
+     * could have been selected, the last thread has a slightly better chance of being
+     * less loaded compared to other threads, as we activate the lowest threads first. */
     int tid = server.active_io_threads_num - 1;
+
     IOJobQueue *jq = &io_jobs[tid];
     if (IOJobQueue_isFull(jq)) return; /* The main thread will handle the poll itself. */
 
@@ -678,6 +736,7 @@ int trySendAcceptToIOThreads(connection *conn) {
     }
 
     size_t thread_id = (c->id % (server.active_io_threads_num - 1)) + 1;
+
     IOJobQueue *job_queue = &io_jobs[thread_id];
 
     if (IOJobQueue_isFull(job_queue)) {
