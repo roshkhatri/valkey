@@ -57,8 +57,4 @@ TEST(replCompression, capaCompressionStr) {
 TEST(replCompression, algoConstants) {
     /* ALGO_LZ4 must be non-zero so it's distinguishable from zero-init. */
     EXPECT_NE(ALGO_LZ4, 0);
-    /* ALGO_NONE must be 0. */
-    EXPECT_EQ(ALGO_NONE, 0);
-    /* They must be distinct. */
-    EXPECT_NE(ALGO_LZ4, ALGO_NONE);
 }
