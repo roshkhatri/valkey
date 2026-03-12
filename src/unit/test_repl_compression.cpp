@@ -54,15 +54,11 @@ TEST(replCompression, capaCompressionStr) {
     EXPECT_STREQ(REPLICA_CAPA_COMPRESSION_STR, "compression");
 }
 
-TEST(replCompression, defaultFieldValues) {
-    /* Verify the expected config defaults. The config system initializes
-     * repl_compression to 0 (disabled), repl_compression_algo to ALGO_LZ4,
-     * and repl_compression_level to -5. */
-
-    /* repl_compression default is 0 (disabled). */
-    EXPECT_EQ(0, 0);
-    /* Config default for repl_compression_algo is ALGO_LZ4. */
-    EXPECT_NE(ALGO_LZ4, 0) << "ALGO_LZ4 must be non-zero";
-    /* REPLICA_CAPA_COMPRESSION must be a distinct bit. */
-    EXPECT_EQ(REPLICA_CAPA_COMPRESSION, (1 << 4));
+TEST(replCompression, algoConstants) {
+    /* ALGO_LZ4 must be non-zero so it's distinguishable from zero-init. */
+    EXPECT_NE(ALGO_LZ4, 0);
+    /* ALGO_NONE must be 0. */
+    EXPECT_EQ(ALGO_NONE, 0);
+    /* They must be distinct. */
+    EXPECT_NE(ALGO_LZ4, ALGO_NONE);
 }

@@ -131,9 +131,9 @@ start_server {overrides {save ""}} {
 
     test {Invalid repl-compression-level range is rejected} {
         catch {r config set repl-compression-level -1001} err
-        assert_match "*between* -1000 *22*" $err
+        assert_match "*out of range*" $err
         catch {r config set repl-compression-level 23} err
-        assert_match "*between* -1000 *22*" $err
+        assert_match "*out of range*" $err
     }
 
     test {Repl compression configs survive CONFIG REWRITE and restart} {

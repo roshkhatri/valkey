@@ -189,10 +189,6 @@ configEnum rdb_compression_algo_enum[] = {{"lzf", ALGO_LZF},
 configEnum repl_compression_algo_enum[] = {{"lz4", ALGO_LZ4},
                                            {NULL, 0}};
 
-/* Per-algorithm compression level bounds.
- * Extend this when adding new algorithms (e.g., zstd). */
-#define REPL_COMPRESSION_LEVEL_LZ4_MIN (-1000)
-#define REPL_COMPRESSION_LEVEL_LZ4_MAX 22
 #define REPL_COMPRESSION_LEVEL_DEFAULT (-5)
 
 /* Output buffer limits presets. */
@@ -3251,8 +3247,8 @@ static int validateReplCompressionLevel(const char **err) {
     int min, max;
     switch (server.repl_compression_algo) {
     case ALGO_LZ4:
-        min = REPL_COMPRESSION_LEVEL_LZ4_MIN;
-        max = REPL_COMPRESSION_LEVEL_LZ4_MAX;
+        min = -1000;
+        max = 22;
         break;
     default:
         *err = "unknown repl-compression-algo";
@@ -3383,7 +3379,7 @@ standardConfig static_configs[] = {
 
     /* Integer configs */
     createIntConfig("rdb-streaming-compression-level", NULL, MODIFIABLE_CONFIG, -1000, 22, server.rdb_streaming_compression_level, RDB_STREAMING_COMPRESSION_LEVEL_DEFAULT, INTEGER_CONFIG, NULL, validateRdbCompressionSettings),
-    createIntConfig("repl-compression-level", NULL, MODIFIABLE_CONFIG, REPL_COMPRESSION_LEVEL_LZ4_MIN, REPL_COMPRESSION_LEVEL_LZ4_MAX, server.repl_compression_level, REPL_COMPRESSION_LEVEL_DEFAULT, INTEGER_CONFIG, NULL, validateReplCompressionLevel),
+    createIntConfig("repl-compression-level", NULL, MODIFIABLE_CONFIG, INT_MIN, INT_MAX, server.repl_compression_level, REPL_COMPRESSION_LEVEL_DEFAULT, INTEGER_CONFIG, NULL, validateReplCompressionLevel),
     createIntConfig("databases", NULL, IMMUTABLE_CONFIG, 1, INT_MAX, server.config_databases, 16, INTEGER_CONFIG, NULL, NULL),
     createIntConfig("cluster-databases", NULL, IMMUTABLE_CONFIG, 1, INT_MAX, server.config_databases_cluster, 1, INTEGER_CONFIG, NULL, NULL),
     createIntConfig("port", NULL, MODIFIABLE_CONFIG, 0, 65535, server.port, 6379, INTEGER_CONFIG, NULL, updatePort),                                               /* TCP port. */
