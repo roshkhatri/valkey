@@ -186,8 +186,7 @@ configEnum rdb_compression_algo_enum[] = {{"lzf", ALGO_LZF},
  * Kept centralized to avoid drift between config table and validation logic. */
 #define RDB_STREAMING_COMPRESSION_LEVEL_DEFAULT (-5)
 
-configEnum repl_compression_algo_enum[] = {{"none", ALGO_NONE},
-                                           {"lz4", ALGO_LZ4},
+configEnum repl_compression_algo_enum[] = {{"lz4", ALGO_LZ4},
                                            {NULL, 0}};
 
 /* Default for repl-compression-level.
@@ -470,7 +469,6 @@ static int reading_config_file;
 /* Tracks nested config parsing depth (top-level + includes). */
 static int config_parse_depth;
 static int validateRdbCompressionSettings(const char **err);
-static int validateReplCompressionSettings(const char **err);
 
 void loadServerConfigFromString(sds config) {
     deprecatedConfig deprecated_configs[] = {
@@ -645,9 +643,6 @@ void loadServerConfigFromString(sds config) {
     /* Validate cross-option consistency once at top-level parse end, after
      * all include files have been processed. */
     if (config_parse_depth == 1 && !validateRdbCompressionSettings(&err)) {
-        goto loaderr;
-    }
-    if (config_parse_depth == 1 && !validateReplCompressionSettings(&err)) {
         goto loaderr;
     }
 
@@ -3244,19 +3239,6 @@ static int validateRdbCompressionSettings(const char **err) {
     return 1;
 }
 
-/* Keep replication compression settings coherent.
- * Streaming level tuning applies only to LZ4. For non-LZ4 algorithms, only
- * the default level is allowed. */
-static int validateReplCompressionSettings(const char **err) {
-    if (server.repl_compression_algo != ALGO_LZ4 &&
-        server.repl_compression_level != REPL_COMPRESSION_LEVEL_DEFAULT) {
-        *err = "repl-compression-level is supported only when "
-               "repl-compression-algo is lz4";
-        return 0;
-    }
-    return 1;
-}
-
 standardConfig static_configs[] = {
     /* Bool configs */
     createBoolConfig("rdbchecksum", NULL, IMMUTABLE_CONFIG, server.rdb_checksum, 1, NULL, NULL),
@@ -3371,11 +3353,11 @@ standardConfig static_configs[] = {
     createEnumConfig("log-timestamp-format", NULL, MODIFIABLE_CONFIG, log_timestamp_format_enum, server.log_timestamp_format, LOG_TIMESTAMP_LEGACY, NULL, NULL),
     createEnumConfig("rdb-version-check", NULL, MODIFIABLE_CONFIG, rdb_version_check_enum, server.rdb_version_check, RDB_VERSION_CHECK_STRICT, NULL, NULL),
     createEnumConfig("rdb-compression-algo", NULL, MODIFIABLE_CONFIG, rdb_compression_algo_enum, server.rdb_compression_algo, ALGO_LZF, NULL, validateRdbCompressionSettings),
-    createEnumConfig("repl-compression-algo", NULL, MODIFIABLE_CONFIG, repl_compression_algo_enum, server.repl_compression_algo, ALGO_NONE, NULL, validateReplCompressionSettings),
+    createEnumConfig("repl-compression-algo", NULL, MODIFIABLE_CONFIG, repl_compression_algo_enum, server.repl_compression_algo, ALGO_LZ4, NULL, NULL),
 
     /* Integer configs */
     createIntConfig("rdb-streaming-compression-level", NULL, MODIFIABLE_CONFIG, -1000, 22, server.rdb_streaming_compression_level, RDB_STREAMING_COMPRESSION_LEVEL_DEFAULT, INTEGER_CONFIG, NULL, validateRdbCompressionSettings),
-    createIntConfig("repl-compression-level", NULL, MODIFIABLE_CONFIG, -1000, 22, server.repl_compression_level, REPL_COMPRESSION_LEVEL_DEFAULT, INTEGER_CONFIG, NULL, validateReplCompressionSettings),
+    createIntConfig("repl-compression-level", NULL, MODIFIABLE_CONFIG, -1000, 22, server.repl_compression_level, REPL_COMPRESSION_LEVEL_DEFAULT, INTEGER_CONFIG, NULL, NULL),
     createIntConfig("databases", NULL, IMMUTABLE_CONFIG, 1, INT_MAX, server.config_databases, 16, INTEGER_CONFIG, NULL, NULL),
     createIntConfig("cluster-databases", NULL, IMMUTABLE_CONFIG, 1, INT_MAX, server.config_databases_cluster, 1, INTEGER_CONFIG, NULL, NULL),
     createIntConfig("port", NULL, MODIFIABLE_CONFIG, 0, 65535, server.port, 6379, INTEGER_CONFIG, NULL, updatePort),                                               /* TCP port. */
