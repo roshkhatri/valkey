@@ -2057,34 +2057,34 @@ struct valkeyServer {
                                            * ALGO_LZF (default), ALGO_LZ4 */
     int rdb_streaming_compression_level;  /* Streaming compressor level (LZ4). */
     /* Replication compression */
-    int repl_compression;                  /* Use compression for replication? 0=no (default) */
-    int repl_compression_algo;             /* Replication compression algorithm: ALGO_NONE (default), ALGO_LZ4 */
-    int repl_compression_level;  /* Compression level for replication. Default: -5 */
-    int rdb_checksum;                     /* Use RDB checksum? */
-    int rdb_del_sync_files;               /* Remove RDB files used only for SYNC if
-                                             the instance does not use persistence. */
-    time_t lastsave;                      /* Unix time of last successful save */
-    time_t lastbgsave_try;                /* Unix time of last attempted bgsave */
-    time_t rdb_save_time_last;            /* Time used by last RDB save run. */
-    time_t rdb_save_time_start;           /* Current RDB save start time. */
-    int rdb_bgsave_scheduled;             /* BGSAVE when possible if true. */
-    int rdb_child_type;                   /* Type of save by active child. */
-    int lastbgsave_status;                /* C_OK or C_ERR */
-    int stop_writes_on_bgsave_err;        /* Don't allow writes if can't BGSAVE */
-    int rdb_pipe_read;                    /* RDB pipe used to transfer the rdb data */
-                                          /* to the parent process in diskless repl. */
-    int rdb_child_exit_pipe;              /* Used by the diskless parent allow child exit. */
-    connection **rdb_pipe_conns;          /* Connections which are currently the */
-    int rdb_pipe_numconns;                /* target of diskless rdb fork child. */
-    int rdb_pipe_numconns_writing;        /* Number of rdb conns with pending writes. */
-    char *rdb_pipe_buff;                  /* In diskless replication, this buffer holds data */
-    int rdb_pipe_bufflen;                 /* that was read from the rdb pipe. */
-    int rdb_key_save_delay;               /* Delay in microseconds between keys while
-                                           * writing aof or rdb. (for testings). negative
-                                           * value means fractions of microseconds (on average). */
-    int key_load_delay;                   /* Delay in microseconds between keys while
-                                           * loading aof or rdb. (for testings). negative
-                                           * value means fractions of microseconds (on average). */
+    int repl_compression;          /* Use compression for replication? 0=no (default) */
+    int repl_compression_algo;     /* Replication compression algorithm: ALGO_NONE (default), ALGO_LZ4 */
+    int repl_compression_level;    /* Compression level for replication. Default: -5 */
+    int rdb_checksum;              /* Use RDB checksum? */
+    int rdb_del_sync_files;        /* Remove RDB files used only for SYNC if
+                                      the instance does not use persistence. */
+    time_t lastsave;               /* Unix time of last successful save */
+    time_t lastbgsave_try;         /* Unix time of last attempted bgsave */
+    time_t rdb_save_time_last;     /* Time used by last RDB save run. */
+    time_t rdb_save_time_start;    /* Current RDB save start time. */
+    int rdb_bgsave_scheduled;      /* BGSAVE when possible if true. */
+    int rdb_child_type;            /* Type of save by active child. */
+    int lastbgsave_status;         /* C_OK or C_ERR */
+    int stop_writes_on_bgsave_err; /* Don't allow writes if can't BGSAVE */
+    int rdb_pipe_read;             /* RDB pipe used to transfer the rdb data */
+                                   /* to the parent process in diskless repl. */
+    int rdb_child_exit_pipe;       /* Used by the diskless parent allow child exit. */
+    connection **rdb_pipe_conns;   /* Connections which are currently the */
+    int rdb_pipe_numconns;         /* target of diskless rdb fork child. */
+    int rdb_pipe_numconns_writing; /* Number of rdb conns with pending writes. */
+    char *rdb_pipe_buff;           /* In diskless replication, this buffer holds data */
+    int rdb_pipe_bufflen;          /* that was read from the rdb pipe. */
+    int rdb_key_save_delay;        /* Delay in microseconds between keys while
+                                    * writing aof or rdb. (for testings). negative
+                                    * value means fractions of microseconds (on average). */
+    int key_load_delay;            /* Delay in microseconds between keys while
+                                    * loading aof or rdb. (for testings). negative
+                                    * value means fractions of microseconds (on average). */
     /* Pipe and data structures for child -> parent info sharing. */
     int child_info_pipe[2]; /* Pipe used to write the child_info_data. */
     int child_info_nread;   /* Num of bytes of the last read from pipe */

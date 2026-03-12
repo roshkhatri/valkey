@@ -11,8 +11,8 @@
 #include <cstring>
 
 extern "C" {
-#include "server.h"
 #include "compression.h"
+#include "server.h"
 }
 
 /* zmalloc.h defines helper macros that collide with libstdc++ internals. */
