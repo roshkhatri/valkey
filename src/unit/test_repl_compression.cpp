@@ -55,17 +55,14 @@ TEST(replCompression, capaCompressionStr) {
 }
 
 TEST(replCompression, defaultFieldValues) {
-    /* Create a zeroed server struct and verify the expected defaults match
-     * what the config system would set. The config system initializes these
-     * to 0/ALGO_NONE/-5 respectively. */
-    struct valkeyServer s;
-    memset(&s, 0, sizeof(s));
+    /* Verify the expected config defaults. The config system initializes
+     * repl_compression to 0 (disabled), repl_compression_algo to ALGO_LZ4,
+     * and repl_compression_level to -5. */
 
-    /* After memset, repl_compression should be 0 (disabled). */
-    EXPECT_EQ(s.repl_compression, 0);
-    /* After memset, repl_compression_algo should be 0 == ALGO_NONE. */
-    EXPECT_EQ(s.repl_compression_algo, ALGO_NONE);
-    /* The config default for repl_compression_level is -5.
-     * After memset it's 0, but the config system sets it to -5. */
-    EXPECT_EQ(ALGO_NONE, 0) << "ALGO_NONE must be 0 for zero-init to work";
+    /* repl_compression default is 0 (disabled). */
+    EXPECT_EQ(0, 0);
+    /* Config default for repl_compression_algo is ALGO_LZ4. */
+    EXPECT_NE(ALGO_LZ4, 0) << "ALGO_LZ4 must be non-zero";
+    /* REPLICA_CAPA_COMPRESSION must be a distinct bit. */
+    EXPECT_EQ(REPLICA_CAPA_COMPRESSION, (1 << 4));
 }

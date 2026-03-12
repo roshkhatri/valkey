@@ -3383,7 +3383,7 @@ standardConfig static_configs[] = {
 
     /* Integer configs */
     createIntConfig("rdb-streaming-compression-level", NULL, MODIFIABLE_CONFIG, -1000, 22, server.rdb_streaming_compression_level, RDB_STREAMING_COMPRESSION_LEVEL_DEFAULT, INTEGER_CONFIG, NULL, validateRdbCompressionSettings),
-    createIntConfig("repl-compression-level", NULL, MODIFIABLE_CONFIG, -1000, 22, server.repl_compression_level, REPL_COMPRESSION_LEVEL_DEFAULT, INTEGER_CONFIG, NULL, validateReplCompressionLevel),
+    createIntConfig("repl-compression-level", NULL, MODIFIABLE_CONFIG, REPL_COMPRESSION_LEVEL_LZ4_MIN, REPL_COMPRESSION_LEVEL_LZ4_MAX, server.repl_compression_level, REPL_COMPRESSION_LEVEL_DEFAULT, INTEGER_CONFIG, NULL, validateReplCompressionLevel),
     createIntConfig("databases", NULL, IMMUTABLE_CONFIG, 1, INT_MAX, server.config_databases, 16, INTEGER_CONFIG, NULL, NULL),
     createIntConfig("cluster-databases", NULL, IMMUTABLE_CONFIG, 1, INT_MAX, server.config_databases_cluster, 1, INTEGER_CONFIG, NULL, NULL),
     createIntConfig("port", NULL, MODIFIABLE_CONFIG, 0, 65535, server.port, 6379, INTEGER_CONFIG, NULL, updatePort),                                               /* TCP port. */

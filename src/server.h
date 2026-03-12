@@ -2058,7 +2058,7 @@ struct valkeyServer {
     int rdb_streaming_compression_level;  /* Streaming compressor level (LZ4). */
     /* Replication compression */
     int repl_compression;          /* Use compression for replication? 0=no (default) */
-    int repl_compression_algo;     /* Replication compression algorithm: ALGO_NONE (default), ALGO_LZ4 */
+    int repl_compression_algo;     /* Replication compression algorithm: ALGO_LZ4 (default) */
     int repl_compression_level;    /* Compression level for replication. Default: -5 */
     int rdb_checksum;              /* Use RDB checksum? */
     int rdb_del_sync_files;        /* Remove RDB files used only for SYNC if
