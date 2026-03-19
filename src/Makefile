@@ -31,7 +31,7 @@ endif
 ifneq ($(OPTIMIZATION),-O0)
 	OPTIMIZATION+=-fno-omit-frame-pointer
 endif
-DEPENDENCY_TARGETS=libvalkey linenoise hdr_histogram fpconv
+DEPENDENCY_TARGETS=libvalkey linenoise hdr_histogram fpconv lz4
 NODEPS:=clean distclean
 
 # Default settings
@@ -251,7 +251,7 @@ ifdef OPENSSL_PREFIX
 endif
 
 # Include paths to dependencies
-FINAL_CFLAGS+= -I../deps/libvalkey/include -I../deps/linenoise -I../deps/hdr_histogram -I../deps/fpconv -I../deps/fast_float
+FINAL_CFLAGS+= -I../deps/libvalkey/include -I../deps/linenoise -I../deps/hdr_histogram -I../deps/fpconv -I../deps/fast_float -I../deps/lz4
 
 # Lua scripting engine module
 LUA_MODULE_NAME:=modules/lua/libvalkeylua.so
@@ -468,6 +468,9 @@ ENGINE_SERVER_OBJ = \
     cluster_slot_stats.o \
     commandlog.o \
     commands.o \
+    compression.o \
+    compression_stream.o \
+    compression_rio.o \
     config.o \
     connection.o \
     crc16.o \
@@ -618,6 +621,17 @@ ENGINE_LIB_NAME=lib$(ENGINE_NAME).a
 ENGINE_UNIT_GTESTS:=$(ENGINE_NAME)-unit-gtests$(PROG_SUFFIX)
 ALL_SOURCES=$(sort $(patsubst %.o,%.c,$(ENGINE_SERVER_OBJ) $(ENGINE_CLI_OBJ) $(ENGINE_BENCHMARK_OBJ)))
 
+USE_FAST_FLOAT?=no
+ifeq ($(USE_FAST_FLOAT),yes)
+	# valkey_strtod.h uses this flag to switch valkey_strtod function to fast_float_strtod,
+	# therefore let's pass it to compiler for preprocessing.
+	FINAL_CFLAGS += -D USE_FAST_FLOAT
+	# next, let's build and add actual library containing fast_float_strtod function for linking.
+	DEPENDENCY_TARGETS += fast_float_c_interface
+	FAST_FLOAT_STRTOD_OBJECT := ../deps/fast_float_c_interface/fast_float_strtod.o
+	FINAL_LIBS += $(FAST_FLOAT_STRTOD_OBJECT)
+endif
+
 USE_LIBBACKTRACE?=no
 ifeq ($(USE_LIBBACKTRACE),yes)
 	FINAL_CFLAGS += -DUSE_LIBBACKTRACE
@@ -659,6 +673,7 @@ persist-settings: distclean
 	echo BUILD_RDMA=$(BUILD_RDMA) >> .make-settings
 	echo USE_SYSTEMD=$(USE_SYSTEMD) >> .make-settings
 	echo BUILD_LUA=$(BUILD_LUA) >> .make-settings
+	echo USE_FAST_FLOAT=$(USE_FAST_FLOAT) >> .make-settings
 	echo USE_LIBBACKTRACE=$(USE_LIBBACKTRACE) >> .make-settings
 	echo LIBBACKTRACE_PREFIX=$(LIBBACKTRACE_PREFIX) >> .make-settings
 	echo CFLAGS=$(CFLAGS) >> .make-settings
@@ -687,12 +702,16 @@ endif
 
 # valkey-server
 $(SERVER_NAME): $(ENGINE_SERVER_OBJ) $(LUA_MODULE)
-	$(SERVER_LD) -o $@ $(ENGINE_SERVER_OBJ) ../deps/libvalkey/lib/libvalkey.a ../deps/hdr_histogram/libhdrhistogram.a ../deps/fpconv/libfpconv.a $(FINAL_LIBS)
+	$(SERVER_LD) -o $@ $(ENGINE_SERVER_OBJ) ../deps/libvalkey/lib/libvalkey.a ../deps/hdr_histogram/libhdrhistogram.a ../deps/fpconv/libfpconv.a ../deps/lz4/liblz4.a $(FINAL_LIBS)
 
 # Valkey static library, used to compile against for unit testing
 $(ENGINE_LIB_NAME): $(ENGINE_SERVER_OBJ)
+	rm -f $@
 	$(SERVER_AR) rcs $@ $^
 
+# valkey-unit-tests
+$(ENGINE_UNIT_TESTS): $(ENGINE_TEST_OBJ) $(ENGINE_LIB_NAME)
+	$(SERVER_LD) -o $@ $^ ../deps/libvalkey/lib/libvalkey.a ../deps/hdr_histogram/libhdrhistogram.a ../deps/fpconv/libfpconv.a ../deps/lz4/liblz4.a $(FINAL_LIBS)
 # valkey-sentinel
 $(ENGINE_SENTINEL_NAME): $(SERVER_NAME)
 	$(ENGINE_INSTALL) $(SERVER_NAME) $(ENGINE_SENTINEL_NAME)
