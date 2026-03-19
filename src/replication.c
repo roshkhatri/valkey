@@ -38,6 +38,7 @@
 #include "cluster_slot_stats.h"
 #include "bio.h"
 #include "functions.h"
+#include "compression_rio.h"
 #include "connection.h"
 #include "module.h"
 #include "cluster_migrateslots.h"
@@ -2446,22 +2447,57 @@ int replicaLoadPrimaryRDBFromSocket(connection *conn, char *buf, char *eofmark, 
     if (replicationSupportSkipRDBChecksum(conn, 1, *usemark)) rdb.flags |= RIO_FLAG_SKIP_RDB_CHECKSUM;
     int loadingFailed = 0;
     rdbLoadingCtx loadingCtx = {.dbarray = dbarray, .functions_lib_ctx = functions_lib_ctx};
+
+    /* Wrap the connection rio with a decompression decorator.  When the
+     * primary sent a VKCS-compressed RDB payload the decorator transparently
+     * decompresses; otherwise allow_passthrough forwards raw bytes as-is,
+     * keeping backward compatibility with uncompressed primaries. */
+    decompress_rio_t dr;
+    int dr_initialized = 0;
+    rio *load_rio = &rdb;
+
+    if (server.repl_compression) {
+        stream_reader_config_t reader_cfg = {
+            .algo = ALGO_NONE,
+            .expected_stream_kind = STREAM_KIND_RDB,
+            .raw_frame = 0,
+            .allow_passthrough = true,
+            .batch_size = 0,
+        };
+        if (decompress_rio_init_with_config(&dr, &rdb, &reader_cfg) == 0) {
+            load_rio = (rio *)&dr;
+            dr_initialized = 1;
+        } else {
+            /* The stream reader probes the socket while initializing, so a
+             * failure here may leave the raw rio positioned mid-stream.
+             * Abort the full sync rather than attempting an unsafe fallback. */
+            serverLog(LL_WARNING, "Failed to initialize decompression for full sync");
+            loadingFailed = 1;
+        }
+    }
+
     /* If we aren't using the swapdb method, then we want to empty the data before loading the rdb */
     int flags = RDBFLAGS_REPLICATION;
     if (server.repl_diskless_load != REPL_DISKLESS_LOAD_SWAPDB) flags |= RDBFLAGS_EMPTY_DATA;
-    int retval = rdbLoadRioWithLoadingCtxScopedRdb(&rdb, flags, rsi, &loadingCtx);
-    if (retval != RDB_OK) {
+    int retval = RDB_FAILED;
+    if (!loadingFailed) retval = rdbLoadRioWithLoadingCtxScopedRdb(load_rio, flags, rsi, &loadingCtx);
+    if (loadingFailed || retval != RDB_OK) {
         /* RDB loading failed. */
         serverLog(LL_WARNING, "Failed trying to load the PRIMARY synchronization DB "
                               "from socket, check server logs.");
         loadingFailed = 1;
     } else if (*usemark) {
-        /* Verify the end mark is correct. */
-        if (!rioRead(&rdb, buf, RDB_EOF_MARK_SIZE) || memcmp(buf, eofmark, RDB_EOF_MARK_SIZE) != 0) {
+        /* The trailing EOF marker is inside the compressed envelope (when
+         * compression is active) so read it through the same rio used for
+         * the RDB payload.  In passthrough/uncompressed mode load_rio ==
+         * &rdb so this is equivalent to the original path. */
+        if (!rioRead(load_rio, buf, RDB_EOF_MARK_SIZE) || memcmp(buf, eofmark, RDB_EOF_MARK_SIZE) != 0) {
             serverLog(LL_WARNING, "Replication stream EOF marker is broken");
             loadingFailed = 1;
         }
     }
+
+    if (dr_initialized) decompress_rio_destroy(&dr);
 
     if (loadingFailed) {
         stopLoading(0);

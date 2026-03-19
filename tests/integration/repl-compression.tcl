@@ -154,4 +154,167 @@ start_server {overrides {save ""}} {
     }
 }
 
+# --- Compressed full sync transport tests ---
+
+start_server {tags {"repl needs:debug"} overrides {save "" enable-debug-command local repl-diskless-sync yes repl-diskless-sync-delay 0 replcompression yes}} {
+    set primary [srv 0 client]
+    set primary_host [srv 0 host]
+    set primary_port [srv 0 port]
+
+    test {Diskless full sync with replcompression transports compressed RDB} {
+        $primary flushall
+        for {set i 0} {$i < 500} {incr i} {
+            $primary set "comp:$i" [string repeat "payload$i " 40]
+        }
+        $primary lpush mylist a b c d e
+        $primary sadd myset x y z
+        $primary zadd zset 1.0 a 2.0 b 3.0 c
+        $primary hset myhash f1 v1 f2 v2
+
+        start_server {overrides {save "" replcompression yes repl-diskless-load swapdb}} {
+            set replica [srv 0 client]
+            $replica replicaof $primary_host $primary_port
+            wait_for_sync $replica
+
+            wait_for_condition 50 100 {
+                [status $replica master_link_status] eq "up" &&
+                [$primary debug digest] eq [$replica debug digest]
+            } else {
+                fail "Replica digest mismatch after compressed diskless full sync"
+            }
+
+            assert_equal [string repeat "payload42 " 40] [$replica get comp:42]
+            assert_equal 5 [$replica llen mylist]
+            assert_equal 3 [$replica scard myset]
+            assert_equal "v1" [$replica hget myhash f1]
+
+            # Verify incremental replication continues after compressed full sync
+            $primary set post-sync-key "post-sync-value"
+            wait_for_condition 50 100 {
+                [$replica get post-sync-key] eq "post-sync-value"
+            } else {
+                fail "Replica did not receive post-sync write after compressed full sync"
+            }
+
+            $replica replicaof no one
+        }
+    }
+
+    test {Diskless full sync large dataset with replcompression} {
+        $primary flushall
+        $primary debug populate 10000
+        $primary set extra_key "extra_value"
+
+        start_server {overrides {save "" replcompression yes repl-diskless-load swapdb}} {
+            set replica [srv 0 client]
+            $replica replicaof $primary_host $primary_port
+            wait_for_sync $replica
+
+            wait_for_condition 50 100 {
+                [status $replica master_link_status] eq "up" &&
+                [$primary debug digest] eq [$replica debug digest]
+            } else {
+                fail "Replica digest mismatch after large compressed diskless full sync"
+            }
+
+            assert_equal "extra_value" [$replica get extra_key]
+            assert_equal 10001 [$replica dbsize]
+
+            $replica replicaof no one
+        }
+    }
+
+    test {Compressed full sync backward compat - replcompression replica with uncompressed primary} {
+        start_server {overrides {save "" repl-diskless-sync yes repl-diskless-sync-delay 0 replcompression no enable-debug-command local}} {
+            set uncompressed_primary [srv 0 client]
+            set uncompressed_primary_host [srv 0 host]
+            set uncompressed_primary_port [srv 0 port]
+
+            $uncompressed_primary flushall
+            for {set i 0} {$i < 100} {incr i} {
+                $uncompressed_primary set "bcompat:$i" [string repeat "data$i " 20]
+            }
+
+            start_server {overrides {save "" replcompression yes repl-diskless-load swapdb}} {
+                set replica [srv 0 client]
+                $replica replicaof $uncompressed_primary_host $uncompressed_primary_port
+                wait_for_sync $replica
+
+                wait_for_condition 50 100 {
+                    [status $replica master_link_status] eq "up" &&
+                    [$uncompressed_primary debug digest] eq [$replica debug digest]
+                } else {
+                    fail "Replica digest mismatch when connecting to uncompressed primary"
+                }
+
+                assert_equal [string repeat "data42 " 20] [$replica get bcompat:42]
+
+                $replica replicaof no one
+            }
+        }
+    }
+
+    test {Compression disabled when replica lacks capability} {
+        $primary flushall
+        for {set i 0} {$i < 100} {incr i} {
+            $primary set "nocap:$i" [string repeat "value$i " 20]
+        }
+
+        start_server {overrides {save "" replcompression no repl-diskless-load swapdb}} {
+            set replica [srv 0 client]
+            $replica replicaof $primary_host $primary_port
+            wait_for_sync $replica
+
+            wait_for_condition 50 100 {
+                [status $replica master_link_status] eq "up" &&
+                [$primary debug digest] eq [$replica debug digest]
+            } else {
+                fail "Replica digest mismatch when replica lacks compression capability"
+            }
+
+            assert_equal [string repeat "value42 " 20] [$replica get nocap:42]
+
+            $replica replicaof no one
+        }
+    }
+}
+
+start_server {tags {"repl needs:debug"} overrides {save "" enable-debug-command local repl-diskless-sync yes repl-diskless-sync-delay 0 replcompression yes dual-channel-replication-enabled yes}} {
+    set primary [srv 0 client]
+    set primary_host [srv 0 host]
+    set primary_port [srv 0 port]
+
+    test {Dual-channel full sync with replcompression} {
+        $primary flushall
+        for {set i 0} {$i < 500} {incr i} {
+            $primary set "dual:$i" [string repeat "payload$i " 40]
+        }
+
+        start_server {overrides {save "" replcompression yes dual-channel-replication-enabled yes}} {
+            set replica [srv 0 client]
+            $replica replicaof $primary_host $primary_port
+            wait_for_sync $replica
+
+            wait_for_condition 50 100 {
+                [status $replica master_link_status] eq "up" &&
+                [$primary debug digest] eq [$replica debug digest]
+            } else {
+                fail "Replica digest mismatch after compressed dual-channel full sync"
+            }
+
+            assert_equal [string repeat "payload42 " 40] [$replica get dual:42]
+
+            # Verify incremental replication continues
+            $primary set dual-post-sync "after-dual-sync"
+            wait_for_condition 50 100 {
+                [$replica get dual-post-sync] eq "after-dual-sync"
+            } else {
+                fail "Replica did not receive post-sync write after compressed dual-channel full sync"
+            }
+
+            $replica replicaof no one
+        }
+    }
+}
+
 }

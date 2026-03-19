@@ -1596,8 +1596,11 @@ werr:
  * While the suffix is the 40 bytes hex string we announced in the prefix.
  * This way processes receiving the payload can understand when it ends
  * without doing any processing of the content. */
-int rdbSaveRioWithEOFMark(int req, int rdbver, rio *rdb, int *error, rdbSaveInfo *rsi) {
+int rdbSaveRioWithEOFMark(int req, int rdbver, rio *rdb, int *error, rdbSaveInfo *rsi, int use_repl_compression) {
     char eofmark[RDB_EOF_MARK_SIZE];
+    compress_rio_t cr;
+    int cr_initialized = 0;
+    rio *save_rio = rdb;
 
     startSaving(RDBFLAGS_REPLICATION);
     getRandomHexChars(eofmark, RDB_EOF_MARK_SIZE);
@@ -1605,14 +1608,51 @@ int rdbSaveRioWithEOFMark(int req, int rdbver, rio *rdb, int *error, rdbSaveInfo
     if (rioWrite(rdb, "$EOF:", 5) == 0) goto werr;
     if (rioWrite(rdb, eofmark, RDB_EOF_MARK_SIZE) == 0) goto werr;
     if (rioWrite(rdb, "\r\n", 2) == 0) goto werr;
-    if (rdbSaveRio(req, rdbver, rdb, error, RDBFLAGS_REPLICATION, rsi) == C_ERR) goto werr;
-    if (rioWrite(rdb, eofmark, RDB_EOF_MARK_SIZE) == 0) goto werr;
+
+    /* When replication compression is enabled and all target replicas support
+     * it, wrap the RDB payload AND trailing EOF marker in a VKCS+LZ4
+     * compressed stream.  The $EOF: prefix stays uncompressed so the replica
+     * can detect the streaming format.  The trailing EOF marker is inside the
+     * compressed envelope so the stream reader's greedy buffering does not
+     * consume it from the wire before the decompressor sees it. */
+    if (use_repl_compression && compressionAlgoSupportsStreaming((compression_algo_t)server.repl_compression_algo)) {
+        stream_writer_config_t cfg = {
+            .algo = (compression_algo_t)server.repl_compression_algo,
+            .level = server.repl_compression_level,
+            .stream_kind = STREAM_KIND_RDB,
+            .block_checksum = server.rdb_checksum != 0,
+            .raw_frame = 0,
+        };
+        if (rioInitWithCompress(&cr, rdb, &cfg) != 0) {
+            if (error) *error = EIO;
+            goto werr;
+        }
+        save_rio = (rio *)&cr;
+        cr_initialized = 1;
+    }
+
+    if (rdbSaveRio(req, rdbver, save_rio, error, RDBFLAGS_REPLICATION, rsi) == C_ERR) goto werr;
+    /* Write trailing EOF marker through the same rio (compressed or plain). */
+    if (rioWrite(save_rio, eofmark, RDB_EOF_MARK_SIZE) == 0) goto werr;
+
+    if (cr_initialized) {
+        if (compress_rio_finish(&cr) != 0) {
+            if (error && *error == 0) *error = EIO;
+            compress_rio_destroy(&cr);
+            cr_initialized = 0;
+            goto werr;
+        }
+        compress_rio_destroy(&cr);
+        cr_initialized = 0;
+    }
+
     stopSaving(1);
     return C_OK;
 
 werr: /* Write error. */
     /* Set 'error' only if not already set by rdbSaveRio() call. */
     if (error && *error == 0) *error = errno;
+    if (cr_initialized) compress_rio_destroy(&cr);
     stopSaving(0);
     return C_ERR;
 }
@@ -3957,6 +3997,8 @@ int rdbSaveToReplicasSockets(int req, int rdbver, rdbSaveInfo *rsi) {
      * Otherwise, use checksum for this RDB transfer.
      */
     int skip_rdb_checksum = 1;
+    int use_repl_compression = server.repl_compression &&
+                               compressionAlgoSupportsStreaming((compression_algo_t)server.repl_compression_algo);
     /* Collect the connections of the replicas we want to transfer
      * the RDB to, which are in WAIT_BGSAVE_START state. */
     int connsnum = 0;
@@ -3995,6 +4037,10 @@ int rdbSaveToReplicasSockets(int req, int rdbver, rdbSaveInfo *rsi) {
         // do not skip RDB checksum on the primary if connection doesn't have integrity check or if the replica doesn't support it
         if (!connIsIntegrityChecked(replica->conn) || !(replica->repl_data->replica_capa & REPLICA_CAPA_SKIP_RDB_CHECKSUM))
             skip_rdb_checksum = 0;
+
+        /* Disable replication compression for the entire batch if any
+         * replica in it lacks the compression capability. */
+        if (!(replica->repl_data->replica_capa & REPLICA_CAPA_COMPRESSION)) use_repl_compression = 0;
     }
 
     /* Create the child process. */
@@ -4020,7 +4066,7 @@ int rdbSaveToReplicasSockets(int req, int rdbver, rdbSaveInfo *rsi) {
 
         if (skip_rdb_checksum) rdb.flags |= RIO_FLAG_SKIP_RDB_CHECKSUM;
 
-        retval = rdbSaveRioWithEOFMark(req, rdbver, &rdb, NULL, rsi);
+        retval = rdbSaveRioWithEOFMark(req, rdbver, &rdb, NULL, rsi, use_repl_compression);
         if (retval == C_OK && rioFlush(&rdb) == 0) retval = C_ERR;
 
         if (retval == C_OK) {
@@ -4072,9 +4118,10 @@ int rdbSaveToReplicasSockets(int req, int rdbver, rdbSaveInfo *rsi) {
                 server.rdb_pipe_numconns_writing = 0;
             }
         } else {
-            serverLog(LL_NOTICE, "Background RDB transfer started by pid %ld to %s%s", (long)childpid,
+            serverLog(LL_NOTICE, "Background RDB transfer started by pid %ld to %s%s%s", (long)childpid,
                       dual_channel ? "direct socket to replica" : "pipe through parent process",
-                      skip_rdb_checksum ? " while skipping RDB checksum for this transfer" : "");
+                      skip_rdb_checksum ? " while skipping RDB checksum for this transfer" : "",
+                      use_repl_compression ? " with LZ4 transport compression" : "");
 
             server.rdb_save_time_start = time(NULL);
             server.rdb_child_type = RDB_CHILD_TYPE_SOCKET;
