@@ -490,9 +490,11 @@ typedef enum {
 #define REPLICA_CAPA_PSYNC2 (1 << 1)            /* Supports PSYNC2 protocol. */
 #define REPLICA_CAPA_DUAL_CHANNEL (1 << 2)      /* Supports dual channel replication sync */
 #define REPLICA_CAPA_SKIP_RDB_CHECKSUM (1 << 3) /* Supports skipping RDB checksum for sync requests. */
+#define REPLICA_CAPA_COMPRESSION (1 << 4)       /* Supports replication compression. */
 
 /* Replica capability strings */
 #define REPLICA_CAPA_SKIP_RDB_CHECKSUM_STR "skip-rdb-checksum" /* Supports skipping RDB checksum for sync requests. */
+#define REPLICA_CAPA_COMPRESSION_STR "compression"             /* Supports replication compression. */
 
 /* Replica requirements */
 #define REPLICA_REQ_NONE 0
@@ -2080,6 +2082,10 @@ struct valkeyServer {
     int rdb_compression_algo;             /* RDB compression algorithm (compression_algo_t):
                                            * ALGO_LZF (default), ALGO_LZ4 */
     int rdb_compression_level;            /* Compression level for streaming RDB codecs that support one. */
+    /* Replication compression */
+    int repl_compression;                 /* Use compression for replication? 0=no (default) */
+    int repl_compression_algo;            /* Replication compression algorithm: ALGO_LZ4 (default) */
+    int repl_compression_level;           /* Compression level for replication. Default: -5 */
     int rdb_checksum;                     /* Use RDB checksum? */
     int rdb_del_sync_files;               /* Remove RDB files used only for SYNC if
                                              the instance does not use persistence. */
