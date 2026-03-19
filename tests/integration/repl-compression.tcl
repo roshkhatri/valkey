@@ -160,6 +160,7 @@ start_server {tags {"repl needs:debug"} overrides {save "" enable-debug-command 
     set primary [srv 0 client]
     set primary_host [srv 0 host]
     set primary_port [srv 0 port]
+    set primary_log [srv 0 stdout]
 
     test {Diskless full sync with replcompression transports compressed RDB} {
         $primary flushall
@@ -275,6 +276,166 @@ start_server {tags {"repl needs:debug"} overrides {save "" enable-debug-command 
             assert_equal [string repeat "value42 " 20] [$replica get nocap:42]
 
             $replica replicaof no one
+        }
+    }
+
+    test {Replica toggling replcompression off after handshake still accepts negotiated compressed full sync} {
+        $primary flushall
+        for {set i 0} {$i < 150} {incr i} {
+            $primary set "toggle:$i" [string repeat "value$i " 25]
+        }
+        $primary config set repl-diskless-sync-delay 2
+
+        set transfer_count_before [count_message_lines $primary_log "Background RDB transfer started by pid"]
+        set compression_count_before [count_message_lines $primary_log "with LZ4 transport compression"]
+
+        start_server {overrides {save "" replcompression yes repl-diskless-load swapdb}} {
+            set replica [srv 0 client]
+            set replica_log [srv 0 stdout]
+            set signature_errors_before [count_message_lines $replica_log "Wrong signature trying to load DB from file"]
+
+            $replica replicaof $primary_host $primary_port
+
+            wait_for_condition 50 100 {
+                [string match "*state=wait_bgsave*" [$primary info replication]]
+            } else {
+                fail "Replica did not enter wait_bgsave before toggling replcompression"
+            }
+
+            $replica config set replcompression no
+
+            wait_for_condition 80 100 {
+                [status $replica master_link_status] eq "up" &&
+                [$primary debug digest] eq [$replica debug digest]
+            } else {
+                fail "Replica digest mismatch after replcompression toggle during delayed full sync"
+            }
+
+            wait_for_condition 50 100 {
+                [count_message_lines $primary_log "Background RDB transfer started by pid"] == [expr {$transfer_count_before + 1}] &&
+                [count_message_lines $primary_log "with LZ4 transport compression"] == [expr {$compression_count_before + 1}]
+            } else {
+                fail "Primary retried full sync instead of succeeding with the negotiated compressed transfer"
+            }
+
+            assert_equal $signature_errors_before [count_message_lines $replica_log "Wrong signature trying to load DB from file"]
+
+            $primary set toggle-post-sync "toggle-ok"
+            wait_for_condition 50 100 {
+                [$replica get toggle-post-sync] eq "toggle-ok"
+            } else {
+                fail "Replica did not receive post-sync write after replcompression toggle test"
+            }
+
+            $replica replicaof no one
+        }
+
+        $primary config set repl-diskless-sync-delay 0
+    }
+
+    test {Mixed full sync batch falls back to uncompressed transport when one replica lacks capability} {
+        $primary flushall
+        for {set i 0} {$i < 200} {incr i} {
+            $primary set "mixed:$i" [string repeat "value$i " 30]
+        }
+        $primary config set repl-diskless-sync-delay 2
+
+        set transfer_count_before [count_message_lines $primary_log "Background RDB transfer started by pid"]
+        set compression_count_before [count_message_lines $primary_log "with LZ4 transport compression"]
+
+        start_server {overrides {save "" replcompression yes repl-diskless-load swapdb}} {
+            set compressed_replica [srv 0 client]
+            start_server {overrides {save "" replcompression no repl-diskless-load swapdb}} {
+                set uncompressed_replica [srv 0 client]
+
+                $compressed_replica replicaof $primary_host $primary_port
+                $uncompressed_replica replicaof $primary_host $primary_port
+
+                wait_for_condition 80 100 {
+                    [status $compressed_replica master_link_status] eq "up" &&
+                    [status $uncompressed_replica master_link_status] eq "up" &&
+                    [$primary debug digest] eq [$compressed_replica debug digest] &&
+                    [$primary debug digest] eq [$uncompressed_replica debug digest]
+                } else {
+                    fail "Replica digest mismatch after mixed-capability full sync batch"
+                }
+
+                wait_for_condition 50 100 {
+                    [count_message_lines $primary_log "Background RDB transfer started by pid"] == [expr {$transfer_count_before + 1}]
+                } else {
+                    fail "Primary did not start exactly one RDB transfer for the mixed-capability batch"
+                }
+
+                assert_equal $compression_count_before [count_message_lines $primary_log "with LZ4 transport compression"]
+
+                $primary set mixed-post-sync "mixed-batch"
+                wait_for_condition 50 100 {
+                    [$compressed_replica get mixed-post-sync] eq "mixed-batch" &&
+                    [$uncompressed_replica get mixed-post-sync] eq "mixed-batch"
+                } else {
+                    fail "Replicas did not receive post-sync write after mixed-capability full sync batch"
+                }
+
+                $uncompressed_replica replicaof no one
+            }
+            $compressed_replica replicaof no one
+        }
+
+        $primary config set repl-diskless-sync-delay 0
+    }
+
+    test {Online non-capable replica does not disable transport compression for a capable sync batch} {
+        $primary flushall
+        for {set i 0} {$i < 150} {incr i} {
+            $primary set "scoped:$i" [string repeat "value$i " 25]
+        }
+
+        start_server {overrides {save "" replcompression no repl-diskless-load swapdb}} {
+            set online_uncompressed_replica [srv 0 client]
+            $online_uncompressed_replica replicaof $primary_host $primary_port
+            wait_for_sync $online_uncompressed_replica
+
+            wait_for_condition 50 100 {
+                [status $online_uncompressed_replica master_link_status] eq "up" &&
+                [$primary debug digest] eq [$online_uncompressed_replica debug digest]
+            } else {
+                fail "Uncompressed replica digest mismatch before scoped transport-compression test"
+            }
+
+            set transfer_count_before [count_message_lines $primary_log "Background RDB transfer started by pid"]
+            set compression_count_before [count_message_lines $primary_log "with LZ4 transport compression"]
+
+            start_server {overrides {save "" replcompression yes repl-diskless-load swapdb}} {
+                set compressed_replica [srv 0 client]
+                $compressed_replica replicaof $primary_host $primary_port
+                wait_for_sync $compressed_replica
+
+                wait_for_condition 50 100 {
+                    [status $compressed_replica master_link_status] eq "up" &&
+                    [$primary debug digest] eq [$compressed_replica debug digest]
+                } else {
+                    fail "Compressed replica digest mismatch when syncing alongside an online non-capable replica"
+                }
+
+                wait_for_condition 50 100 {
+                    [count_message_lines $primary_log "Background RDB transfer started by pid"] == [expr {$transfer_count_before + 1}] &&
+                    [count_message_lines $primary_log "with LZ4 transport compression"] == [expr {$compression_count_before + 1}]
+                } else {
+                    fail "Primary did not keep transport compression enabled for the capable sync batch"
+                }
+
+                $primary set scoped-post-sync "scoped-batch"
+                wait_for_condition 50 100 {
+                    [$compressed_replica get scoped-post-sync] eq "scoped-batch" &&
+                    [$online_uncompressed_replica get scoped-post-sync] eq "scoped-batch"
+                } else {
+                    fail "Replicas did not receive post-sync write after scoped transport-compression test"
+                }
+
+                $compressed_replica replicaof no one
+            }
+
+            $online_uncompressed_replica replicaof no one
         }
     }
 }

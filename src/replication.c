@@ -2448,32 +2448,35 @@ int replicaLoadPrimaryRDBFromSocket(connection *conn, char *buf, char *eofmark, 
     int loadingFailed = 0;
     rdbLoadingCtx loadingCtx = {.dbarray = dbarray, .functions_lib_ctx = functions_lib_ctx};
 
-    /* Wrap the connection rio with a decompression decorator.  When the
-     * primary sent a VKCS-compressed RDB payload the decorator transparently
-     * decompresses; otherwise allow_passthrough forwards raw bytes as-is,
-     * keeping backward compatibility with uncompressed primaries. */
+    /* Always wrap the full-sync rio with an auto-detecting decompression
+     * decorator. The primary decides whether to compress based on the
+     * capability bit negotiated earlier in the handshake, so a late
+     * CONFIG SET replcompression on the replica must not make the loader
+     * misinterpret an already-negotiated VKCS header as raw RDB bytes.
+     *
+     * allow_passthrough keeps backward compatibility with uncompressed
+     * primaries and with reconnects that legitimately fall back to plain
+     * transport after renegotiation. */
     decompress_rio_t dr;
     int dr_initialized = 0;
     rio *load_rio = &rdb;
 
-    if (server.repl_compression) {
-        stream_reader_config_t reader_cfg = {
-            .algo = ALGO_NONE,
-            .expected_stream_kind = STREAM_KIND_RDB,
-            .raw_frame = 0,
-            .allow_passthrough = true,
-            .batch_size = 0,
-        };
-        if (decompress_rio_init_with_config(&dr, &rdb, &reader_cfg) == 0) {
-            load_rio = (rio *)&dr;
-            dr_initialized = 1;
-        } else {
-            /* The stream reader probes the socket while initializing, so a
-             * failure here may leave the raw rio positioned mid-stream.
-             * Abort the full sync rather than attempting an unsafe fallback. */
-            serverLog(LL_WARNING, "Failed to initialize decompression for full sync");
-            loadingFailed = 1;
-        }
+    stream_reader_config_t reader_cfg = {
+        .algo = ALGO_NONE,
+        .expected_stream_kind = STREAM_KIND_RDB,
+        .raw_frame = 0,
+        .allow_passthrough = true,
+        .batch_size = 0,
+    };
+    if (decompress_rio_init_with_config(&dr, &rdb, &reader_cfg) == 0) {
+        load_rio = (rio *)&dr;
+        dr_initialized = 1;
+    } else {
+        /* The stream reader probes the socket while initializing, so a
+         * failure here may leave the raw rio positioned mid-stream.
+         * Abort the full sync rather than attempting an unsafe fallback. */
+        serverLog(LL_WARNING, "Failed to initialize decompression for full sync");
+        loadingFailed = 1;
     }
 
     /* If we aren't using the swapdb method, then we want to empty the data before loading the rdb */
