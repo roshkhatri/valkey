@@ -1218,6 +1218,46 @@ TEST(compression, compressRioTracksUncompressedChecksum) {
     return;
 }
 
+TEST(compression, compressRioPreservesSkipRdbChecksumFlag) {
+    sds buf = sdsempty();
+    rio buffer_rio;
+    rioInitWithBuffer(&buffer_rio, buf);
+    buffer_rio.flags |= RIO_FLAG_SKIP_RDB_CHECKSUM;
+
+    stream_writer_config_t cfg = makeWriterConfig(ALGO_LZ4, 0, STREAM_KIND_RDB, false, true);
+    compress_rio_t cr;
+    ASSERT_TRUE(rioInitWithCompress(&cr, &buffer_rio, &cfg) == 0);
+    ASSERT_TRUE((((rio *)&cr)->flags & RIO_FLAG_SKIP_RDB_CHECKSUM) != 0);
+
+    const char *payload = "skip-checksum-payload";
+    ASSERT_TRUE(rioWrite((rio *)&cr, payload, strlen(payload)) != 0);
+    ASSERT_TRUE(cr.base.cksum == 0) << "skip-checksum should disable uncompressed CRC64 tracking";
+
+    ASSERT_TRUE(compress_rio_finish(&cr) == 0);
+    compress_rio_destroy(&cr);
+    sdsfree(buffer_rio.io.buffer.ptr);
+    return;
+}
+
+TEST(compression, compressRioWithoutCodecChecksumDoesNotTrackChecksum) {
+    sds buf = sdsempty();
+    rio buffer_rio;
+    rioInitWithBuffer(&buffer_rio, buf);
+
+    stream_writer_config_t cfg = makeWriterConfig(ALGO_LZ4, 0, STREAM_KIND_RDB);
+    compress_rio_t cr;
+    ASSERT_TRUE(rioInitWithCompress(&cr, &buffer_rio, &cfg) == 0);
+
+    const char *payload = "no-codec-checksum";
+    ASSERT_TRUE(rioWrite((rio *)&cr, payload, strlen(payload)) != 0);
+    ASSERT_TRUE(cr.base.cksum == 0) << "compressed rio should not hash data when checksums are disabled";
+
+    ASSERT_TRUE(compress_rio_finish(&cr) == 0);
+    compress_rio_destroy(&cr);
+    sdsfree(buffer_rio.io.buffer.ptr);
+    return;
+}
+
 TEST(compression, rioDecoratorsPreserveInnerType) {
     sds buf = sdsempty();
     rio buffer_rio;
