@@ -279,6 +279,40 @@ start_server {tags {"repl needs:debug"} overrides {save "" enable-debug-command 
         }
     }
 
+    test {Compression disabled when replica uses disk-backed full sync} {
+        $primary flushall
+        for {set i 0} {$i < 100} {incr i} {
+            $primary set "diskbacked:$i" [string repeat "value$i " 20]
+        }
+
+        set transfer_count_before [count_message_lines $primary_log "Background RDB transfer started by pid"]
+        set compression_count_before [count_message_lines $primary_log "with LZ4 transport compression"]
+
+        start_server {overrides {save "" replcompression yes repl-diskless-load disabled}} {
+            set replica [srv 0 client]
+            $replica replicaof $primary_host $primary_port
+            wait_for_sync $replica
+
+            wait_for_condition 50 100 {
+                [status $replica master_link_status] eq "up" &&
+                [$primary debug digest] eq [$replica debug digest]
+            } else {
+                fail "Replica digest mismatch when disk-backed full sync should stay uncompressed"
+            }
+
+            wait_for_condition 50 100 {
+                [count_message_lines $primary_log "Background RDB transfer started by pid"] == [expr {$transfer_count_before + 1}]
+            } else {
+                fail "Primary did not start exactly one RDB transfer for the disk-backed replica"
+            }
+
+            assert_equal $compression_count_before [count_message_lines $primary_log "with LZ4 transport compression"]
+            assert_equal [string repeat "value42 " 20] [$replica get diskbacked:42]
+
+            $replica replicaof no one
+        }
+    }
+
     test {Replica toggling replcompression off after handshake still accepts negotiated compressed full sync} {
         $primary flushall
         for {set i 0} {$i < 150} {incr i} {

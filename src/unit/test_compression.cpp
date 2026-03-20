@@ -1335,6 +1335,21 @@ TEST(compression, rioDecoratorsPreserveInnerType) {
     sdsfree(raw_rio.io.buffer.ptr);
 }
 
+TEST(compression, decompressRioPreservesSkipRdbChecksumFlag) {
+    sds raw = sdsnew("plain-rdb-prefix");
+    rio raw_rio;
+    rioInitWithBuffer(&raw_rio, raw);
+    raw_rio.flags |= RIO_FLAG_SKIP_RDB_CHECKSUM;
+
+    stream_reader_config_t cfg = makeReaderConfig(ALGO_NONE, STREAM_KIND_ANY, false, true, 0);
+    decompress_rio_t dr;
+    ASSERT_TRUE(decompress_rio_init_with_config(&dr, &raw_rio, &cfg) == 0);
+    ASSERT_TRUE((((rio *)&dr)->flags & RIO_FLAG_SKIP_RDB_CHECKSUM) != 0);
+
+    decompress_rio_destroy(&dr);
+    sdsfree(raw_rio.io.buffer.ptr);
+}
+
 /* --- Test: decompress_rio_t read round-trip (Task 3.5) --- */
 TEST(compression, decompressRioRoundTrip) {
     /* First, produce compressed data using stream writer */

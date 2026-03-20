@@ -3879,8 +3879,9 @@ int syncWithPrimaryHandleSendHandshakeState(connection *conn) {
      *
      * The primary will ignore capabilities it does not understand. */
 
-    // we can ignore primary's conditions when sending capa (is_primary_stream_verified=1)
-    int send_skip_rdb_checksum_capa = replicationSupportSkipRDBChecksum(conn, useDisklessLoad(), 1);
+    int use_diskless_load = useDisklessLoad();
+    /* We can ignore primary's conditions when sending capa (is_primary_stream_verified=1). */
+    int send_skip_rdb_checksum_capa = replicationSupportSkipRDBChecksum(conn, use_diskless_load, 1);
     char *argv[11] = {"REPLCONF", "capa", "eof", "capa", "psync2", NULL, NULL, NULL, NULL, NULL, NULL};
     size_t lens[11] = {8, 4, 3, 4, 6, 0, 0, 0, 0, 0, 0};
     int argc = 5;
@@ -3900,7 +3901,7 @@ int syncWithPrimaryHandleSendHandshakeState(connection *conn) {
         lens[argc] = strlen("dual-channel");
         argc++;
     }
-    if (server.repl_compression) {
+    if (server.repl_compression && use_diskless_load) {
         argv[argc] = "capa";
         lens[argc] = strlen("capa");
         argc++;

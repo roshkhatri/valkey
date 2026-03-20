@@ -310,6 +310,9 @@ int decompress_rio_init_with_config(decompress_rio_t *dr, rio *inner, const stre
     memset(dr, 0, sizeof(*dr));
     rioInitBase(&dr->base, decompressRioRead, rioWriteUnsupported, decompressRioTell,
                 rioFlushNoop, RIO_FLAG_STREAMING_DECOMPRESSION, rioCheckType(inner));
+    /* Preserve checksum policy negotiated on the underlying stream so
+     * passthrough full-sync loads behave the same through the wrapper. */
+    dr->base.flags |= inner->flags & RIO_FLAG_SKIP_RDB_CHECKSUM;
     dr->inner = inner;
 
     dr->reader = stream_reader_create(cfg, decompressRioReadPartial, dr);
