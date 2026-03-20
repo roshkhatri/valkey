@@ -180,6 +180,50 @@ void compress_rio_destroy(compress_rio_t *cr) {
 
 /* Read up to `len` bytes from the inner rio (partial reads allowed).
  * Returns >0 bytes, 0 on EOF, -1 on error. */
+static ssize_t decompressRioReadConnPartial(rio *inner, void *buf, size_t len) {
+    size_t avail = sdslen(inner->io.conn.buf) - inner->io.conn.pos;
+
+    /* Grow/compact the rio buffer exactly like rioConnRead() so partial
+     * reads preserve any bytes fetched past the compressed frame boundary. */
+    if (sdslen(inner->io.conn.buf) + sdsavail(inner->io.conn.buf) < len)
+        inner->io.conn.buf = sdsMakeRoomFor(inner->io.conn.buf, len - sdslen(inner->io.conn.buf));
+
+    if (len > avail && sdsavail(inner->io.conn.buf) < len - avail) {
+        sdsrange(inner->io.conn.buf, inner->io.conn.pos, -1);
+        inner->io.conn.pos = 0;
+        avail = sdslen(inner->io.conn.buf);
+    }
+
+    while (avail == 0) {
+        size_t toread = len;
+        if (toread > sdsavail(inner->io.conn.buf)) toread = sdsavail(inner->io.conn.buf);
+        if (inner->io.conn.read_limit != 0 &&
+            inner->io.conn.read_so_far + toread > inner->io.conn.read_limit) {
+            toread = inner->io.conn.read_limit - inner->io.conn.read_so_far;
+        }
+        if (toread == 0) return 0;
+
+        int retval = connRead(inner->io.conn.conn,
+                              (char *)inner->io.conn.buf + sdslen(inner->io.conn.buf),
+                              toread);
+        if (retval == 0) {
+            return 0;
+        } else if (retval < 0) {
+            if (connLastErrorRetryable(inner->io.conn.conn)) continue;
+            if (errno == EWOULDBLOCK) errno = ETIMEDOUT;
+            return -1;
+        }
+        sdsIncrLen(inner->io.conn.buf, retval);
+        avail = sdslen(inner->io.conn.buf) - inner->io.conn.pos;
+    }
+
+    size_t nread = avail < len ? avail : len;
+    memcpy(buf, (char *)inner->io.conn.buf + inner->io.conn.pos, nread);
+    inner->io.conn.read_so_far += nread;
+    inner->io.conn.pos += nread;
+    return (ssize_t)nread;
+}
+
 static ssize_t decompressRioReadPartial(void *ctx, void *buf, size_t len) {
     decompress_rio_t *dr = (decompress_rio_t *)ctx;
     rio *inner = dr->inner;
@@ -200,22 +244,12 @@ static ssize_t decompressRioReadPartial(void *ctx, void *buf, size_t len) {
         return (ssize_t)n;
     }
 
-    /* conn rios: use connRead directly for partial-read support.
-     * This rio decorator is synchronous, so callers must only wrap
-     * blocking connections. Retry only explicit retryable read failures,
-     * mirroring the base rio connection reader. */
+    /* conn rios: use buffered partial reads so callers preserve any bytes
+     * fetched past the compressed frame boundary on a live connection. */
     if (inner_type == RIO_TYPE_CONN) {
-        while (1) {
-            connection *conn = inner->io.conn.conn;
-            int nread = connRead(inner->io.conn.conn, buf, len);
-            if (nread > 0) {
-                inner->processed_bytes += nread;
-                return (ssize_t)nread;
-            }
-            if (nread == 0) return 0;
-            if (connLastErrorRetryable(conn)) continue;
-            return -1;
-        }
+        ssize_t nread = decompressRioReadConnPartial(inner, buf, len);
+        if (nread > 0) inner->processed_bytes += (size_t)nread;
+        return nread;
     }
 
     /* fd rios are all-or-nothing via rioRead() */

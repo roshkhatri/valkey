@@ -495,6 +495,46 @@ start_server {tags {"rdb-compression repl external:skip"}} {
             }
         }
 
+        test {Buffered writes during LZ4 full sync are replayed after load} {
+            $replica replicaof no one
+            $primary config set repl-diskless-sync no
+            $primary config set rdb-key-save-delay 200
+            $replica config set key-load-delay 100
+            $primary flushall
+
+            for {set i 0} {$i < 4000} {incr i} {
+                $primary set "lag:$i" [string repeat "payload$i " 20]
+            }
+
+            $replica replicaof $primary_host $primary_port
+
+            wait_for_condition 100 50 {
+                [string match "*slave0:*,state=wait_bgsave*" [$primary info replication]]
+            } else {
+                $primary config set rdb-key-save-delay 0
+                $replica config set key-load-delay 0
+                fail "Replica did not enter wait_bgsave"
+            }
+
+            for {set i 0} {$i < 200} {incr i} {
+                $primary set "backlog:$i" [string repeat "tail$i " 10]
+            }
+
+            $primary config set rdb-key-save-delay 0
+            wait_for_sync $replica
+
+            wait_for_condition 100 50 {
+                [status $replica master_link_status] eq "up" &&
+                [$replica get backlog:199] eq [string repeat "tail199 " 10]
+            } else {
+                $replica config set key-load-delay 0
+                fail "Replica did not receive buffered writes after LZ4 full sync"
+            }
+
+            assert_equal [string repeat "tail42 " 10] [$replica get backlog:42]
+            $replica config set key-load-delay 0
+        }
+
         test {Diskless full sync remains compatible when rdb-compression-algo is lz4} {
             $replica replicaof no one
             $primary config set repl-diskless-sync yes
