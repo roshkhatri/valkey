@@ -190,6 +190,7 @@ enum RdbType {
 #define RDBFLAGS_FEED_REPL (1 << 3)    /* Feed replication stream when loading.*/
 #define RDBFLAGS_KEEP_CACHE (1 << 4)   /* Don't reclaim cache after rdb file is generated */
 #define RDBFLAGS_EMPTY_DATA (1 << 5)   /* Flush the database after validating magic and rdb version*/
+#define RDBFLAGS_ALLOW_STREAMING_COMPRESSION (1 << 6) /* Allow outer VKCS streaming compression on replication saves. */
 
 /* When rdbLoadObject() returns NULL, the err flag is
  * set to hold the type of error that occurred */

@@ -984,6 +984,22 @@ need_full_resync:
  *    started.
  *
  * Returns C_OK on success or C_ERR otherwise. */
+static int replicationBatchSupportsCompression(int req, int rdbver) {
+    listIter li;
+    listNode *ln;
+
+    listRewind(server.replicas, &li);
+    while ((ln = listNext(&li))) {
+        client *replica = ln->value;
+        if (replica->repl_data->repl_state != REPLICA_STATE_WAIT_BGSAVE_START) continue;
+        if (replica->repl_data->replica_req != req) continue;
+        if (replicaRdbVersion(replica) != rdbver) continue;
+        if (!(replica->repl_data->replica_capa & REPLICA_CAPA_COMPRESSION)) return 0;
+    }
+
+    return 1;
+}
+
 int startBgsaveForReplication(int mincapa, int req, int rdbver) {
     int retval;
     int socket_target = 0;
@@ -1016,8 +1032,12 @@ int startBgsaveForReplication(int mincapa, int req, int rdbver) {
         if (socket_target)
             retval = rdbSaveToReplicasSockets(req, rdbver, rsiptr);
         else {
+            int rdbflags = RDBFLAGS_REPLICATION | RDBFLAGS_KEEP_CACHE;
+            if (replicationBatchSupportsCompression(req, rdbver)) {
+                rdbflags |= RDBFLAGS_ALLOW_STREAMING_COMPRESSION;
+            }
             /* Keep the page cache since it'll get used soon */
-            retval = rdbSaveBackground(req, server.rdb_filename, rsiptr, RDBFLAGS_REPLICATION | RDBFLAGS_KEEP_CACHE);
+            retval = rdbSaveBackground(req, server.rdb_filename, rsiptr, rdbflags);
         }
         if (server.debug_pause_after_fork) debugPauseProcess();
     } else {
@@ -2728,12 +2748,128 @@ int tryReadBulkPayload(connection *conn, char *buf, int usemark, ssize_t *nread_
     return C_OK;
 }
 
+typedef struct {
+    connection *conn;
+} replicaFullSyncReadCtx;
+
+static int replicaWriteRDBChunkToDisk(const char *buf, size_t len, off_t *repl_transfer_last_fsync_off) {
+    size_t total_written = 0;
+
+    while (total_written < len) {
+        ssize_t nwritten = write(server.repl_transfer_fd, buf + total_written, len - total_written);
+        if (nwritten <= 0) {
+            replicaBioSaveServerLog(LL_WARNING,
+                                    "Write error or short write writing to the DB dump file "
+                                    "needed for PRIMARY <-> REPLICA synchronization: %s",
+                                    (nwritten == -1) ? strerror(errno) : "short write");
+            return C_ERR;
+        }
+        total_written += nwritten;
+    }
+
+    server.bio_repl_transfer_read += len;
+    if (server.bio_repl_transfer_read >= *repl_transfer_last_fsync_off + REPL_MAX_WRITTEN_BEFORE_FSYNC) {
+        off_t sync_size = server.bio_repl_transfer_read - *repl_transfer_last_fsync_off;
+        rdb_fsync_range(server.repl_transfer_fd, *repl_transfer_last_fsync_off, sync_size);
+        *repl_transfer_last_fsync_off += sync_size;
+    }
+
+    return C_OK;
+}
+
+static ssize_t replicaReadEOFSyncPayload(void *ctx, void *buf, size_t len) {
+    replicaFullSyncReadCtx *read_ctx = ctx;
+
+    while (1) {
+        if (server.replica_bio_abort_save) return -1;
+
+        ssize_t nread = connRead(read_ctx->conn, buf, len);
+        if (nread > 0) {
+            server.bio_stat_net_repl_input_bytes += nread;
+            server.repl_transfer_lastio = server.unixtime;
+            return nread;
+        }
+
+        if (connGetState(read_ctx->conn) != CONN_STATE_CONNECTED) return -1;
+    }
+}
+
+static int replicaReceiveRDBWithEOFToDisk(connection *conn, const char *eofmark, off_t *repl_transfer_last_fsync_off) {
+    char decoded[PROTO_IOBUF_LEN];
+    char pending[PROTO_IOBUF_LEN + RDB_EOF_MARK_SIZE];
+    size_t pending_len = 0;
+    replicaFullSyncReadCtx read_ctx = {.conn = conn};
+    stream_reader_config_t reader_cfg = {
+        .algo = ALGO_NONE,
+        .expected_stream_kind = STREAM_KIND_RDB,
+        .raw_frame = 0,
+        .allow_passthrough = true,
+        .batch_size = 0,
+    };
+    stream_reader_t *reader = stream_reader_create(&reader_cfg, replicaReadEOFSyncPayload, &read_ctx);
+    int retval = C_ERR;
+
+    if (!reader) {
+        replicaBioSaveServerLog(LL_WARNING, "Failed to initialize EOF full-sync stream reader");
+        return C_ERR;
+    }
+
+    if (stream_reader_probe(reader) != 0) {
+        replicaBioSaveServerLog(LL_WARNING, "Failed to probe EOF full-sync stream");
+        goto cleanup;
+    }
+
+    stream_reader_info_t info;
+    if (stream_reader_get_info(reader, &info) != 0) {
+        replicaBioSaveServerLog(LL_WARNING, "Failed to inspect EOF full-sync stream");
+        goto cleanup;
+    }
+    if (info.compressed) {
+        replicaBioSaveServerLog(LL_NOTICE, "PRIMARY <-> REPLICA sync: decoding compressed EOF stream to disk");
+    }
+
+    while (1) {
+        ssize_t nread = stream_reader_read(reader, decoded, sizeof(decoded));
+        if (nread < 0) {
+            replicaBioSaveServerLog(LL_WARNING, "Error reading EOF full-sync payload");
+            goto cleanup;
+        }
+        if (nread == 0) {
+            replicaBioSaveServerLog(LL_WARNING, "Unexpected EOF reading EOF full-sync payload");
+            goto cleanup;
+        }
+
+        memcpy(pending + pending_len, decoded, nread);
+        pending_len += nread;
+        if (pending_len < RDB_EOF_MARK_SIZE) continue;
+
+        if (memcmp(pending + pending_len - RDB_EOF_MARK_SIZE, eofmark, RDB_EOF_MARK_SIZE) == 0) {
+            if (replicaWriteRDBChunkToDisk(pending, pending_len - RDB_EOF_MARK_SIZE, repl_transfer_last_fsync_off) == C_ERR) {
+                goto cleanup;
+            }
+            retval = C_OK;
+            goto cleanup;
+        }
+
+        size_t flush_len = pending_len - RDB_EOF_MARK_SIZE;
+        if (replicaWriteRDBChunkToDisk(pending, flush_len, repl_transfer_last_fsync_off) == C_ERR) {
+            goto cleanup;
+        }
+        memmove(pending, pending + flush_len, RDB_EOF_MARK_SIZE);
+        pending_len = RDB_EOF_MARK_SIZE;
+    }
+
+cleanup:
+    stream_reader_destroy(reader);
+    return retval;
+}
+
 void replicaReceiveRDBFromPrimaryToDisk(connection *conn, int is_dual_channel) {
     int usemark;
     char lastbytes[RDB_EOF_MARK_SIZE];
     char buf[PROTO_IOBUF_LEN];
     char eofmark[RDB_EOF_MARK_SIZE];
-    ssize_t nread, nwritten;
+    ssize_t nread;
     off_t repl_transfer_last_fsync_off = 0;
     bool error = 0, eof_reached = 0;
     int ret = 0;
@@ -2766,6 +2902,10 @@ void replicaReceiveRDBFromPrimaryToDisk(connection *conn, int is_dual_channel) {
     if (server.bio_repl_transfer_size == 0) {
         /* 0 bytes means we don't know the size of the payload beforehand, we will read until we see EOF */
         replicaBioSaveServerLog(LL_NOTICE, "PRIMARY <-> REPLICA sync: receiving streamed RDB from primary with EOF to disk");
+        if (replicaReceiveRDBWithEOFToDisk(conn, eofmark, &repl_transfer_last_fsync_off) == C_ERR) {
+            error = 1;
+        }
+        goto done;
     } else {
         replicaBioSaveServerLog(LL_NOTICE, "PRIMARY <-> REPLICA sync: receiving %lld bytes from primary to disk", (long long)server.bio_repl_transfer_size);
     }
@@ -2787,53 +2927,14 @@ void replicaReceiveRDBFromPrimaryToDisk(connection *conn, int is_dual_channel) {
             goto done;
         }
 
-        /* When a mark is used, we want to detect EOF asap in order to avoid
-         * writing the EOF mark into the file... */
-        if (usemark) {
-            if (nread >= RDB_EOF_MARK_SIZE) {
-                memcpy(lastbytes, buf + nread - RDB_EOF_MARK_SIZE, RDB_EOF_MARK_SIZE);
-            } else {
-                int rem = RDB_EOF_MARK_SIZE - nread;
-                memmove(lastbytes, lastbytes + nread, rem);
-                memcpy(lastbytes + rem, buf, nread);
-            }
-            eof_reached = (memcmp(lastbytes, eofmark, RDB_EOF_MARK_SIZE) == 0);
-        }
-
         /* Update the last I/O time for the replication transfer (used in
          * order to detect timeouts during replication). */
         server.repl_transfer_lastio = server.unixtime;
 
         /* Write what we got from the socket to the dump file on disk */
-        if ((nwritten = write(server.repl_transfer_fd, buf, nread)) != nread) {
-            replicaBioSaveServerLog(LL_WARNING,
-                                    "Write error or short write writing to the DB dump file "
-                                    "needed for PRIMARY <-> REPLICA synchronization: %s",
-                                    (nwritten == -1) ? strerror(errno) : "short write");
+        if (replicaWriteRDBChunkToDisk(buf, nread, &repl_transfer_last_fsync_off) == C_ERR) {
             error = 1;
             goto done;
-        }
-        server.bio_repl_transfer_read += nread;
-
-        /* Delete the last 40 bytes from the file if we reached EOF. */
-        if (usemark && eof_reached) {
-            if (ftruncate(server.repl_transfer_fd, server.bio_repl_transfer_read - RDB_EOF_MARK_SIZE) == -1) {
-                replicaBioSaveServerLog(LL_WARNING,
-                                        "Error truncating the RDB file received from the primary "
-                                        "for SYNC: %s",
-                                        strerror(errno));
-                error = 1;
-                goto done;
-            }
-        }
-
-        /* Sync data on disk from time to time, otherwise at the end of the
-         * transfer we may suffer a big delay as the memory buffers are copied
-         * into the actual disk. */
-        if (server.bio_repl_transfer_read >= repl_transfer_last_fsync_off + REPL_MAX_WRITTEN_BEFORE_FSYNC) {
-            off_t sync_size = server.bio_repl_transfer_read - repl_transfer_last_fsync_off;
-            rdb_fsync_range(server.repl_transfer_fd, repl_transfer_last_fsync_off, sync_size);
-            repl_transfer_last_fsync_off += sync_size;
         }
 
         /* Check if the transfer is now complete */
@@ -3876,6 +3977,7 @@ int syncWithPrimaryHandleSendHandshakeState(connection *conn) {
      *                    using a connection that has integrity checks (such as TLS).
      *                    In non-diskless sync, or non-integrity-checked connection, there is more
      *                    concern for data corruprion so we keep this extra layer of detection.
+     * compression: supports compressed full syncs over the wire and on disk.
      *
      * The primary will ignore capabilities it does not understand. */
 
@@ -3901,7 +4003,7 @@ int syncWithPrimaryHandleSendHandshakeState(connection *conn) {
         lens[argc] = strlen("dual-channel");
         argc++;
     }
-    if (server.repl_compression && use_diskless_load) {
+    if (server.repl_compression) {
         argv[argc] = "capa";
         lens[argc] = strlen("capa");
         argc++;

@@ -465,10 +465,11 @@ start_server {tags {"rdb-compression repl external:skip"}} {
         set primary_port [srv 0 port]
         set primary_log [srv 0 stdout]
 
-        test {Disk-based full sync replication stays compatible when rdb-compression-algo is lz4} {
+        test {Disk-based full sync replication falls back to raw RDB when replica lacks compression capability} {
             $primary config set rdbcompression yes
             $primary config set rdb-compression-algo lz4
             $primary config set rdb-compression-level -5
+            $primary config set repl-diskless-sync no
             $primary flushall
             for {set i 0} {$i < 500} {incr i} {
                 $primary set "repl:$i" [string repeat "payload$i " 40]
@@ -487,6 +488,31 @@ start_server {tags {"rdb-compression repl external:skip"}} {
 
             assert_equal $compression_count_before [count_message_lines $primary_log "RDB saved with LZ4 streaming compression"]
             assert_equal [string repeat "payload42 " 40] [$replica get repl:42]
+        }
+
+        test {Disk-based full sync replication uses compressed snapshot when replica advertises compression capability} {
+            $primary config set repl-diskless-sync no
+            $primary flushall
+            for {set i 0} {$i < 500} {incr i} {
+                $primary set "crepl:$i" [string repeat "payload$i " 40]
+            }
+            set compression_count_before [count_message_lines $primary_log "RDB saved with LZ4 streaming compression"]
+
+            start_server {overrides {save "" enable-debug-command local replcompression yes}} {
+                set compressed_replica [srv 0 client]
+                $compressed_replica replicaof $primary_host $primary_port
+                wait_for_sync $compressed_replica
+
+                wait_for_condition 50 100 {
+                    [status $compressed_replica master_link_status] eq "up" &&
+                    [$primary debug digest] eq [$compressed_replica debug digest]
+                } else {
+                    fail "Replica digest mismatch after compressed disk-based full sync"
+                }
+
+                assert_equal [expr {$compression_count_before + 1}] [count_message_lines $primary_log "RDB saved with LZ4 streaming compression"]
+                assert_equal [string repeat "payload42 " 40] [$compressed_replica get crepl:42]
+            }
         }
 
         test {Incremental replication continues after LZ4 full sync} {

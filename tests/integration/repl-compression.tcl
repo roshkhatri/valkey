@@ -279,7 +279,7 @@ start_server {tags {"repl needs:debug"} overrides {save "" enable-debug-command 
         }
     }
 
-    test {Compression disabled when replica uses disk-backed full sync} {
+    test {Disk-backed full sync still accepts negotiated transport compression} {
         $primary flushall
         for {set i 0} {$i < 100} {incr i} {
             $primary set "diskbacked:$i" [string repeat "value$i " 20]
@@ -306,7 +306,7 @@ start_server {tags {"repl needs:debug"} overrides {save "" enable-debug-command 
                 fail "Primary did not start exactly one RDB transfer for the disk-backed replica"
             }
 
-            assert_equal $compression_count_before [count_message_lines $primary_log "with LZ4 transport compression"]
+            assert_equal [expr {$compression_count_before + 1}] [count_message_lines $primary_log "with LZ4 transport compression"]
             assert_equal [string repeat "value42 " 20] [$replica get diskbacked:42]
 
             $replica replicaof no one

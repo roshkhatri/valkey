@@ -164,7 +164,7 @@ tags {"repl external:skip"} {
         }
     }
 
-    test "Replica restart loads reused AOF base when primary uses lz4 RDB compression" {
+    test "Replica restart falls back to bgrewriteaof when synced RDB uses lz4 streaming compression" {
         start_server {overrides {appendonly yes aof-use-rdb-preamble yes repl-diskless-sync no save "" rdb-compression-algo lz4}} {
             set primary [srv 0 client]
             set primary_host [srv 0 host]
@@ -175,18 +175,16 @@ tags {"repl external:skip"} {
             }
             waitForBgrewriteaof $primary
 
-            start_server {overrides {appendonly yes aof-use-rdb-preamble yes repl-diskless-sync no save ""}} {
+            start_server {overrides {appendonly yes aof-use-rdb-preamble yes repl-diskless-sync no save "" replcompression yes}} {
                 set replica [srv 0 client]
                 set replica_log [srv 0 stdout]
 
                 $replica replicaof $primary_host $primary_port
                 wait_for_sync $replica
 
-                wait_for_condition 50 100 {
-                    [log_file_matches $replica_log "*Reused RDB file from primary sync as AOF base file*"]
-                } else {
-                    fail "Expected log message not found"
-                }
+                after 1000
+                assert {![log_file_matches $replica_log "*Reused RDB file from primary sync as AOF base file*"]}
+                waitForBgrewriteaof $replica
 
                 for {set i 40} {$i < 60} {incr i} {
                     $primary set "lz4-key:$i" "value:$i"

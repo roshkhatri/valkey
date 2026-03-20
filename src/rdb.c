@@ -75,13 +75,6 @@ static inline bool isRdbStreamingCompressionEnabled(void) {
            compressionAlgoSupportsStreaming((compression_algo_t)server.rdb_compression_algo);
 }
 
-/* Replication BGSAVEs are served or reused without any capability signal for
- * an outer VKCS wrapper, so keep those snapshots as raw RDB files. */
-static inline bool shouldUseRdbStreamingCompression(int rdbflags) {
-    return isRdbStreamingCompressionEnabled() &&
-           !(rdbflags & RDBFLAGS_REPLICATION);
-}
-
 /* Inspect seekable file input before wiring the streaming reader so
  * malformed VKCS wrappers are classified as incompatible RDB input rather than as a
  * generic load failure. This preserves existing caller behavior that keeps
@@ -135,11 +128,12 @@ static int inspectRdbLoadStream(FILE *fp,
     return 0;
 }
 
-/* Replication BGSAVEs are served or reused without any capability signal for
- * an outer VKCS wrapper, so keep those snapshots as raw RDB files. */
-static inline int shouldUseRdbStreamingCompression(int rdbflags) {
-    return isRdbStreamingCompressionEnabled() &&
-           !(rdbflags & RDBFLAGS_REPLICATION);
+/* Replication BGSAVEs are only safe to wrap in VKCS when the caller has
+ * already negotiated that every target replica can consume the format. */
+static inline bool shouldUseRdbStreamingCompression(int rdbflags) {
+    if (!isRdbStreamingCompressionEnabled()) return false;
+    if (!(rdbflags & RDBFLAGS_REPLICATION)) return true;
+    return (rdbflags & RDBFLAGS_ALLOW_STREAMING_COMPRESSION) != 0;
 }
 
 /* This macro tells if we are in the context of a RESTORE command, and not loading an RDB or AOF. */
