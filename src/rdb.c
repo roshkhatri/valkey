@@ -75,6 +75,13 @@ static inline bool isRdbStreamingCompressionEnabled(void) {
            compressionAlgoSupportsStreaming((compression_algo_t)server.rdb_compression_algo);
 }
 
+/* Replication BGSAVEs are served or reused without any capability signal for
+ * an outer VKCS wrapper, so keep those snapshots as raw RDB files. */
+static inline bool shouldUseRdbStreamingCompression(int rdbflags) {
+    return isRdbStreamingCompressionEnabled() &&
+           !(rdbflags & RDBFLAGS_REPLICATION);
+}
+
 /* Inspect seekable file input before wiring the streaming reader so
  * malformed VKCS wrappers are classified as incompatible RDB input rather than as a
  * generic load failure. This preserves existing caller behavior that keeps
@@ -126,6 +133,13 @@ static int inspectRdbLoadStream(FILE *fp,
         stream_info->stream_kind = stream_kind;
     }
     return 0;
+}
+
+/* Replication BGSAVEs are served or reused without any capability signal for
+ * an outer VKCS wrapper, so keep those snapshots as raw RDB files. */
+static inline int shouldUseRdbStreamingCompression(int rdbflags) {
+    return isRdbStreamingCompressionEnabled() &&
+           !(rdbflags & RDBFLAGS_REPLICATION);
 }
 
 /* This macro tells if we are in the context of a RESTORE command, and not loading an RDB or AOF. */
@@ -1663,7 +1677,7 @@ static int rdbSaveInternal(int req, const char *filename, rdbSaveInfo *rsi, int 
     int error = 0;
     int saved_errno;
     char *err_op; /* For a detailed log */
-    bool use_streaming_compression = isRdbStreamingCompressionEnabled();
+    bool use_streaming_compression = shouldUseRdbStreamingCompression(rdbflags);
     compress_rio_t cr;
     bool cr_initialized = false;
 
@@ -1815,7 +1829,7 @@ int rdbSave(int req, char *filename, rdbSaveInfo *rsi, int rdbflags) {
     }
 
     serverLog(LL_NOTICE, "DB saved on disk");
-    if (isRdbStreamingCompressionEnabled()) {
+    if (shouldUseRdbStreamingCompression(rdbflags)) {
         serverLog(LL_VERBOSE, "RDB saved with %s streaming compression",
                   compressionAlgoName((compression_algo_t)server.rdb_compression_algo));
     }

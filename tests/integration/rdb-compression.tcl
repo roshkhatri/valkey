@@ -463,8 +463,9 @@ start_server {tags {"rdb-compression repl external:skip"}} {
         set primary [srv 0 client]
         set primary_host [srv 0 host]
         set primary_port [srv 0 port]
+        set primary_log [srv 0 stdout]
 
-        test {Disk-based full sync replication works with LZ4-compressed RDB snapshot} {
+        test {Disk-based full sync replication stays compatible when rdb-compression-algo is lz4} {
             $primary config set rdbcompression yes
             $primary config set rdb-compression-algo lz4
             $primary config set rdb-compression-level -5
@@ -472,6 +473,7 @@ start_server {tags {"rdb-compression repl external:skip"}} {
             for {set i 0} {$i < 500} {incr i} {
                 $primary set "repl:$i" [string repeat "payload$i " 40]
             }
+            set compression_count_before [count_message_lines $primary_log "RDB saved with LZ4 streaming compression"]
 
             $replica replicaof $primary_host $primary_port
             wait_for_sync $replica
@@ -483,6 +485,7 @@ start_server {tags {"rdb-compression repl external:skip"}} {
                 fail "Replica digest mismatch after LZ4 RDB full sync"
             }
 
+            assert_equal $compression_count_before [count_message_lines $primary_log "RDB saved with LZ4 streaming compression"]
             assert_equal [string repeat "payload42 " 40] [$replica get repl:42]
         }
 
