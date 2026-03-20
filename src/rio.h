@@ -193,6 +193,9 @@ void rioInitWithFile(rio *r, FILE *fp);
 void rioInitWithBuffer(rio *r, sds s);
 void rioInitWithConn(rio *r, connection *conn, size_t read_limit);
 void rioInitWithFd(rio *r, int fd);
+/* Read up to len bytes from a connection-backed rio without requiring
+ * the full request to be available. Preserves the rio connection buffer. */
+ssize_t rioConnReadPartial(rio *r, void *buf, size_t len);
 
 void rioFreeFd(rio *r);
 void rioFreeConn(rio *r, sds *out_remainingBufferedData);
