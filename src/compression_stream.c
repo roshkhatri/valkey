@@ -669,6 +669,26 @@ int stream_reader_get_info(stream_reader_t *t, stream_reader_info_t *info) {
     return 0;
 }
 
+int stream_reader_finish(stream_reader_t *t) {
+    uint8_t discard[256];
+
+    if (!t) return -1;
+    if (stream_reader_probe(t) != 0) return -1;
+    if (!t->compressed) return 0;
+
+    /* Callers invoke this only when they are done consuming the logical
+     * payload. Drop any decoded bytes still buffered so we can continue
+     * draining the compressed frame to its true boundary. */
+    t->window_pos = t->window_len;
+
+    while (!t->decompressor.frame_done) {
+        size_t discarded = 0;
+        if (streamReaderPump(t, discard, sizeof(discard), &discarded) != 0) return -1;
+        if (discarded == 0 && !t->decompressor.frame_done) return -1;
+    }
+    return 0;
+}
+
 int stream_reader_get_pending_input(stream_reader_t *t, const uint8_t **buf, size_t *len) {
     if (!t || !buf || !len) return -1;
     if (stream_reader_probe(t) != 0) return -1;

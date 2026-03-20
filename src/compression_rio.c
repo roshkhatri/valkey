@@ -261,6 +261,7 @@ static void decompressRioPreservePendingInput(decompress_rio_t *dr) {
     size_t pending_len = 0;
 
     if (!dr || !dr->reader || !dr->inner) return;
+    if (stream_reader_finish(dr->reader) != 0) return;
     if (stream_reader_get_pending_input(dr->reader, &pending, &pending_len) != 0) return;
     if (!pending || pending_len == 0) return;
 

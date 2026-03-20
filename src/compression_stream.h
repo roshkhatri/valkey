@@ -105,6 +105,10 @@ ssize_t stream_reader_read(stream_reader_t *t, void *buf, size_t len);
  * stream_kind=STREAM_KIND_ANY, codec_checksum_enabled=false.
  * Returns 0 on success, -1 on error. */
 int stream_reader_get_info(stream_reader_t *t, stream_reader_info_t *info);
+/* Drain and discard any remaining decompressed bytes in the current frame.
+ * After success, any pending raw input exposed by stream_reader_get_pending_input()
+ * belongs to data following the compressed frame. */
+int stream_reader_finish(stream_reader_t *t);
 /* Expose unread raw input bytes that were pulled from the source but not yet
  * consumed by the reader. Callers can use this to preserve trailing bytes
  * across stream handoff boundaries before destroying the reader. */
