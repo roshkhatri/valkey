@@ -127,12 +127,17 @@ int rioInitWithCompress(compress_rio_t *cr, rio *inner, const stream_writer_conf
 
     uint64_t flags = RIO_FLAG_STREAMING_COMPRESSION;
     if (cfg->block_checksum) flags |= RIO_FLAG_STREAMING_CODEC_CHECKSUM;
+    flags |= inner->flags & RIO_FLAG_SKIP_RDB_CHECKSUM;
 
     rioInitBase(&cr->base, rioReadUnsupported, compressRioWrite, compressRioTell,
                 compressRioFlush, flags, rioCheckType(inner));
-    /* Track the checksum of the uncompressed byte stream so RDB callers still
-     * emit a valid CRC64 footer even when the transport itself is compressed. */
-    cr->base.update_cksum = rioGenericUpdateChecksum;
+    /* When codec checksums are enabled, also track the checksum of the
+     * uncompressed byte stream so decoded-to-disk RDBs keep a valid CRC64
+     * footer. Honor skip-checksum requests from the wrapped rio. */
+    if ((flags & RIO_FLAG_STREAMING_CODEC_CHECKSUM) &&
+        !(flags & RIO_FLAG_SKIP_RDB_CHECKSUM)) {
+        cr->base.update_cksum = rioGenericUpdateChecksum;
+    }
 
     cr->inner = inner;
     cr->finalized = 0;
