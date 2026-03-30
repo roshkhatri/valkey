@@ -556,7 +556,11 @@ static int streamReaderPump(stream_reader_t *t,
             t->read_buf + t->read_buf_pos + t->read_buf_fill,
             read_size);
         if (got < 0) return -1;
-        if (got == 0) break; /* EOF */
+        if (got == 0) {
+            /* Reaching EOF before the codec reports frame completion means
+             * the compressed stream was truncated. */
+            return t->decompressor.frame_done ? 0 : -1;
+        }
         if ((size_t)got > read_size) return -1;
         t->read_buf_fill += (size_t)got;
     }
@@ -662,6 +666,29 @@ int stream_reader_get_info(stream_reader_t *t, stream_reader_info_t *info) {
     info->algo = t->compressed ? t->algo : ALGO_NONE;
     info->stream_kind = t->compressed ? t->stream_kind : STREAM_KIND_ANY;
     info->codec_checksum_enabled = t->compressed ? t->codec_checksum_enabled : false;
+    return 0;
+}
+
+int stream_reader_get_pending_input(stream_reader_t *t, const uint8_t **buf, size_t *len) {
+    if (!t || !buf || !len) return -1;
+    if (stream_reader_probe(t) != 0) return -1;
+
+    *buf = NULL;
+    *len = 0;
+
+    if (!t->compressed) {
+        size_t prefix_avail = streamReaderPrefixAvail(t);
+        if (prefix_avail > 0) {
+            *buf = t->prefix + t->prefix_pos;
+            *len = prefix_avail;
+        }
+        return 0;
+    }
+
+    if (t->read_buf_fill > 0) {
+        *buf = t->read_buf + t->read_buf_pos;
+        *len = t->read_buf_fill;
+    }
     return 0;
 }
 

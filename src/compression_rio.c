@@ -8,6 +8,7 @@
 
 #include "compression_rio.h"
 #include <string.h>
+#include <unistd.h>
 
 /* Flush the wrapped inner rio and map failure to the stream writer's
  * sticky error state. */
@@ -129,6 +130,9 @@ int rioInitWithCompress(compress_rio_t *cr, rio *inner, const stream_writer_conf
 
     rioInitBase(&cr->base, rioReadUnsupported, compressRioWrite, compressRioTell,
                 compressRioFlush, flags, rioCheckType(inner));
+    /* Track the checksum of the uncompressed byte stream so RDB callers still
+     * emit a valid CRC64 footer even when the transport itself is compressed. */
+    cr->base.update_cksum = rioGenericUpdateChecksum;
 
     cr->inner = inner;
     cr->finalized = 0;
@@ -247,6 +251,40 @@ static off_t decompressRioTell(rio *r) {
     return rioTell(dr->inner);
 }
 
+static void decompressRioPreservePendingInput(decompress_rio_t *dr) {
+    const uint8_t *pending = NULL;
+    size_t pending_len = 0;
+
+    if (!dr || !dr->reader || !dr->inner) return;
+    if (stream_reader_get_pending_input(dr->reader, &pending, &pending_len) != 0) return;
+    if (!pending || pending_len == 0) return;
+
+    rio *inner = dr->inner;
+    switch (rioCheckType(inner)) {
+    case RIO_TYPE_CONN:
+        if ((size_t)inner->io.conn.pos < pending_len || inner->io.conn.read_so_far < pending_len) return;
+        inner->io.conn.pos -= pending_len;
+        inner->io.conn.read_so_far -= pending_len;
+        if (inner->processed_bytes >= pending_len) inner->processed_bytes -= pending_len;
+        break;
+    case RIO_TYPE_BUFFER:
+        if ((size_t)inner->io.buffer.pos < pending_len) return;
+        inner->io.buffer.pos -= pending_len;
+        if (inner->processed_bytes >= pending_len) inner->processed_bytes -= pending_len;
+        break;
+    case RIO_TYPE_FILE:
+        if (fseeko(inner->io.file.fp, -(off_t)pending_len, SEEK_CUR) == -1) return;
+        if (inner->processed_bytes >= pending_len) inner->processed_bytes -= pending_len;
+        break;
+    case RIO_TYPE_FD:
+        if (lseek(inner->io.fd.fd, -(off_t)pending_len, SEEK_CUR) == (off_t)-1) return;
+        if (inner->processed_bytes >= pending_len) inner->processed_bytes -= pending_len;
+        break;
+    default:
+        break;
+    }
+}
+
 int decompress_rio_init_with_config(decompress_rio_t *dr, rio *inner, const stream_reader_config_t *cfg) {
     if (!dr || !inner || !cfg) return -1;
 
@@ -286,6 +324,7 @@ int decompress_rio_get_info(decompress_rio_t *dr, stream_reader_info_t *info) {
 void decompress_rio_destroy(decompress_rio_t *dr) {
     if (!dr) return;
     if (dr->reader) {
+        decompressRioPreservePendingInput(dr);
         stream_reader_destroy(dr->reader);
         dr->reader = NULL;
     }
