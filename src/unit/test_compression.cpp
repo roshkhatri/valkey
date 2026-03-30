@@ -1195,6 +1195,29 @@ TEST(compression, compressRioRoundTrip) {
     return;
 }
 
+TEST(compression, compressRioTracksUncompressedChecksum) {
+    sds buf = sdsempty();
+    rio buffer_rio;
+    rioInitWithBuffer(&buffer_rio, buf);
+
+    stream_writer_config_t cfg = makeWriterConfig(ALGO_LZ4, 0, STREAM_KIND_RDB, false, true);
+    compress_rio_t cr;
+    ASSERT_TRUE(rioInitWithCompress(&cr, &buffer_rio, &cfg) == 0);
+
+    const char *payload = "checksum-payload-for-compressed-rio";
+    size_t payload_len = strlen(payload);
+    ASSERT_TRUE(rioWrite((rio *)&cr, payload, payload_len) != 0);
+
+    rio expected = {};
+    rioGenericUpdateChecksum(&expected, payload, payload_len);
+    ASSERT_TRUE(cr.base.cksum == expected.cksum) << "compress_rio should track the checksum of uncompressed bytes";
+
+    ASSERT_TRUE(compress_rio_finish(&cr) == 0);
+    compress_rio_destroy(&cr);
+    sdsfree(buffer_rio.io.buffer.ptr);
+    return;
+}
+
 TEST(compression, rioDecoratorsPreserveInnerType) {
     sds buf = sdsempty();
     rio buffer_rio;
@@ -1538,6 +1561,82 @@ TEST(compression, streamReaderStopsAtFrameEndBeforeTrailingBytes) {
 
     stream_reader_destroy(r);
     sdsfree(input);
+    dynamicBufFree(&db);
+    return;
+}
+
+TEST(compression, streamReaderRejectsTruncatedFrameTrailer) {
+    const size_t payload_len = 256;
+    uint8_t payload[payload_len];
+    for (size_t i = 0; i < payload_len; i++) {
+        payload[i] = (uint8_t)(i & 0xFF);
+    }
+
+    dynamic_buf_t db;
+    dynamicBufInit(&db);
+
+    stream_writer_config_t cfg = makeWriterConfig(ALGO_LZ4, 0, STREAM_KIND_RDB, false, true);
+    stream_writer_t *w = stream_writer_create(&cfg, emitToDynamicBuf, &db);
+    ASSERT_TRUE(w != NULL);
+    ASSERT_TRUE(stream_writer_write(w, payload, payload_len) >= 0);
+    ASSERT_TRUE(stream_writer_finish(w) == 0);
+    stream_writer_destroy(w);
+
+    ASSERT_TRUE(db.len > VKCS_ENVELOPE_SIZE + 1);
+    mem_reader_t mr = makeMemReader(db.data, db.len - 1, 7);
+    stream_reader_config_t rcfg = makeReaderConfig(ALGO_NONE, STREAM_KIND_RDB, false, false, 8);
+    stream_reader_t *r = stream_reader_create(&rcfg, memReaderRead, &mr);
+    ASSERT_TRUE(r != NULL);
+
+    uint8_t out[payload_len];
+    ASSERT_TRUE(stream_reader_read(r, out, payload_len) == (ssize_t)payload_len);
+    ASSERT_TRUE(memcmp(out, payload, payload_len) == 0);
+    ASSERT_TRUE(stream_reader_read(r, out, 1) < 0) << "EOF before frame end should be treated as corruption";
+
+    stream_reader_destroy(r);
+    dynamicBufFree(&db);
+    return;
+}
+
+TEST(compression, decompressRioDestroyPreservesTrailingBytes) {
+    const char *payload = "preserve-trailing-bytes-after-frame";
+    const size_t payload_len = strlen(payload);
+    const char *trailer = "*1\r\n$4\r\nPING\r\n";
+    const size_t trailer_len = strlen(trailer);
+
+    dynamic_buf_t db;
+    dynamicBufInit(&db);
+
+    stream_writer_config_t cfg = makeWriterConfig(ALGO_LZ4, 0, STREAM_KIND_RDB);
+    stream_writer_t *w = stream_writer_create(&cfg, emitToDynamicBuf, &db);
+    ASSERT_TRUE(w != NULL);
+    ASSERT_TRUE(stream_writer_write(w, payload, payload_len) >= 0);
+    ASSERT_TRUE(stream_writer_finish(w) == 0);
+    stream_writer_destroy(w);
+
+    sds input = sdsnewlen(db.data, db.len);
+    input = sdscatlen(input, trailer, trailer_len);
+
+    rio buffer_rio;
+    rioInitWithBuffer(&buffer_rio, input);
+
+    stream_reader_config_t rcfg = makeReaderConfig(ALGO_NONE, STREAM_KIND_RDB, false, true, 8);
+    decompress_rio_t dr;
+    ASSERT_TRUE(decompress_rio_init_with_config(&dr, &buffer_rio, &rcfg) == 0);
+
+    char out[128];
+    memset(out, 0, sizeof(out));
+    ASSERT_TRUE(rioRead((rio *)&dr, out, payload_len) != 0);
+    ASSERT_TRUE(memcmp(out, payload, payload_len) == 0);
+
+    decompress_rio_destroy(&dr);
+
+    char raw_trailer[64];
+    memset(raw_trailer, 0, sizeof(raw_trailer));
+    ASSERT_TRUE(rioRead(&buffer_rio, raw_trailer, trailer_len) != 0);
+    ASSERT_TRUE(memcmp(raw_trailer, trailer, trailer_len) == 0);
+
+    sdsfree(buffer_rio.io.buffer.ptr);
     dynamicBufFree(&db);
     return;
 }
