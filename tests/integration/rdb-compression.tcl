@@ -211,6 +211,29 @@ start_server {overrides {save "" enable-debug-command local}} {
         assert {$digest eq $newdigest}
     }
 
+    test {LZ4 compressed RDB with REPL stream kind is rejected} {
+        r config set rdb-compression-algo lz4
+        r flushall
+        r set wrong-kind:key [string repeat "payload " 100]
+
+        r bgsave
+        waitForBgsave r
+
+        set rdbfile [file join [lindex [r config get dir] 1] dump.rdb]
+        set fd [open $rdbfile r+]
+        fconfigure $fd -translation binary
+        set data [read $fd]
+        binary scan [string index $data 6] cu flags
+        set newflags [expr {$flags | 0x01}]
+        set data [string replace $data 6 6 [binary format c $newflags]]
+        seek $fd 0
+        puts -nonewline $fd $data
+        close $fd
+
+        catch {r debug reload nosave} err
+        assert_match "*Error*" $err
+    }
+
     test {LZ4 compressed RDB detects corruption in compressed payload} {
         r config set rdb-compression-algo lz4
         r flushall
