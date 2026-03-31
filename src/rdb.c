@@ -75,6 +75,49 @@ static inline int isRdbStreamingCompressionEnabled(void) {
            (server.rdb_compression_algo == ALGO_LZ4);
 }
 
+/* Inspect the file header before wiring the streaming reader so malformed
+ * VKCS wrappers are classified as incompatible RDB input rather than as a
+ * generic load failure. This preserves existing caller behavior that keeps
+ * the current dataset until the RDB compatibility gate passes. */
+static int inspectRdbLoadStream(FILE *fp,
+                                stream_reader_info_t *stream_info,
+                                int *compressed_stream,
+                                int *incompatible_stream) {
+    unsigned char header[VKCS_ENVELOPE_SIZE];
+    compression_algo_t algo = ALGO_NONE;
+    uint8_t stream_kind = STREAM_KIND_ANY;
+    int codec_checksum_enabled = 0;
+
+    if (!fp || !compressed_stream || !incompatible_stream) return -1;
+
+    *compressed_stream = 0;
+    *incompatible_stream = 0;
+
+    size_t nread = fread(header, 1, sizeof(header), fp);
+    if (ferror(fp)) return -1;
+
+    clearerr(fp);
+    rewind(fp);
+
+    if (nread < 4 || memcmp(header, "VKCS", 4) != 0) return 0;
+    if (nread < sizeof(header) ||
+        readVkcsEnvelope(header, sizeof(header), &algo, &stream_kind,
+                         &codec_checksum_enabled) != 0 ||
+        stream_kind != STREAM_KIND_RDB) {
+        *incompatible_stream = 1;
+        return 0;
+    }
+
+    *compressed_stream = 1;
+    if (stream_info) {
+        stream_info->compressed = true;
+        stream_info->algo = algo;
+        stream_info->stream_kind = stream_kind;
+        stream_info->codec_checksum_enabled = codec_checksum_enabled != 0;
+    }
+    return 0;
+}
+
 /* This macro tells if we are in the context of a RESTORE command, and not loading an RDB or AOF. */
 #define isRestoreContext() ((server.current_client == NULL || server.current_client->id == CLIENT_ID_AOF) ? 0 : 1)
 
@@ -3701,29 +3744,37 @@ int rdbLoad(char *filename, rdbSaveInfo *rsi, int rdbflags) {
 
     decompress_rio_t dr;
     int dr_initialized = 0;
-    stream_reader_info_t stream_info;
+    stream_reader_info_t stream_info = {0};
     rio *load_rio = &rdb;
+    int compressed_stream = 0;
+    int incompatible_stream = 0;
 
-    stream_reader_config_t reader_cfg = {
-        .algo = ALGO_NONE,
-        .expected_stream_kind = STREAM_KIND_RDB,
-        .raw_frame = 0,
-        .allow_passthrough = 1,
-        .batch_size = 0,
-    };
-    if (decompress_rio_init_with_config(&dr, &rdb, &reader_cfg) != 0) {
-        serverLog(LL_WARNING, "Failed to initialize RDB stream reader for %s", filename);
+    if (inspectRdbLoadStream(fp, &stream_info, &compressed_stream,
+                             &incompatible_stream) != 0) {
+        serverLog(LL_WARNING, "Failed to inspect the RDB stream header for %s: %s",
+                  filename, strerror(errno));
         goto done;
     }
-    dr_initialized = 1;
-    load_rio = (rio *)&dr;
+    if (incompatible_stream) {
+        serverLog(LL_WARNING, "Invalid RDB stream envelope in %s", filename);
+        retval = RDB_INCOMPATIBLE;
+        goto done;
+    }
+    if (compressed_stream) {
+        stream_reader_config_t reader_cfg = {
+            .algo = ALGO_NONE,
+            .expected_stream_kind = STREAM_KIND_RDB,
+            .raw_frame = 0,
+            .allow_passthrough = 0,
+            .batch_size = 0,
+        };
+        if (decompress_rio_init_with_config(&dr, &rdb, &reader_cfg) != 0) {
+            serverLog(LL_WARNING, "Failed to initialize RDB stream reader for %s", filename);
+            goto done;
+        }
+        dr_initialized = 1;
+        load_rio = (rio *)&dr;
 
-    /* Metadata probe already happened in decompress_rio_init_with_config().
-     * This call only fetches cached info and should not fail. */
-    int stream_info_rc = decompress_rio_get_info(&dr, &stream_info);
-    serverAssert(stream_info_rc == 0);
-
-    if (stream_info.compressed) {
         serverLog(LL_NOTICE, "Loading compressed RDB (algo=%s) from %s",
                   compressionAlgoName(stream_info.algo), filename);
     }

@@ -288,6 +288,13 @@ start_server {overrides {save "" enable-debug-command local}} {
     }
 }
 
+start_server {config "minimal.conf" args {"--rdb-streaming-compression-level -9" "--rdb-compression-algo lz4"}} {
+    test {Startup accepts valid LZ4 compression config regardless of directive order} {
+        assert_equal "lz4" [lindex [r config get rdb-compression-algo] 1]
+        assert_equal "-9" [lindex [r config get rdb-streaming-compression-level] 1]
+    }
+}
+
 start_server {overrides {save "" enable-debug-command local rdbchecksum no}} {
     test {LZ4 compressed RDB with rdb-checksum no clears VKCS codec checksum flag and loads correctly} {
         r config set rdb-compression-algo lz4
