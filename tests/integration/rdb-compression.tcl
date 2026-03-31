@@ -192,7 +192,7 @@ start_server {overrides {save "" enable-debug-command local}} {
         assert_equal "-9" [lindex [r config get rdb-streaming-compression-level] 1]
     }
 
-    test {LZ4 compressed RDB with rdb-checksum yes sets VKCS codec checksum flag} {
+    test {LZ4 compressed RDB with rdb-checksum yes keeps CRC64 and clears VKCS codec checksum flag} {
         r config set rdb-compression-algo lz4
         r flushall
         for {set i 0} {$i < 200} {incr i} {
@@ -203,12 +203,31 @@ start_server {overrides {save "" enable-debug-command local}} {
         set header [read_dump_rdb_header_bytes r]
         assert_equal "VKCS" [string range $header 0 3]
         binary scan [string index $header 6] cu flags
-        assert {($flags & 0x02) != 0}
+        assert {($flags & 0x02) == 0}
 
         set digest [debug_digest]
         r debug reload
         set newdigest [debug_digest]
         assert {$digest eq $newdigest}
+    }
+
+    test {LZ4 compressed RDB still validates the footer CRC64} {
+        r config set rdb-compression-algo lz4
+        r flushall
+        for {set i 0} {$i < 100} {incr i} {
+            r set "footer:$i" [string repeat "payload$i " 100]
+        }
+
+        r save
+        set rdbfile [file join [lindex [r config get dir] 1] dump.rdb]
+        set fd [open $rdbfile r+]
+        fconfigure $fd -translation binary
+        seek $fd -8 end
+        puts -nonewline $fd "foobar00"
+        close $fd
+
+        catch {r debug reload nosave} err
+        assert_match "*Error*" $err
     }
 
     test {LZ4 compressed RDB with REPL stream kind is rejected} {
