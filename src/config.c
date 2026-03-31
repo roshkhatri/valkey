@@ -462,6 +462,7 @@ static int reading_config_file;
 /* Tracks nested config parsing depth (top-level + includes). */
 static int config_parse_depth;
 static int validateRdbCompressionSettings(const char **err);
+static int validateRdbCompressionSettingsFinal(const char **err);
 
 void loadServerConfigFromString(sds config) {
     deprecatedConfig deprecated_configs[] = {
@@ -635,7 +636,7 @@ void loadServerConfigFromString(sds config) {
     }
     /* Validate cross-option consistency once at top-level parse end, after
      * all include files have been processed. */
-    if (config_parse_depth == 1 && !validateRdbCompressionSettings(&err)) {
+    if (config_parse_depth == 1 && !validateRdbCompressionSettingsFinal(&err)) {
         goto loaderr;
     }
 
@@ -3260,6 +3261,14 @@ static int isValidDbHashSeed(sds val, const char **err) {
  * Streaming level tuning applies only to LZ4. For non-LZ4 algorithms, only
  * the default level is allowed. */
 static int validateRdbCompressionSettings(const char **err) {
+    /* Startup parsing applies configs one directive at a time, so defer this
+     * cross-option validation until the top-level parse completes. Runtime
+     * CONFIG SET continues to validate immediately. */
+    if (reading_config_file) return 1;
+    return validateRdbCompressionSettingsFinal(err);
+}
+
+static int validateRdbCompressionSettingsFinal(const char **err) {
     if (server.rdb_compression_algo != ALGO_LZ4 &&
         server.rdb_streaming_compression_level != RDB_STREAMING_COMPRESSION_LEVEL_DEFAULT) {
         *err = "rdb-streaming-compression-level is supported only when rdb-compression-algo is lz4";

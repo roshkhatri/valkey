@@ -1047,7 +1047,7 @@ int restartAOFWithSyncRdb(void) {
         serverLog(LL_NOTICE,
                   "Sync RDB file %s uses streaming compression, falling back to BGREWRITEAOF instead of reusing it as an AOF base",
                   server.rdb_filename);
-        goto cleanup;
+        return C_ERR;
     }
 
     if (dirCreateIfMissing(server.aof_dirname) == -1) {
