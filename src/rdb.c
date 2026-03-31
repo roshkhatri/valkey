@@ -75,10 +75,13 @@ static inline int isRdbStreamingCompressionEnabled(void) {
            (server.rdb_compression_algo == ALGO_LZ4);
 }
 
-/* Inspect the file header before wiring the streaming reader so malformed
+/* Inspect seekable file input before wiring the streaming reader so malformed
  * VKCS wrappers are classified as incompatible RDB input rather than as a
  * generic load failure. This preserves existing caller behavior that keeps
- * the current dataset until the RDB compatibility gate passes. */
+ * the current dataset until the RDB compatibility gate passes.
+ *
+ * Returns 0 when inspection completed, 1 when the stream is not seekable and
+ * the caller should fall back to the streaming reader probe, or -1 on error. */
 static int inspectRdbLoadStream(FILE *fp,
                                 stream_reader_info_t *stream_info,
                                 int *compressed_stream,
@@ -93,11 +96,17 @@ static int inspectRdbLoadStream(FILE *fp,
     *compressed_stream = 0;
     *incompatible_stream = 0;
 
+    off_t start_offset = ftello(fp);
+    if (start_offset == (off_t)-1) {
+        if (errno == ESPIPE) return 1;
+        return -1;
+    }
+
     size_t nread = fread(header, 1, sizeof(header), fp);
     if (ferror(fp)) return -1;
 
     clearerr(fp);
-    rewind(fp);
+    if (fseeko(fp, start_offset, SEEK_SET) == -1) return -1;
 
     if (nread < 4 || memcmp(header, "VKCS", 4) != 0) return 0;
     if (nread < sizeof(header) ||
@@ -3748,24 +3757,27 @@ int rdbLoad(char *filename, rdbSaveInfo *rsi, int rdbflags) {
     rio *load_rio = &rdb;
     int compressed_stream = 0;
     int incompatible_stream = 0;
+    int nonseekable_stream = 0;
 
-    if (inspectRdbLoadStream(fp, &stream_info, &compressed_stream,
-                             &incompatible_stream) != 0) {
+    int inspect_rc = inspectRdbLoadStream(fp, &stream_info, &compressed_stream,
+                                          &incompatible_stream);
+    if (inspect_rc == -1) {
         serverLog(LL_WARNING, "Failed to inspect the RDB stream header for %s: %s",
                   filename, strerror(errno));
         goto done;
     }
+    nonseekable_stream = inspect_rc == 1;
     if (incompatible_stream) {
         serverLog(LL_WARNING, "Invalid RDB stream envelope in %s", filename);
         retval = RDB_INCOMPATIBLE;
         goto done;
     }
-    if (compressed_stream) {
+    if (compressed_stream || nonseekable_stream) {
         stream_reader_config_t reader_cfg = {
             .algo = ALGO_NONE,
             .expected_stream_kind = STREAM_KIND_RDB,
             .raw_frame = 0,
-            .allow_passthrough = 0,
+            .allow_passthrough = nonseekable_stream,
             .batch_size = 0,
         };
         if (decompress_rio_init_with_config(&dr, &rdb, &reader_cfg) != 0) {
@@ -3775,8 +3787,15 @@ int rdbLoad(char *filename, rdbSaveInfo *rsi, int rdbflags) {
         dr_initialized = 1;
         load_rio = (rio *)&dr;
 
-        serverLog(LL_NOTICE, "Loading compressed RDB (algo=%s) from %s",
-                  compressionAlgoName(stream_info.algo), filename);
+        if (nonseekable_stream) {
+            int stream_info_rc = decompress_rio_get_info(&dr, &stream_info);
+            serverAssert(stream_info_rc == 0);
+            compressed_stream = stream_info.compressed;
+        }
+        if (compressed_stream) {
+            serverLog(LL_NOTICE, "Loading compressed RDB (algo=%s) from %s",
+                      compressionAlgoName(stream_info.algo), filename);
+        }
     }
 
     retval = rdbLoadRio(load_rio, rdbflags, rsi);
