@@ -3788,9 +3788,13 @@ int rdbLoad(char *filename, rdbSaveInfo *rsi, int rdbflags) {
         load_rio = (rio *)&dr;
 
         if (nonseekable_stream) {
-            int stream_info_rc = decompress_rio_get_info(&dr, &stream_info);
-            serverAssert(stream_info_rc == 0);
-            compressed_stream = stream_info.compressed;
+            compressed_stream = (dr.base.flags & RIO_FLAG_STREAMING_COMPRESSION) != 0;
+            if (compressed_stream &&
+                decompress_rio_get_info(&dr, &stream_info) != 0) {
+                serverLog(LL_WARNING, "Failed to inspect probed RDB stream metadata for %s",
+                          filename);
+                goto done;
+            }
         }
         if (compressed_stream) {
             serverLog(LL_NOTICE, "Loading compressed RDB (algo=%s) from %s",
