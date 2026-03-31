@@ -623,13 +623,9 @@ ALL_SOURCES=$(sort $(patsubst %.o,%.c,$(ENGINE_SERVER_OBJ) $(ENGINE_CLI_OBJ) $(E
 
 USE_FAST_FLOAT?=no
 ifeq ($(USE_FAST_FLOAT),yes)
-	# valkey_strtod.h uses this flag to switch valkey_strtod function to fast_float_strtod,
-	# therefore let's pass it to compiler for preprocessing.
+	# valkey_strtod.c embeds the header-only ffc.h implementation, so this
+	# compatibility option only needs the preprocessor define.
 	FINAL_CFLAGS += -D USE_FAST_FLOAT
-	# next, let's build and add actual library containing fast_float_strtod function for linking.
-	DEPENDENCY_TARGETS += fast_float_c_interface
-	FAST_FLOAT_STRTOD_OBJECT := ../deps/fast_float_c_interface/fast_float_strtod.o
-	FINAL_LIBS += $(FAST_FLOAT_STRTOD_OBJECT)
 endif
 
 USE_LIBBACKTRACE?=no
