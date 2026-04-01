@@ -96,55 +96,55 @@ start_server {overrides {save "" enable-debug-command local}} {
         assert_match "*argument(s) must be one of the following: lzf, lz4*" $err
     }
 
-    test {Invalid streaming compression level config is rejected} {
-        catch {r config set rdb-streaming-compression-level -1001} err
+    test {Invalid compression level config is rejected} {
+        catch {r config set rdb-compression-level -1001} err
         assert_match "*between* -1000 *22*" $err
-        catch {r config set rdb-streaming-compression-level 23} err
+        catch {r config set rdb-compression-level 23} err
         assert_match "*between* -1000 *22*" $err
-        catch {r config set rdb-streaming-compression-level not-an-int} err
+        catch {r config set rdb-compression-level not-an-int} err
         assert_match "*parsed into an integer*" $err
     }
 
-    test {Streaming compression level requires LZ4 algo} {
-        r config set rdb-streaming-compression-level -5 rdb-compression-algo lzf
+    test {Compression level rejects algorithms without level support} {
+        r config set rdb-compression-level 0 rdb-compression-algo lzf
 
-        catch {r config set rdb-streaming-compression-level -9} err
-        assert_match "*supported only when rdb-compression-algo is lz4*" $err
+        catch {r config set rdb-compression-level -9} err
+        assert_match "*supported only for compression algorithms that accept a level*" $err
         assert_equal "lzf" [lindex [r config get rdb-compression-algo] 1]
-        assert_equal "-5" [lindex [r config get rdb-streaming-compression-level] 1]
+        assert_equal "0" [lindex [r config get rdb-compression-level] 1]
 
         # Invalid paired updates should fail atomically regardless of argument order.
-        catch {r config set rdb-compression-algo lzf rdb-streaming-compression-level -9} err
-        assert_match "*supported only when rdb-compression-algo is lz4*" $err
+        catch {r config set rdb-compression-algo lzf rdb-compression-level -9} err
+        assert_match "*supported only for compression algorithms that accept a level*" $err
         assert_equal "lzf" [lindex [r config get rdb-compression-algo] 1]
-        assert_equal "-5" [lindex [r config get rdb-streaming-compression-level] 1]
+        assert_equal "0" [lindex [r config get rdb-compression-level] 1]
 
-        catch {r config set rdb-streaming-compression-level -9 rdb-compression-algo lzf} err
-        assert_match "*supported only when rdb-compression-algo is lz4*" $err
+        catch {r config set rdb-compression-level -9 rdb-compression-algo lzf} err
+        assert_match "*supported only for compression algorithms that accept a level*" $err
         assert_equal "lzf" [lindex [r config get rdb-compression-algo] 1]
-        assert_equal "-5" [lindex [r config get rdb-streaming-compression-level] 1]
+        assert_equal "0" [lindex [r config get rdb-compression-level] 1]
 
         r config set rdb-compression-algo lz4
-        r config set rdb-streaming-compression-level -9
+        r config set rdb-compression-level -9
         catch {r config set rdb-compression-algo lzf} err
-        assert_match "*supported only when rdb-compression-algo is lz4*" $err
+        assert_match "*supported only for compression algorithms that accept a level*" $err
         assert_equal "lz4" [lindex [r config get rdb-compression-algo] 1]
-        assert_equal "-9" [lindex [r config get rdb-streaming-compression-level] 1]
+        assert_equal "-9" [lindex [r config get rdb-compression-level] 1]
 
-        catch {r config set rdb-compression-algo lzf rdb-streaming-compression-level -9} err
-        assert_match "*supported only when rdb-compression-algo is lz4*" $err
+        catch {r config set rdb-compression-algo lzf rdb-compression-level -9} err
+        assert_match "*supported only for compression algorithms that accept a level*" $err
         assert_equal "lz4" [lindex [r config get rdb-compression-algo] 1]
-        assert_equal "-9" [lindex [r config get rdb-streaming-compression-level] 1]
+        assert_equal "-9" [lindex [r config get rdb-compression-level] 1]
 
-        r config set rdb-streaming-compression-level -5 rdb-compression-algo lzf
+        r config set rdb-compression-level 0 rdb-compression-algo lzf
         assert_equal "lzf" [lindex [r config get rdb-compression-algo] 1]
-        assert_equal "-5" [lindex [r config get rdb-streaming-compression-level] 1]
+        assert_equal "0" [lindex [r config get rdb-compression-level] 1]
 
         # Restore LZ4 so following tests keep their existing assumptions.
         r config set rdb-compression-algo lz4
     }
 
-    test {Startup rejects non-LZ4 with non-default streaming level} {
+    test {Startup rejects unsupported compression level for selected algorithm} {
         set confdir [tmpdir "rdb-compression-invalid-startup"]
         exec mkdir -p $confdir
         set cfgfile [file join $confdir "valkey.conf"]
@@ -160,12 +160,12 @@ start_server {overrides {save "" enable-debug-command local}} {
         puts $fd "pidfile $pidfile"
         puts $fd "logfile /dev/null"
         puts $fd "rdb-compression-algo lzf"
-        puts $fd "rdb-streaming-compression-level -9"
+        puts $fd "rdb-compression-level -9"
         close $fd
 
         set rc [catch {exec $::VALKEY_SERVER_BIN $cfgfile} err]
         assert {$rc == 1}
-        assert_match "*rdb-streaming-compression-level is supported only when rdb-compression-algo is lz4*" $err
+        assert_match "*rdb-compression-level is supported only for compression algorithms that accept a level*" $err
 
         # Defensive cleanup in case startup unexpectedly succeeded.
         if {[file exists $pidfile]} {
@@ -182,14 +182,14 @@ start_server {overrides {save "" enable-debug-command local}} {
     test {RDB compression configs survive CONFIG REWRITE and restart} {
         r config set rdbcompression yes
         r config set rdb-compression-algo lz4
-        r config set rdb-streaming-compression-level -9
+        r config set rdb-compression-level -9
         r config rewrite
 
         restart_server 0 true false
 
         assert_equal "yes" [lindex [r config get rdbcompression] 1]
         assert_equal "lz4" [lindex [r config get rdb-compression-algo] 1]
-        assert_equal "-9" [lindex [r config get rdb-streaming-compression-level] 1]
+        assert_equal "-9" [lindex [r config get rdb-compression-level] 1]
     }
 
     test {LZ4 compressed RDB with rdb-checksum yes keeps CRC64 and clears VKCS codec checksum flag} {
@@ -307,10 +307,10 @@ start_server {overrides {save "" enable-debug-command local}} {
     }
 }
 
-start_server {config "minimal.conf" args {"--rdb-streaming-compression-level -9" "--rdb-compression-algo lz4"}} {
+start_server {config "minimal.conf" args {"--rdb-compression-level -9" "--rdb-compression-algo lz4"}} {
     test {Startup accepts valid LZ4 compression config regardless of directive order} {
         assert_equal "lz4" [lindex [r config get rdb-compression-algo] 1]
-        assert_equal "-9" [lindex [r config get rdb-streaming-compression-level] 1]
+        assert_equal "-9" [lindex [r config get rdb-compression-level] 1]
     }
 }
 
@@ -348,7 +348,7 @@ start_server {tags {"rdb-compression repl external:skip"}} {
         test {Disk-based full sync replication works with LZ4-compressed RDB snapshot} {
             $primary config set rdbcompression yes
             $primary config set rdb-compression-algo lz4
-            $primary config set rdb-streaming-compression-level -5
+            $primary config set rdb-compression-level -5
             $primary flushall
             for {set i 0} {$i < 500} {incr i} {
                 $primary set "repl:$i" [string repeat "payload$i " 40]
@@ -407,11 +407,11 @@ start_server {tags {"rdb-compression repl external:skip"}} {
 set cluster_bus_port [find_available_port $::baseport $::portcount]
 start_server [list tags {"rdb-compression cluster external:skip singledb"} overrides [list save "" cluster-enabled yes cluster-port $cluster_bus_port]] {
     test {RDB compression configs validate in cluster mode} {
-        catch {r config set rdb-streaming-compression-level -9} err
-        assert_match "*supported only when rdb-compression-algo is lz4*" $err
+        catch {r config set rdb-compression-level -9} err
+        assert_match "*supported only for compression algorithms that accept a level*" $err
 
         r config set rdb-compression-algo lz4
-        r config set rdb-streaming-compression-level -5
+        r config set rdb-compression-level -5
         assert_equal "OK" [r save]
     }
 }

@@ -164,7 +164,7 @@ tags {"repl external:skip"} {
         }
     }
 
-    test "Replica restart falls back to bgrewriteaof when synced RDB uses lz4 streaming compression" {
+    test "Replica restart falls back to bgrewriteaof when synced RDB uses streaming compression" {
         start_server {overrides {appendonly yes aof-use-rdb-preamble yes repl-diskless-sync no save "" rdb-compression-algo lz4}} {
             set primary [srv 0 client]
             set primary_host [srv 0 host]
