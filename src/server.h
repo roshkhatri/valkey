@@ -2038,7 +2038,7 @@ struct valkeyServer {
     int rdb_compression;                  /* Use compression in RDB? */
     int rdb_compression_algo;             /* RDB compression algorithm (compression_algo_t):
                                            * ALGO_LZF (default), ALGO_LZ4 */
-    int rdb_streaming_compression_level;  /* Streaming compressor level (LZ4). */
+    int rdb_compression_level;            /* Compression level for streaming RDB codecs that support one. */
     int rdb_checksum;                     /* Use RDB checksum? */
     int rdb_del_sync_files;               /* Remove RDB files used only for SYNC if
                                              the instance does not use persistence. */

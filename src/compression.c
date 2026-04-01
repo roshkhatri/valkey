@@ -17,6 +17,10 @@ int compressionAlgoSupportsStreaming(compression_algo_t algo) {
     return algo == ALGO_LZ4;
 }
 
+int compressionAlgoSupportsLevel(compression_algo_t algo) {
+    return algo == ALGO_LZ4;
+}
+
 const char *compressionAlgoName(compression_algo_t algo) {
     switch (algo) {
     case ALGO_NONE:

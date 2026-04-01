@@ -182,9 +182,9 @@ configEnum rdb_compression_algo_enum[] = {{"lzf", ALGO_LZF},
                                           {"lz4", ALGO_LZ4},
                                           {NULL, 0}};
 
-/* Default for rdb-streaming-compression-level.
+/* Default for rdb-compression-level.
  * Kept centralized to avoid drift between config table and validation logic. */
-#define RDB_STREAMING_COMPRESSION_LEVEL_DEFAULT (-5)
+#define RDB_COMPRESSION_LEVEL_DEFAULT 0
 
 /* Output buffer limits presets. */
 clientBufferLimitsConfig clientBufferLimitsDefaults[CLIENT_TYPE_OBUF_COUNT] = {
@@ -3258,8 +3258,8 @@ static int isValidDbHashSeed(sds val, const char **err) {
 }
 
 /* Keep RDB compression settings coherent.
- * Streaming level tuning applies only to LZ4. For non-LZ4 algorithms, only
- * the default level is allowed. */
+ * Compression level tuning applies only to algorithms that expose one.
+ * For algorithms without level support, only the default level is allowed. */
 static int validateRdbCompressionSettings(const char **err) {
     /* Startup parsing applies configs one directive at a time, so defer this
      * cross-option validation until the top-level parse completes. Runtime
@@ -3269,9 +3269,9 @@ static int validateRdbCompressionSettings(const char **err) {
 }
 
 static int validateRdbCompressionSettingsFinal(const char **err) {
-    if (server.rdb_compression_algo != ALGO_LZ4 &&
-        server.rdb_streaming_compression_level != RDB_STREAMING_COMPRESSION_LEVEL_DEFAULT) {
-        *err = "rdb-streaming-compression-level is supported only when rdb-compression-algo is lz4";
+    if (!compressionAlgoSupportsLevel((compression_algo_t)server.rdb_compression_algo) &&
+        server.rdb_compression_level != RDB_COMPRESSION_LEVEL_DEFAULT) {
+        *err = "rdb-compression-level is supported only for compression algorithms that accept a level (currently: lz4)";
         return 0;
     }
     return 1;
@@ -3392,7 +3392,7 @@ standardConfig static_configs[] = {
     createEnumConfig("rdb-compression-algo", NULL, MODIFIABLE_CONFIG, rdb_compression_algo_enum, server.rdb_compression_algo, ALGO_LZF, NULL, validateRdbCompressionSettings),
 
     /* Integer configs */
-    createIntConfig("rdb-streaming-compression-level", NULL, MODIFIABLE_CONFIG, -1000, 22, server.rdb_streaming_compression_level, RDB_STREAMING_COMPRESSION_LEVEL_DEFAULT, INTEGER_CONFIG, NULL, validateRdbCompressionSettings),
+    createIntConfig("rdb-compression-level", NULL, MODIFIABLE_CONFIG, -1000, 22, server.rdb_compression_level, RDB_COMPRESSION_LEVEL_DEFAULT, INTEGER_CONFIG, NULL, validateRdbCompressionSettings),
     createIntConfig("databases", NULL, IMMUTABLE_CONFIG, 1, INT_MAX, server.config_databases, 16, INTEGER_CONFIG, NULL, NULL),
     createIntConfig("cluster-databases", NULL, IMMUTABLE_CONFIG, 1, INT_MAX, server.config_databases_cluster, 1, INTEGER_CONFIG, NULL, NULL),
     createIntConfig("port", NULL, MODIFIABLE_CONFIG, 0, 65535, server.port, 6379, INTEGER_CONFIG, NULL, updatePort),                                               /* TCP port. */

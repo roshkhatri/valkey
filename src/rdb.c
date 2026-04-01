@@ -72,11 +72,11 @@
 /* Returns 1 if streaming compression is enabled for RDB saves. */
 static inline int isRdbStreamingCompressionEnabled(void) {
     return server.rdb_compression &&
-           (server.rdb_compression_algo == ALGO_LZ4);
+           compressionAlgoSupportsStreaming((compression_algo_t)server.rdb_compression_algo);
 }
 
-/* Inspect seekable file input before wiring the streaming reader so malformed
- * VKCS wrappers are classified as incompatible RDB input rather than as a
+/* Inspect seekable file input before wiring the streaming reader so
+ * malformed VKCS wrappers are classified as incompatible RDB input rather than as a
  * generic load failure. This preserves existing caller behavior that keeps
  * the current dataset until the RDB compatibility gate passes.
  *
@@ -1652,7 +1652,7 @@ static int rdbSaveInternal(int req, const char *filename, rdbSaveInfo *rsi, int 
     if (use_streaming_compression) {
         stream_writer_config_t cfg = {
             .algo = (compression_algo_t)server.rdb_compression_algo,
-            .level = server.rdb_streaming_compression_level,
+            .level = server.rdb_compression_level,
             .stream_kind = STREAM_KIND_RDB,
             /* Keep the footer CRC64 as the end-to-end integrity check, matching
              * legacy LZF semantics. */
@@ -1771,7 +1771,8 @@ int rdbSave(int req, char *filename, rdbSaveInfo *rsi, int rdbflags) {
 
     serverLog(LL_NOTICE, "DB saved on disk");
     if (isRdbStreamingCompressionEnabled()) {
-        serverLog(LL_VERBOSE, "RDB saved with LZ4 streaming compression");
+        serverLog(LL_VERBOSE, "RDB saved with %s streaming compression",
+                  compressionAlgoName((compression_algo_t)server.rdb_compression_algo));
     }
     server.dirty = 0;
     server.lastsave = time(NULL);
