@@ -69,8 +69,8 @@
 /* This macro is called when RDB read failed (possibly a short read) */
 #define rdbReportReadError(...) rdbReportError(0, __LINE__, __VA_ARGS__)
 
-/* Returns 1 if streaming compression is enabled for RDB saves. */
-static inline int isRdbStreamingCompressionEnabled(void) {
+/* Returns true if streaming compression is enabled for RDB saves. */
+static inline bool isRdbStreamingCompressionEnabled(void) {
     return server.rdb_compression &&
            compressionAlgoSupportsStreaming((compression_algo_t)server.rdb_compression_algo);
 }
@@ -84,17 +84,17 @@ static inline int isRdbStreamingCompressionEnabled(void) {
  * the caller should fall back to the streaming reader probe, or -1 on error. */
 static int inspectRdbLoadStream(FILE *fp,
                                 stream_reader_info_t *stream_info,
-                                int *compressed_stream,
-                                int *incompatible_stream) {
+                                bool *compressed_stream,
+                                bool *incompatible_stream) {
     unsigned char header[VKCS_ENVELOPE_SIZE];
     compression_algo_t algo = ALGO_NONE;
-    uint8_t stream_kind = STREAM_KIND_ANY;
-    int codec_checksum_enabled = 0;
+    bool codec_checksum_enabled = false;
+    uint8_t stream_kind = 0;
 
     if (!fp || !compressed_stream || !incompatible_stream) return -1;
 
-    *compressed_stream = 0;
-    *incompatible_stream = 0;
+    *compressed_stream = false;
+    *incompatible_stream = false;
 
     off_t start_offset = ftello(fp);
     if (start_offset == (off_t)-1) {
@@ -113,16 +113,16 @@ static int inspectRdbLoadStream(FILE *fp,
         readVkcsEnvelope(header, sizeof(header), &algo, &stream_kind,
                          &codec_checksum_enabled) != 0 ||
         stream_kind != STREAM_KIND_RDB) {
-        *incompatible_stream = 1;
+        *incompatible_stream = true;
         return 0;
     }
 
-    *compressed_stream = 1;
+    *compressed_stream = true;
     if (stream_info) {
         stream_info->compressed = true;
         stream_info->algo = algo;
+        stream_info->codec_checksum_enabled = codec_checksum_enabled;
         stream_info->stream_kind = stream_kind;
-        stream_info->codec_checksum_enabled = codec_checksum_enabled != 0;
     }
     return 0;
 }
@@ -1621,9 +1621,9 @@ static int rdbSaveInternal(int req, const char *filename, rdbSaveInfo *rsi, int 
     int error = 0;
     int saved_errno;
     char *err_op; /* For a detailed log */
-    int use_streaming_compression = isRdbStreamingCompressionEnabled();
+    bool use_streaming_compression = isRdbStreamingCompressionEnabled();
     compress_rio_t cr;
-    int cr_initialized = 0;
+    bool cr_initialized = false;
 
     FILE *fp = fopen(filename, "w");
     if (!fp) {
@@ -1654,9 +1654,7 @@ static int rdbSaveInternal(int req, const char *filename, rdbSaveInfo *rsi, int 
             .algo = (compression_algo_t)server.rdb_compression_algo,
             .level = server.rdb_compression_level,
             .stream_kind = STREAM_KIND_RDB,
-            /* Keep the footer CRC64 as the end-to-end integrity check, matching
-             * legacy LZF semantics. */
-            .block_checksum = 0,
+            .block_checksum = false,
             .raw_frame = 0,
         };
         if (rioInitWithCompress(&cr, &rdb, &cfg) != 0) {
@@ -1665,7 +1663,7 @@ static int rdbSaveInternal(int req, const char *filename, rdbSaveInfo *rsi, int 
             goto werr;
         }
         save_rio = (rio *)&cr;
-        cr_initialized = 1;
+        cr_initialized = true;
     }
 
     if (rdbSaveRio(req, RDB_VERSION, save_rio, &error, rdbflags, rsi) == C_ERR) {
@@ -1680,11 +1678,11 @@ static int rdbSaveInternal(int req, const char *filename, rdbSaveInfo *rsi, int 
             errno = EIO; /* Compression finalization failure */
             err_op = "compress_rio_finish";
             compress_rio_destroy(&cr);
-            cr_initialized = 0;
+            cr_initialized = false;
             goto werr;
         }
         compress_rio_destroy(&cr);
-        cr_initialized = 0;
+        cr_initialized = false;
     }
 
     /* Make sure data will not remain on the OS's output buffers */
@@ -3750,12 +3748,12 @@ int rdbLoad(char *filename, rdbSaveInfo *rsi, int rdbflags) {
     rioInitWithFile(&rdb, fp);
 
     decompress_rio_t dr;
-    int dr_initialized = 0;
+    bool dr_initialized = false;
     stream_reader_info_t stream_info = {0};
     rio *load_rio = &rdb;
-    int compressed_stream = 0;
-    int incompatible_stream = 0;
-    int nonseekable_stream = 0;
+    bool compressed_stream = false;
+    bool incompatible_stream = false;
+    bool nonseekable_stream = false;
 
     int inspect_rc = inspectRdbLoadStream(fp, &stream_info, &compressed_stream,
                                           &incompatible_stream);
@@ -3782,7 +3780,7 @@ int rdbLoad(char *filename, rdbSaveInfo *rsi, int rdbflags) {
             serverLog(LL_WARNING, "Failed to initialize RDB stream reader for %s", filename);
             goto done;
         }
-        dr_initialized = 1;
+        dr_initialized = true;
         load_rio = (rio *)&dr;
 
         if (nonseekable_stream) {

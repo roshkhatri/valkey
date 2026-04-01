@@ -13,11 +13,11 @@
 #include <string.h>
 #include <unistd.h>
 
-int compressionAlgoSupportsStreaming(compression_algo_t algo) {
+bool compressionAlgoSupportsStreaming(compression_algo_t algo) {
     return algo == ALGO_LZ4;
 }
 
-int compressionAlgoSupportsLevel(compression_algo_t algo) {
+bool compressionAlgoSupportsLevel(compression_algo_t algo) {
     return algo == ALGO_LZ4;
 }
 
@@ -32,89 +32,6 @@ const char *compressionAlgoName(compression_algo_t algo) {
     default:
         return "unknown";
     }
-}
-
-/* --- Envelope --- */
-
-/* Write 8-byte VKCS envelope via callback.
- * Shared utility used by BOTH sync (rio decorator) and async (replication)
- * paths.  Prevents "sync emits envelope but async forgets it" class of bugs.
- *
- * Layout (little-endian where applicable):
- *   [0..3] magic  "VKCS" (0x56 0x4B 0x43 0x53)
- *   [4]    version (VKCS_VERSION, currently 1)
- *   [5]    algo_id (compression_algo_t value)
- *   [6]    flags   (bit 0 = stream_kind: 0=RDB, 1=REPL;
- *                   bit 1 = codec checksum enabled; bits 2-7 reserved)
- *   [7]    reserved (must be 0)
- *
- * Returns 0 on success, -1 on error (invalid algo or emit_cb failure). */
-int writeVkcsEnvelope(vkcsEmitFn emit_cb,
-                      void *ctx,
-                      compression_algo_t algo,
-                      uint8_t stream_kind,
-                      int codec_checksum_enabled) {
-    /* Only streaming algorithms are valid in the envelope. */
-    if (!emit_cb) return -1;
-    if (!compressionAlgoSupportsStreaming(algo)) return -1;
-    if (stream_kind != STREAM_KIND_RDB && stream_kind != STREAM_KIND_REPL) return -1;
-
-    uint8_t envelope[VKCS_ENVELOPE_SIZE];
-    envelope[0] = VKCS_MAGIC_0;
-    envelope[1] = VKCS_MAGIC_1;
-    envelope[2] = VKCS_MAGIC_2;
-    envelope[3] = VKCS_MAGIC_3;
-    envelope[4] = VKCS_VERSION;
-    envelope[5] = (uint8_t)algo;
-    envelope[6] = (uint8_t)(stream_kind & VKCS_FLAG_STREAM_KIND);
-    if (codec_checksum_enabled) envelope[6] |= VKCS_FLAG_CODEC_CHECKSUM;
-    envelope[7] = 0; /* reserved */
-
-    int rc = emit_cb(ctx, envelope, VKCS_ENVELOPE_SIZE);
-    return rc == 0 ? 0 : -1;
-}
-
-/* Parse 8-byte VKCS envelope from buffer.
- * Validates magic bytes, version, algorithm, and reserved fields.
- * Rejects envelopes with non-zero reserved bits so future versions are
- * detected early rather than causing silent data corruption.
- * On success populates *algo, *stream_kind, and *codec_checksum_enabled and
- * returns 0.
- * Returns -1 on error (bad magic, unsupported version, unknown algo,
- * reserved bits set). */
-int readVkcsEnvelope(const uint8_t *buf,
-                     size_t len,
-                     compression_algo_t *algo,
-                     uint8_t *stream_kind,
-                     int *codec_checksum_enabled) {
-    if (!buf || len < VKCS_ENVELOPE_SIZE) return -1;
-
-    /* Validate magic */
-    if (buf[0] != VKCS_MAGIC_0 || buf[1] != VKCS_MAGIC_1 ||
-        buf[2] != VKCS_MAGIC_2 || buf[3] != VKCS_MAGIC_3) {
-        return -1;
-    }
-
-    /* Validate version — only version 1 is supported */
-    if (buf[4] != VKCS_VERSION) return -1;
-
-    /* Extract and validate algorithm */
-    uint8_t algo_id = buf[5];
-    if (!compressionAlgoSupportsStreaming((compression_algo_t)algo_id)) return -1;
-
-    /* Reject envelopes with reserved bits/bytes set (strict reader pattern) */
-    uint8_t flags = buf[6];
-    if (flags & 0xFC) return -1; /* reserved flag bits 2-7 must be 0 */
-    if (buf[7] != 0) return -1;  /* reserved byte must be 0 */
-
-    uint8_t kind = flags & VKCS_FLAG_STREAM_KIND;
-    int checksum_enabled = (flags & VKCS_FLAG_CODEC_CHECKSUM) != 0;
-
-    if (algo) *algo = (compression_algo_t)algo_id;
-    if (stream_kind) *stream_kind = kind;
-    if (codec_checksum_enabled) *codec_checksum_enabled = checksum_enabled;
-
-    return 0;
 }
 
 /* --- Streaming compressor --- */
@@ -185,10 +102,10 @@ void streamDecompressorDestroy(stream_decompressor_t *sd) {
 /* Shared LZ4F preferences template.
  * - Used by streamCompressOutputBound() for bounds.
  * - Copied and selectively overridden in streamCompressFeed() before
- *   LZ4F_compressBegin() (compression level, checksum mode, block mode).
+ *   LZ4F_compressBegin() (compression level and block mode).
  *
- * Bounds are computed with block checksum enabled and block-independent
- * mode (worst-case for output size). */
+ * Bounds are computed with block-independent mode and block checksums enabled
+ * so the returned capacity is safe for both checksum settings. */
 static const LZ4F_preferences_t lz4f_prefs = {
     .frameInfo = {
         .blockChecksumFlag = LZ4F_blockChecksumEnabled,
@@ -204,7 +121,7 @@ static const LZ4F_preferences_t lz4f_prefs = {
  * Accounts for frame header overhead when !frame_started and
  * flush/end overhead for internally buffered data.
  * For LZ4: uses lz4f_prefs (64KB blocks) to match streamCompressFeed. */
-size_t streamCompressOutputBound(compression_algo_t algo, size_t input_len, int frame_started, compress_flush_mode_t flush_mode) {
+size_t streamCompressOutputBound(compression_algo_t algo, size_t input_len, bool frame_started, compress_flush_mode_t flush_mode) {
     switch (algo) {
     case ALGO_LZ4: {
         size_t bound = LZ4F_compressBound(input_len, &lz4f_prefs);
@@ -242,16 +159,16 @@ ssize_t streamCompressFeed(stream_compressor_t *sc,
 
         /* Begin frame on first call */
         if (!sc->frame_started) {
-            /* Local copy of shared prefs so we can set the actual level,
-             * checksum mode, and block mode per-stream. */
+            /* Local copy of shared prefs so we can set the actual level
+             * and block mode per-stream. */
             LZ4F_preferences_t prefs = lz4f_prefs;
             prefs.compressionLevel = sc->level;
-            prefs.frameInfo.blockChecksumFlag = sc->block_checksum
-                                                    ? LZ4F_blockChecksumEnabled
-                                                    : LZ4F_noBlockChecksum;
             prefs.frameInfo.blockMode = sc->block_mode == COMPRESS_BLOCK_LINKED
                                             ? LZ4F_blockLinked
                                             : LZ4F_blockIndependent;
+            prefs.frameInfo.blockChecksumFlag = sc->block_checksum
+                                                    ? LZ4F_blockChecksumEnabled
+                                                    : LZ4F_noBlockChecksum;
             size_t r = LZ4F_compressBegin((LZ4F_cctx *)sc->ctx.lz4f,
                                           output, output_capacity, &prefs);
             if (LZ4F_isError(r)) {

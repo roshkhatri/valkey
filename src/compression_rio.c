@@ -67,11 +67,7 @@ static void rioInitBase(rio *base,
  * reuse the same writer abstraction once that path lands.
  *
  * RDB CHECKSUM SEMANTICS: When streaming compression is active, integrity
- * may come from either:
- * - codec-native frame checksums (RIO_FLAG_STREAMING_CODEC_CHECKSUM), or
- * - the standard RDB CRC64 footer.
- *
- * The save/load paths decide which checksum source to use based on flags.
+ * still comes from the standard RDB CRC64 footer.
  * =================================================================== */
 
 /* Emit callback for compress_rio: writes compressed bytes to inner rio.
@@ -126,16 +122,13 @@ int rioInitWithCompress(compress_rio_t *cr, rio *inner, const stream_writer_conf
     memset(cr, 0, sizeof(*cr));
 
     uint64_t flags = RIO_FLAG_STREAMING_COMPRESSION;
-    if (cfg->block_checksum) flags |= RIO_FLAG_STREAMING_CODEC_CHECKSUM;
     flags |= inner->flags & RIO_FLAG_SKIP_RDB_CHECKSUM;
 
     rioInitBase(&cr->base, rioReadUnsupported, compressRioWrite, compressRioTell,
                 compressRioFlush, flags, rioCheckType(inner));
-    /* When codec checksums are enabled, also track the checksum of the
-     * uncompressed byte stream so decoded-to-disk RDBs keep a valid CRC64
-     * footer. Honor skip-checksum requests from the wrapped rio. */
-    if ((flags & RIO_FLAG_STREAMING_CODEC_CHECKSUM) &&
-        !(flags & RIO_FLAG_SKIP_RDB_CHECKSUM)) {
+    /* Track the uncompressed byte stream so compressed RDBs keep a valid
+     * footer CRC64. Honor skip-checksum requests from the wrapped rio. */
+    if (!(flags & RIO_FLAG_SKIP_RDB_CHECKSUM)) {
         cr->base.update_cksum = rioGenericUpdateChecksum;
     }
 
@@ -314,9 +307,6 @@ int decompress_rio_init_with_config(decompress_rio_t *dr, rio *inner, const stre
     }
     if (info.compressed) {
         dr->base.flags |= RIO_FLAG_STREAMING_COMPRESSION;
-        if (info.codec_checksum_enabled) {
-            dr->base.flags |= RIO_FLAG_STREAMING_CODEC_CHECKSUM;
-        }
     }
 
     return 0;
