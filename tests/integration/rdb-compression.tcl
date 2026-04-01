@@ -9,86 +9,202 @@ proc read_dump_rdb_header_bytes {client} {
     return $header
 }
 
+proc write_rdb_test_dataset {client prefix} {
+    $client flushall
+    for {set i 0} {$i < 12} {incr i} {
+        $client set "${prefix}:str:$i" [string repeat "${prefix}:value:$i " 16]
+    }
+    $client lpush "${prefix}:list" a b c d e
+    $client sadd "${prefix}:set" alpha beta gamma
+    $client zadd "${prefix}:zset" 1 one 2 two 3 three
+    $client hset "${prefix}:hash" f1 v1 f2 [string repeat "${prefix}:hash " 8]
+    $client xadd "${prefix}:stream" * f1 s1 f2 [string repeat "${prefix}:stream " 4]
+    $client xadd "${prefix}:stream" * f1 s2 f2 tail
+}
+
+proc assert_rdb_test_dataset {client prefix} {
+    assert_equal [string repeat "${prefix}:value:0 " 16] [$client get "${prefix}:str:0"]
+    assert_equal 17 [$client dbsize]
+    assert_equal 5 [$client llen "${prefix}:list"]
+    assert_equal 3 [$client scard "${prefix}:set"]
+    assert_equal 3 [$client zcard "${prefix}:zset"]
+    assert_equal v1 [$client hget "${prefix}:hash" f1]
+    assert_equal 2 [$client xlen "${prefix}:stream"]
+}
+
 start_server {overrides {save "" enable-debug-command local}} {
     test {RDB save and load round-trip with LZ4 compression} {
+        set prefix "lz4-round-trip"
+        r config set rdbcompression yes
         r config set rdb-compression-algo lz4
-        # Populate various data types
-        for {set i 0} {$i < 100} {incr i} {
-            r set "key:$i" [string repeat "value$i " 100]
-        }
-        r set counter 42
-        r lpush mylist a b c d e
-        r sadd myset x y z
-        r zadd zset 1.0 a 2.0 b 3.0 c
-        r hset myhash f1 v1 f2 v2
-
+        r config set rdb-compression-level 0
+        write_rdb_test_dataset r $prefix
+        assert_rdb_test_dataset r $prefix
         set digest [debug_digest]
-        r debug reload
+
+        assert_equal "OK" [r save]
+        r config rewrite
+        restart_server 0 true false
+
+        assert_equal "lz4" [lindex [r config get rdb-compression-algo] 1]
+        assert_equal "0" [lindex [r config get rdb-compression-level] 1]
         set newdigest [debug_digest]
         assert {$digest eq $newdigest}
-
-        # Spot-check values
-        assert_equal 42 [r get counter]
-        assert_equal 5 [r llen mylist]
-        assert_equal 3 [r scard myset]
-        assert_equal 3 [r zcard zset]
-        assert_equal "v1" [r hget myhash f1]
+        assert_rdb_test_dataset r $prefix
     }
 
     test {RDB save with LZF (default) round-trips correctly} {
+        set prefix "lzf-round-trip"
+        r config set rdbcompression yes
+        r config set rdb-compression-level 0
         r config set rdb-compression-algo lzf
-        r flushall
-        for {set i 0} {$i < 50} {incr i} {
-            r set "lzf:$i" [string repeat "data$i " 50]
-        }
+        write_rdb_test_dataset r $prefix
+        assert_rdb_test_dataset r $prefix
 
         set digest [debug_digest]
-        r debug reload
+        assert_equal "OK" [r save]
+        r config rewrite
+        restart_server 0 true false
+
+        assert_equal "lzf" [lindex [r config get rdb-compression-algo] 1]
+        assert_equal "0" [lindex [r config get rdb-compression-level] 1]
         set newdigest [debug_digest]
         assert {$digest eq $newdigest}
+        assert_rdb_test_dataset r $prefix
     }
 
     test {Uncompressed RDB files load correctly (backward compat)} {
+        set prefix "plain-rdb"
         r config set rdbcompression no
+        r config set rdb-compression-level 0
         r config set rdb-compression-algo lzf
-        r flushall
-        r set hello world
-        r set num 12345
+        write_rdb_test_dataset r $prefix
+        assert_rdb_test_dataset r $prefix
 
         set digest [debug_digest]
-        r debug reload
+        assert_equal "OK" [r save]
+        r config rewrite
+        restart_server 0 true false
+
+        assert_equal "no" [lindex [r config get rdbcompression] 1]
         set newdigest [debug_digest]
         assert {$digest eq $newdigest}
-        r config set rdbcompression yes
+        assert_rdb_test_dataset r $prefix
     }
 
     test {LZ4 compressed RDB with large dataset} {
+        r config set rdbcompression yes
         r config set rdb-compression-algo lz4
+        r config set rdb-compression-level 0
         r flushall
-        r debug populate 1000
-        r set extra_key "extra_value"
+        for {set i 0} {$i < 1000} {incr i} {
+            r set "bulk:$i" [string repeat "payload:$i " 32]
+        }
+        r lpush bulk:list a b c d e
+        r hset bulk:hash f1 v1 f2 v2
 
         set digest [debug_digest]
-        r debug reload
+        assert_equal "OK" [r save]
+        r config rewrite
+        restart_server 0 true false
+
+        assert_equal "lz4" [lindex [r config get rdb-compression-algo] 1]
         set newdigest [debug_digest]
         assert {$digest eq $newdigest}
-        assert_equal "extra_value" [r get extra_key]
-        assert_equal 1001 [r dbsize]
+        assert_equal [string repeat "payload:42 " 32] [r get bulk:42]
+        assert_equal 5 [r llen bulk:list]
+        assert_equal "v1" [r hget bulk:hash f1]
+        assert_equal 1002 [r dbsize]
     }
 
     test {Switching from LZ4 to LZF preserves data} {
+        set prefix "lz4-to-lzf"
+        r config set rdbcompression yes
         r config set rdb-compression-algo lz4
-        r flushall
-        r debug populate 100
+        r config set rdb-compression-level -9
+        write_rdb_test_dataset r $prefix
+        assert_rdb_test_dataset r $prefix
         set digest [debug_digest]
 
-        # Save with LZ4, then switch to LZF and reload
-        r bgsave
-        waitForBgsave r
+        # Save with LZ4, then restart with LZF and load the existing file.
+        assert_equal "OK" [r save]
+        r config set rdb-compression-level 0
         r config set rdb-compression-algo lzf
-        r debug reload nosave
+        r config rewrite
+        restart_server 0 true false
+
+        assert_equal "lzf" [lindex [r config get rdb-compression-algo] 1]
+        assert_equal "0" [lindex [r config get rdb-compression-level] 1]
         set newdigest [debug_digest]
         assert {$digest eq $newdigest}
+        assert_rdb_test_dataset r $prefix
+    }
+
+    test {Switching from LZF to LZ4 preserves data} {
+        set prefix "lzf-to-lz4"
+        r config set rdbcompression yes
+        r config set rdb-compression-level 0
+        r config set rdb-compression-algo lzf
+        write_rdb_test_dataset r $prefix
+        assert_rdb_test_dataset r $prefix
+        set digest [debug_digest]
+
+        # Save with LZF, then restart with LZ4 and load the existing file.
+        assert_equal "OK" [r save]
+        r config set rdb-compression-algo lz4
+        r config set rdb-compression-level -9
+        r config rewrite
+        restart_server 0 true false
+
+        assert_equal "lz4" [lindex [r config get rdb-compression-algo] 1]
+        assert_equal "-9" [lindex [r config get rdb-compression-level] 1]
+        set newdigest [debug_digest]
+        assert {$digest eq $newdigest}
+        assert_rdb_test_dataset r $prefix
+    }
+
+    test {Switching from fast to default LZ4 compression level preserves data} {
+        set prefix "lz4-fast-to-default"
+        r config set rdbcompression yes
+        r config set rdb-compression-algo lz4
+        r config set rdb-compression-level -9
+        write_rdb_test_dataset r $prefix
+        assert_rdb_test_dataset r $prefix
+        set digest [debug_digest]
+
+        # Save with fast mode, then restart with the default level configured.
+        assert_equal "OK" [r save]
+        r config set rdb-compression-level 0
+        r config rewrite
+        restart_server 0 true false
+
+        assert_equal "lz4" [lindex [r config get rdb-compression-algo] 1]
+        assert_equal "0" [lindex [r config get rdb-compression-level] 1]
+        set newdigest [debug_digest]
+        assert {$digest eq $newdigest}
+        assert_rdb_test_dataset r $prefix
+    }
+
+    test {Switching from default to fast LZ4 compression level preserves data} {
+        set prefix "lz4-default-to-fast"
+        r config set rdbcompression yes
+        r config set rdb-compression-algo lz4
+        r config set rdb-compression-level 0
+        write_rdb_test_dataset r $prefix
+        assert_rdb_test_dataset r $prefix
+        set digest [debug_digest]
+
+        # Save with the default level, then restart with fast mode configured.
+        assert_equal "OK" [r save]
+        r config set rdb-compression-level -9
+        r config rewrite
+        restart_server 0 true false
+
+        assert_equal "lz4" [lindex [r config get rdb-compression-algo] 1]
+        assert_equal "-9" [lindex [r config get rdb-compression-level] 1]
+        set newdigest [debug_digest]
+        assert {$digest eq $newdigest}
+        assert_rdb_test_dataset r $prefix
     }
 
     test {Invalid compression algo config is rejected} {
@@ -193,7 +309,9 @@ start_server {overrides {save "" enable-debug-command local}} {
     }
 
     test {LZ4 compressed RDB with rdb-checksum yes keeps CRC64 and clears VKCS codec checksum flag} {
+        r config set rdbcompression yes
         r config set rdb-compression-algo lz4
+        r config set rdb-compression-level 0
         r flushall
         for {set i 0} {$i < 200} {incr i} {
             r set "cksum:$i" [string repeat "payload$i " 200]
@@ -206,9 +324,10 @@ start_server {overrides {save "" enable-debug-command local}} {
         assert {($flags & 0x02) == 0}
 
         set digest [debug_digest]
-        r debug reload
+        restart_server 0 true false
         set newdigest [debug_digest]
         assert {$digest eq $newdigest}
+        assert_equal [string repeat "payload42 " 200] [r get cksum:42]
     }
 
     test {LZ4 compressed RDB still validates the footer CRC64} {
@@ -231,12 +350,12 @@ start_server {overrides {save "" enable-debug-command local}} {
     }
 
     test {LZ4 compressed RDB with REPL stream kind is rejected} {
+        r config set rdbcompression yes
         r config set rdb-compression-algo lz4
         r flushall
         r set wrong-kind:key [string repeat "payload " 100]
 
-        r bgsave
-        waitForBgsave r
+        assert_equal "OK" [r save]
 
         set rdbfile [file join [lindex [r config get dir] 1] dump.rdb]
         set fd [open $rdbfile r+]
@@ -254,15 +373,14 @@ start_server {overrides {save "" enable-debug-command local}} {
     }
 
     test {LZ4 compressed RDB detects corruption in compressed payload} {
+        r config set rdbcompression yes
         r config set rdb-compression-algo lz4
         r flushall
         for {set i 0} {$i < 100} {incr i} {
             r set "corrupt:$i" [string repeat "testdata$i " 100]
         }
 
-        # Save to file
-        r bgsave
-        waitForBgsave r
+        assert_equal "OK" [r save]
 
         set rdbfile [file join [lindex [r config get dir] 1] dump.rdb]
 
@@ -289,12 +407,12 @@ start_server {overrides {save "" enable-debug-command local}} {
     }
 
     test {Invalid non-VKCS/non-RDB file fails reload} {
+        r config set rdbcompression yes
         r config set rdb-compression-algo lz4
         r flushall
         r set smoke-key smoke-value
 
-        r bgsave
-        waitForBgsave r
+        assert_equal "OK" [r save]
 
         set rdbfile [file join [lindex [r config get dir] 1] dump.rdb]
         set fd [open $rdbfile w]
@@ -316,7 +434,9 @@ start_server {config "minimal.conf" args {"--rdb-compression-level -9" "--rdb-co
 
 start_server {overrides {save "" enable-debug-command local rdbchecksum no}} {
     test {LZ4 compressed RDB with rdb-checksum no clears VKCS codec checksum flag and loads correctly} {
+        r config set rdbcompression yes
         r config set rdb-compression-algo lz4
+        r config set rdb-compression-level 0
         r flushall
         for {set i 0} {$i < 50} {incr i} {
             r set "nocksum:$i" [string repeat "data$i " 100]
@@ -329,9 +449,10 @@ start_server {overrides {save "" enable-debug-command local rdbchecksum no}} {
         assert {($flags & 0x02) == 0}
 
         set digest [debug_digest]
-        r debug reload
+        restart_server 0 true false
         set newdigest [debug_digest]
         assert {$digest eq $newdigest}
+        assert_equal [string repeat "data10 " 100] [r get nocksum:10]
     }
 }
 
