@@ -308,7 +308,7 @@ start_server {overrides {save "" enable-debug-command local}} {
         assert_equal "-9" [lindex [r config get rdb-compression-level] 1]
     }
 
-    test {LZ4 compressed RDB with rdb-checksum yes keeps CRC64 and clears VKCS codec checksum flag} {
+    test {LZ4 compressed RDB with rdb-checksum yes keeps CRC64 and leaves VKCS flags clear} {
         r config set rdbcompression yes
         r config set rdb-compression-algo lz4
         r config set rdb-compression-level 0
@@ -321,7 +321,7 @@ start_server {overrides {save "" enable-debug-command local}} {
         set header [read_dump_rdb_header_bytes r]
         assert_equal "VKCS" [string range $header 0 3]
         binary scan [string index $header 6] cu flags
-        assert {($flags & 0x02) == 0}
+        assert {$flags == 0}
 
         set digest [debug_digest]
         restart_server 0 true false
@@ -361,9 +361,7 @@ start_server {overrides {save "" enable-debug-command local}} {
         set fd [open $rdbfile r+]
         fconfigure $fd -translation binary
         set data [read $fd]
-        binary scan [string index $data 6] cu flags
-        set newflags [expr {$flags | 0x01}]
-        set data [string replace $data 6 6 [binary format c $newflags]]
+        set data [string replace $data 7 7 [binary format c 0x01]]
         seek $fd 0
         puts -nonewline $fd $data
         close $fd
@@ -433,7 +431,7 @@ start_server {config "minimal.conf" args {"--rdb-compression-level -9" "--rdb-co
 }
 
 start_server {overrides {save "" enable-debug-command local rdbchecksum no}} {
-    test {LZ4 compressed RDB with rdb-checksum no clears VKCS codec checksum flag and loads correctly} {
+    test {LZ4 compressed RDB with rdb-checksum no leaves VKCS flags clear and loads correctly} {
         r config set rdbcompression yes
         r config set rdb-compression-algo lz4
         r config set rdb-compression-level 0
@@ -446,7 +444,7 @@ start_server {overrides {save "" enable-debug-command local rdbchecksum no}} {
         set header [read_dump_rdb_header_bytes r]
         assert_equal "VKCS" [string range $header 0 3]
         binary scan [string index $header 6] cu flags
-        assert {($flags & 0x02) == 0}
+        assert {$flags == 0}
 
         set digest [debug_digest]
         restart_server 0 true false

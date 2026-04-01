@@ -9,18 +9,31 @@
 
 #include "compression.h"
 
+/* --- VKCS stream envelope --- */
+#define VKCS_MAGIC_0 0x56 /* 'V' */
+#define VKCS_MAGIC_1 0x4B /* 'K' */
+#define VKCS_MAGIC_2 0x43 /* 'C' */
+#define VKCS_MAGIC_3 0x53 /* 'S' */
+#define VKCS_ENVELOPE_SIZE 8
+#define VKCS_VERSION 1
+#define VKCS_FLAG_CODEC_CHECKSUM (1 << 0)
+#define STREAM_KIND_RDB 0x00
+#define STREAM_KIND_REPL 0x01
+
+/* Emit callback used by the VKCS envelope and generic streaming writer. */
+typedef int (*vkcsEmitFn)(void *ctx, const uint8_t *data, size_t len);
+
 /* Default decode/read window for stream_reader when cfg->batch_size == 0. */
 #define STREAM_READER_BATCH_SIZE_DEFAULT (1024 * 1024)
 
 /* Generic caller-agnostic streaming writer config.
  * - raw_frame=0: emits VKCS envelope + codec frame
- * - raw_frame=1: emits codec frame only (no envelope)
- * - block_checksum: codec checksum toggle (algorithm-specific) */
+ * - raw_frame=1: emits codec frame only (no envelope) */
 typedef struct {
     compression_algo_t algo;
     int level;
-    uint8_t stream_kind;              /* STREAM_KIND_RDB or STREAM_KIND_REPL */
-    bool block_checksum;              /* Codec checksum toggle (LZ4 block checksum) */
+    uint8_t stream_kind;              /* Concrete on-wire stream kind. */
+    bool block_checksum;              /* Enable codec-native integrity checks when supported. */
     bool stable_src;                  /* Caller guarantees input remains valid until the
                                        * next write/flush on this writer. */
     bool raw_frame;                   /* true => emit raw codec frame (no VKCS envelope) */
@@ -35,7 +48,7 @@ typedef struct {
  * - batch_size=0: uses internal default window/read size */
 typedef struct {
     compression_algo_t algo;      /* Required only when raw_frame=1 */
-    uint8_t expected_stream_kind; /* STREAM_KIND_RDB/REPL or STREAM_KIND_ANY */
+    uint8_t expected_stream_kind; /* Concrete stream kind to enforce for compressed input. */
     bool raw_frame;               /* true => input is raw codec frame (no VKCS envelope) */
     bool allow_passthrough;       /* true => non-VKCS input is passed through */
     size_t batch_size;            /* Decode/read batch size; 0 => internal default */
@@ -49,9 +62,9 @@ typedef struct stream_reader stream_reader_t;
 typedef struct {
     bool compressed; /* true => stream is VKCS+codec compressed, false => passthrough */
     compression_algo_t algo;
-    uint8_t stream_kind;         /* STREAM_KIND_RDB/REPL when compressed, STREAM_KIND_ANY otherwise */
-    bool codec_checksum_enabled; /* Parsed from VKCS flags when compressed.
-                                  * For LZ4 this tracks block checksum mode. */
+    bool codec_checksum_enabled; /* VKCS-advertised codec checksum flag. Ignore when compressed is false. */
+    uint8_t stream_kind;         /* Parsed VKCS kind, or cfg->expected_stream_kind for raw_frame readers.
+                                  * Ignore when compressed is false. */
 } stream_reader_info_t;
 
 /* Caller-provided input callback.
@@ -60,6 +73,23 @@ typedef struct {
  * -  0: EOF
  * - -1: read error */
 typedef ssize_t (*stream_reader_read_fn)(void *ctx, void *buf, size_t len);
+
+/* Write VKCS envelope via callback. Returns 0 on success, -1 on error
+ * (invalid algo or emit_cb failure). */
+int writeVkcsEnvelope(vkcsEmitFn emit_cb,
+                      void *ctx,
+                      compression_algo_t algo,
+                      uint8_t stream_kind,
+                      bool codec_checksum_enabled);
+
+/* Parse VKCS envelope from buffer. Returns 0 on success, -1 on error.
+ * On success, *algo and *stream_kind are populated when corresponding pointers
+ * are non-NULL. */
+int readVkcsEnvelope(const uint8_t *buf,
+                     size_t len,
+                     compression_algo_t *algo,
+                     uint8_t *stream_kind,
+                     bool *codec_checksum_enabled);
 
 /* Generic streaming writer API.
  * Ownership: returned context is owned by caller and must be destroyed.
@@ -102,7 +132,7 @@ int stream_reader_probe(stream_reader_t *t);
 ssize_t stream_reader_read(stream_reader_t *t, void *buf, size_t len);
 /* Populate stream metadata after probing.
  * For passthrough streams: compressed=0, algo=ALGO_NONE,
- * stream_kind=STREAM_KIND_ANY, codec_checksum_enabled=false.
+ * stream_kind is unspecified.
  * Returns 0 on success, -1 on error. */
 int stream_reader_get_info(stream_reader_t *t, stream_reader_info_t *info);
 /* Drain and discard any remaining decompressed bytes in the current frame.

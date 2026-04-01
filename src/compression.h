@@ -19,23 +19,6 @@ typedef enum {
     ALGO_LZ4 = 0x02,
 } compression_algo_t;
 
-/* --- VKCS Stream Envelope --- */
-#define VKCS_MAGIC_0 0x56 /* 'V' */
-#define VKCS_MAGIC_1 0x4B /* 'K' */
-#define VKCS_MAGIC_2 0x43 /* 'C' */
-#define VKCS_MAGIC_3 0x53 /* 'S' */
-#define VKCS_ENVELOPE_SIZE 8
-#define VKCS_VERSION 1
-#define VKCS_FLAG_STREAM_KIND 0x01
-#define VKCS_FLAG_CODEC_CHECKSUM 0x02
-
-#define STREAM_KIND_RDB 0x00
-#define STREAM_KIND_REPL 0x01
-#define STREAM_KIND_ANY 0xFF
-
-/* --- Emit callback type --- */
-typedef int (*vkcsEmitFn)(void *ctx, const uint8_t *data, size_t len);
-
 /* --- Flush modes for streaming compression --- */
 typedef enum {
     FLUSH_CONTINUE = 0, /* Buffer internally */
@@ -93,33 +76,14 @@ typedef struct {
                       * immediately (no more output). */
 } stream_decompressor_t;
 
-/* --- Envelope API --- */
+/* Returns true if the algorithm supports streaming codec framing. */
+bool compressionAlgoSupportsStreaming(compression_algo_t algo);
 
-/* Returns 1 if the algorithm supports streaming codec framing. */
-int compressionAlgoSupportsStreaming(compression_algo_t algo);
-
-/* Returns 1 if the algorithm exposes a tunable compression level. */
-int compressionAlgoSupportsLevel(compression_algo_t algo);
+/* Returns true if the algorithm exposes a tunable compression level. */
+bool compressionAlgoSupportsLevel(compression_algo_t algo);
 
 /* Returns a stable name for logging/debugging. */
 const char *compressionAlgoName(compression_algo_t algo);
-
-/* Write VKCS envelope via callback.  Returns 0 on success, -1 on error
- * (invalid algo or emit_cb failure). */
-int writeVkcsEnvelope(vkcsEmitFn emit_cb,
-                      void *ctx,
-                      compression_algo_t algo,
-                      uint8_t stream_kind,
-                      int codec_checksum_enabled);
-
-/* Parse VKCS envelope from buffer.  Returns 0 on success, -1 on error.
- * On success, *algo, *stream_kind, and *codec_checksum_enabled are populated
- * when corresponding pointers are non-NULL. */
-int readVkcsEnvelope(const uint8_t *buf,
-                     size_t len,
-                     compression_algo_t *algo,
-                     uint8_t *stream_kind,
-                     int *codec_checksum_enabled);
 
 /* --- Streaming compression API --- */
 
@@ -134,7 +98,7 @@ void streamDecompressorDestroy(stream_decompressor_t *sd);
 /* Return upper bound on compressed output size.
  * frame_started: whether the algorithm frame header has already been written.
  * flush_mode: FLUSH_CONTINUE, FLUSH_SYNC, or FLUSH_END. */
-size_t streamCompressOutputBound(compression_algo_t algo, size_t input_len, int frame_started, compress_flush_mode_t flush_mode);
+size_t streamCompressOutputBound(compression_algo_t algo, size_t input_len, bool frame_started, compress_flush_mode_t flush_mode);
 
 /* Feed data through streaming compressor.
  * flush_mode: FLUSH_CONTINUE, FLUSH_SYNC, or FLUSH_END.

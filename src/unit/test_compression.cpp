@@ -17,6 +17,7 @@
 #include <random>
 
 extern "C" {
+#include "../../deps/lz4/lz4frame.h"
 #include "compression.h"
 #include "compression_rio.h"
 #include "compression_stream.h"
@@ -126,6 +127,20 @@ static int emitToBuf(void *ctx, const uint8_t *data, size_t len) {
     return 0;
 }
 
+static bool lz4FrameHasBlockChecksum(const uint8_t *data, size_t len) {
+    LZ4F_dctx *dctx = NULL;
+    EXPECT_FALSE(LZ4F_isError(LZ4F_createDecompressionContext(&dctx, LZ4F_VERSION)));
+    if (dctx == NULL) return false;
+
+    LZ4F_frameInfo_t frame_info = {};
+    size_t src_size = len;
+    size_t ret = LZ4F_getFrameInfo(dctx, &frame_info, data, &src_size);
+    bool has_block_checksum = !LZ4F_isError(ret) &&
+                              frame_info.blockChecksumFlag == LZ4F_blockChecksumEnabled;
+    LZ4F_freeDecompressionContext(dctx);
+    return has_block_checksum;
+}
+
 static ssize_t memReaderRead(void *ctx, void *buf, size_t len) {
     mem_reader_t *r = (mem_reader_t *)ctx;
     if (!r || !buf) return -1;
@@ -162,11 +177,11 @@ static ssize_t flakyReaderRead(void *ctx, void *buf, size_t len) {
 TEST(compression, envelopeRoundTrip) {
     compression_algo_t algos[] = {ALGO_LZ4};
     size_t algo_count = sizeof(algos) / sizeof(algos[0]);
-    uint8_t kinds[] = {STREAM_KIND_RDB, STREAM_KIND_REPL};
+    uint8_t kinds[] = {STREAM_KIND_RDB, STREAM_KIND_REPL, 0x7f};
 
     for (size_t a = 0; a < algo_count; a++) {
-        for (int k = 0; k < 2; k++) {
-            for (int checksum_enabled = 0; checksum_enabled <= 1; checksum_enabled++) {
+        for (size_t k = 0; k < sizeof(kinds) / sizeof(kinds[0]); k++) {
+            for (bool checksum_enabled : {false, true}) {
                 emit_buf_t eb = makeEmitBuf(0);
                 int wret = writeVkcsEnvelope(emitToBuf, &eb, algos[a], kinds[k], checksum_enabled);
                 ASSERT_TRUE(wret == 0) << "writeVkcsEnvelope should succeed for valid params";
@@ -174,7 +189,7 @@ TEST(compression, envelopeRoundTrip) {
 
                 compression_algo_t got_algo = ALGO_NONE;
                 uint8_t got_kind = 0xFF;
-                int got_checksum_enabled = -1;
+                bool got_checksum_enabled = false;
                 int rret = readVkcsEnvelope(eb.buf, eb.pos, &got_algo, &got_kind, &got_checksum_enabled);
                 ASSERT_TRUE(rret == 0) << "readVkcsEnvelope should succeed";
                 ASSERT_TRUE(got_algo == algos[a]) << "round-trip algo must match";
@@ -197,25 +212,22 @@ TEST(compression, envelopeMagicBytes) {
     ASSERT_TRUE(eb.buf[2] == 0x43) << "magic[2] == 'C'";
     ASSERT_TRUE(eb.buf[3] == 0x53) << "magic[3] == 'S'";
     ASSERT_TRUE(eb.buf[4] == VKCS_VERSION) << "version == VKCS_VERSION";
-    ASSERT_TRUE(eb.buf[7] == 0) << "reserved == 0";
+    ASSERT_TRUE(eb.buf[6] == 0) << "flags == 0 when checksum is disabled";
+    ASSERT_TRUE(eb.buf[7] == STREAM_KIND_RDB) << "stream_kind byte == RDB";
     return;
 }
 
-/* --- Property: Envelope flags encode stream_kind in bit 0 (Req 2.4) --- */
-TEST(compression, envelopeStreamKindFlag) {
-    /* RDB: bit 0 = 0 */
-    emit_buf_t eb_rdb = makeEmitBuf(0);
-    int ret = writeVkcsEnvelope(emitToBuf, &eb_rdb, ALGO_LZ4, STREAM_KIND_RDB, 0);
-    ASSERT_TRUE(ret == 0) << "write RDB must succeed";
-    ASSERT_TRUE((eb_rdb.buf[6] & 0x01) == 0) << "RDB stream_kind: flags bit 0 == 0";
-    ASSERT_TRUE((eb_rdb.buf[6] & (uint8_t)~VKCS_FLAG_STREAM_KIND) == 0) << "RDB stream_kind: no extra bits set";
+/* --- Property: Envelope stores stream_kind in byte 7 and keeps flags checksum-only. --- */
+TEST(compression, envelopeStreamKindByte) {
+    uint8_t kinds[] = {STREAM_KIND_RDB, STREAM_KIND_REPL, 0x7f};
 
-    /* REPL: bit 0 = 1 */
-    emit_buf_t eb_repl = makeEmitBuf(0);
-    ret = writeVkcsEnvelope(emitToBuf, &eb_repl, ALGO_LZ4, STREAM_KIND_REPL, 0);
-    ASSERT_TRUE(ret == 0) << "write REPL must succeed";
-    ASSERT_TRUE((eb_repl.buf[6] & 0x01) == 1) << "REPL stream_kind: flags bit 0 == 1";
-    ASSERT_TRUE((eb_repl.buf[6] & (uint8_t)~VKCS_FLAG_STREAM_KIND) == 0) << "REPL stream_kind: no extra bits set";
+    for (size_t i = 0; i < sizeof(kinds) / sizeof(kinds[0]); i++) {
+        emit_buf_t eb = makeEmitBuf(0);
+        int ret = writeVkcsEnvelope(emitToBuf, &eb, ALGO_LZ4, kinds[i], false);
+        ASSERT_TRUE(ret == 0) << "write must succeed";
+        ASSERT_TRUE(eb.buf[6] == 0) << "flags should stay clear when checksum is disabled";
+        ASSERT_TRUE(eb.buf[7] == kinds[i]) << "stream_kind must be stored in byte 7";
+    }
     return;
 }
 
@@ -281,14 +293,14 @@ TEST(compression, envelopeRejectsBadMagic) {
     return;
 }
 
-/* --- Property: readVkcsEnvelope rejects reserved bits set (Req 2.19) --- */
+/* --- Property: readVkcsEnvelope rejects reserved bits (Req 2.19) --- */
 TEST(compression, envelopeRejectsReservedBits) {
     emit_buf_t eb = makeEmitBuf(0);
     int wret = writeVkcsEnvelope(emitToBuf, &eb, ALGO_LZ4, STREAM_KIND_RDB, 0);
     ASSERT_TRUE(wret == 0) << "write must succeed";
 
-    /* Setting any reserved flag bit (2-7) must cause rejection */
-    for (int bit = 2; bit < 8; bit++) {
+    /* Setting any reserved flag bit (1-7) must cause rejection */
+    for (int bit = 1; bit < 8; bit++) {
         uint8_t orig = eb.buf[6];
         eb.buf[6] = orig | (1 << bit);
         compression_algo_t a;
@@ -297,16 +309,6 @@ TEST(compression, envelopeRejectsReservedBits) {
         ASSERT_TRUE(ret == -1) << "reserved flag bits must be rejected";
         eb.buf[6] = orig;
     }
-
-    /* Non-zero reserved byte [7] must cause rejection */
-    for (int val = 1; val < 256; val++) {
-        eb.buf[7] = (uint8_t)val;
-        compression_algo_t a;
-        uint8_t k;
-        int ret = readVkcsEnvelope(eb.buf, eb.pos, &a, &k, NULL);
-        ASSERT_TRUE(ret == -1) << "non-zero reserved byte must be rejected";
-    }
-    eb.buf[7] = 0;
 
     return;
 }
@@ -319,12 +321,12 @@ TEST(compression, envelopeBitFlipFuzz) {
     const int iterations = 1000;
     compression_algo_t algos[] = {ALGO_LZ4};
     size_t algo_count = sizeof(algos) / sizeof(algos[0]);
-    uint8_t kinds[] = {STREAM_KIND_RDB, STREAM_KIND_REPL};
+    uint8_t kinds[] = {STREAM_KIND_RDB, STREAM_KIND_REPL, 0x7f};
 
     /* Deterministic RNG for reproducible fuzz coverage. */
     for (int i = 0; i < iterations; i++) {
         compression_algo_t algo = algos[randomInt((int)algo_count)];
-        uint8_t kind = kinds[randomInt(2)];
+        uint8_t kind = kinds[randomInt((int)(sizeof(kinds) / sizeof(kinds[0])))];
 
         emit_buf_t eb = makeEmitBuf(0);
         int wret = writeVkcsEnvelope(emitToBuf, &eb, algo, kind, 0);
@@ -343,7 +345,7 @@ TEST(compression, envelopeBitFlipFuzz) {
         int ret = readVkcsEnvelope(eb.buf, eb.pos, &got_algo, &got_kind, NULL);
         if (ret == 0) {
             ASSERT_TRUE(got_algo == ALGO_LZ4) << "parsed algo must be LZ4";
-            ASSERT_TRUE(got_kind == STREAM_KIND_RDB || got_kind == STREAM_KIND_REPL) << "parsed kind must be RDB or REPL";
+            ASSERT_TRUE(got_kind == eb.buf[7]) << "parsed kind should match encoded kind";
         }
     }
     return;
@@ -595,7 +597,7 @@ TEST(compression, streamCompressFeedErrorRecovery) {
 TEST(compression, streamReaderTruncatedPassthrough) {
     const uint8_t input[] = {'H', 'E', 'L', 'L', 'O'};
     mem_reader_t mr = makeMemReader(input, sizeof(input), 2);
-    stream_reader_config_t cfg = makeReaderConfig(ALGO_NONE, STREAM_KIND_ANY, false, true, 0);
+    stream_reader_config_t cfg = makeReaderConfig(ALGO_NONE, STREAM_KIND_RDB, false, true, 0);
 
     stream_reader_t *t = stream_reader_create(&cfg, memReaderRead, &mr);
     ASSERT_TRUE(t != NULL) << "stream_reader_create should succeed";
@@ -625,9 +627,9 @@ TEST(compression, streamReaderRejectsInvalidVkcs) {
     /* Valid magic + invalid version (0) */
     const uint8_t input[VKCS_ENVELOPE_SIZE] = {
         VKCS_MAGIC_0, VKCS_MAGIC_1, VKCS_MAGIC_2, VKCS_MAGIC_3,
-        0, ALGO_LZ4, STREAM_KIND_RDB, 0};
+        0, ALGO_LZ4, 0, STREAM_KIND_RDB};
     mem_reader_t mr = makeMemReader(input, sizeof(input), 0);
-    stream_reader_config_t cfg = makeReaderConfig(ALGO_NONE, STREAM_KIND_ANY, false, true, 0);
+    stream_reader_config_t cfg = makeReaderConfig(ALGO_NONE, STREAM_KIND_RDB, false, true, 0);
 
     stream_reader_t *t = stream_reader_create(&cfg, memReaderRead, &mr);
     ASSERT_TRUE(t != NULL) << "stream_reader_create should succeed";
@@ -697,7 +699,7 @@ static int emitToDynamicBuf(void *ctx, const uint8_t *data, size_t len) {
 }
 
 static int initRawLz4DecompressRio(decompress_rio_t *dr, rio *inner) {
-    stream_reader_config_t cfg = makeReaderConfig(ALGO_LZ4, STREAM_KIND_ANY, true, false, 0);
+    stream_reader_config_t cfg = makeReaderConfig(ALGO_LZ4, STREAM_KIND_RDB, true, false, 0);
     return decompress_rio_init_with_config(dr, inner, &cfg);
 }
 
@@ -747,6 +749,49 @@ TEST(compression, streamReaderRejectsUnexpectedStreamKind) {
     return;
 }
 
+/* --- Test: stream_reader accepts concrete future stream kinds. --- */
+TEST(compression, streamReaderAcceptsCustomStreamKind) {
+    const uint8_t custom_kind = 0x7f;
+    const char *payload = "custom stream kind";
+    size_t payload_len = strlen(payload);
+
+    dynamic_buf_t db;
+    dynamicBufInit(&db);
+
+    stream_writer_config_t wcfg = makeWriterConfig(ALGO_LZ4, 0, custom_kind);
+    stream_writer_t *w = stream_writer_create(&wcfg, emitToDynamicBuf, &db);
+    ASSERT_TRUE(w != NULL) << "stream_writer_create should succeed";
+    ASSERT_TRUE(stream_writer_write(w, payload, payload_len) >= 0);
+    ASSERT_TRUE(stream_writer_finish(w) == 0);
+    stream_writer_destroy(w);
+
+    mem_reader_t mr = makeMemReader(db.data, db.len, 0);
+    stream_reader_config_t rcfg = makeReaderConfig(ALGO_NONE,
+                                                   custom_kind,
+                                                   false,
+                                                   true,
+                                                   0);
+    stream_reader_t *r = stream_reader_create(&rcfg, memReaderRead, &mr);
+    ASSERT_TRUE(r != NULL) << "stream_reader_create should succeed";
+    ASSERT_TRUE(stream_reader_probe(r) == 0) << "stream_reader_probe should accept custom stream kind";
+
+    stream_reader_info_t info;
+    ASSERT_TRUE(stream_reader_get_info(r, &info) == 0) << "stream_reader_get_info should succeed";
+    ASSERT_TRUE(info.compressed) << "stream should be detected as compressed";
+    ASSERT_TRUE(info.algo == ALGO_LZ4) << "algorithm should match";
+    ASSERT_TRUE(info.stream_kind == custom_kind) << "stream kind should round-trip";
+
+    uint8_t out[64] = {0};
+    ssize_t n = stream_reader_read(r, out, sizeof(out));
+    ASSERT_TRUE(n == (ssize_t)payload_len) << "stream_reader_read should return full payload";
+    ASSERT_TRUE(memcmp(out, payload, payload_len) == 0) << "payload should round-trip";
+    ASSERT_TRUE(stream_reader_read(r, out, sizeof(out)) == 0) << "stream_reader_read should return EOF";
+
+    stream_reader_destroy(r);
+    dynamicBufFree(&db);
+    return;
+}
+
 /* --- Test: stream_reader marks errored on partial output + read error.
  * Regression for direct-path error accounting (partial bytes were returned
  * without sticky errored state). */
@@ -788,7 +833,7 @@ TEST(compression, streamReaderPartialThenErrorSetsErrored) {
      * fails after probe/prefix buffering, then latch sticky error state. */
     const uint8_t plain[] = "NOTVKCS-passthrough-regression";
     flaky_reader_t fr_passthrough = makeFlakyReader(plain, sizeof(plain) - 1, 0, 1); /* probe succeeds, next read fails */
-    stream_reader_config_t pass_cfg = makeReaderConfig(ALGO_NONE, STREAM_KIND_ANY, false, true, 0);
+    stream_reader_config_t pass_cfg = makeReaderConfig(ALGO_NONE, STREAM_KIND_RDB, false, true, 0);
     stream_reader_t *rp = stream_reader_create(&pass_cfg, flakyReaderRead, &fr_passthrough);
     ASSERT_TRUE(rp != NULL) << "passthrough reader create should succeed";
 
@@ -829,14 +874,16 @@ TEST(compression, streamWriterCreateDestroy) {
     stream_writer_config_t bad_cfg = makeWriterConfig(ALGO_NONE, 0, STREAM_KIND_RDB);
     ASSERT_TRUE(stream_writer_create(&bad_cfg, emitToDynamicBuf, &db) == NULL) << "ALGO_NONE should return NULL";
 
-    /* Invalid stream_kind should fail when envelope is enabled. */
-    stream_writer_config_t bad_kind_cfg = makeWriterConfig(ALGO_LZ4, 0, 0x7f, false);
-    ASSERT_TRUE(stream_writer_create(&bad_kind_cfg, emitToDynamicBuf, &db) == NULL) << "invalid stream_kind should fail with envelope";
+    /* Concrete stream kinds outside the currently named ones are valid. */
+    stream_writer_config_t future_kind_cfg = makeWriterConfig(ALGO_LZ4, 0, 0x7f, false);
+    stream_writer_t *future_t = stream_writer_create(&future_kind_cfg, emitToDynamicBuf, &db);
+    ASSERT_TRUE(future_t != NULL) << "custom stream_kind should succeed with envelope";
+    stream_writer_destroy(future_t);
 
     /* For raw frame mode, stream_kind is ignored. */
     stream_writer_config_t raw_cfg = makeWriterConfig(ALGO_LZ4, 0, 0x7f, true);
     stream_writer_t *raw_t = stream_writer_create(&raw_cfg, emitToDynamicBuf, &db);
-    ASSERT_TRUE(raw_t != NULL) << "raw frame should allow ignored stream_kind";
+    ASSERT_TRUE(raw_t != NULL) << "raw frame should allow arbitrary configured stream_kind";
     stream_writer_destroy(raw_t);
 
     /* destroy NULL should be safe */
@@ -875,7 +922,8 @@ TEST(compression, streamWriterRoundTrip) {
     ASSERT_TRUE(db.data[3] == VKCS_MAGIC_3) << "magic byte 3";
     ASSERT_TRUE(db.data[4] == VKCS_VERSION) << "version";
     ASSERT_TRUE(db.data[5] == ALGO_LZ4) << "algo_id";
-    ASSERT_TRUE((db.data[6] & 0x01) == STREAM_KIND_RDB) << "stream_kind RDB";
+    ASSERT_TRUE(db.data[6] == 0) << "flags should be clear when checksum is disabled";
+    ASSERT_TRUE(db.data[7] == STREAM_KIND_RDB) << "stream_kind RDB";
 
     /* Decompress and verify round-trip */
     stream_decompressor_t sd;
@@ -1007,81 +1055,26 @@ TEST(compression, streamWriterRawFrameRoundTrip) {
     return;
 }
 
-static int lz4FrameChecksumFlagsFromBlob(const uint8_t *data,
-                                         size_t len,
-                                         int *has_block_checksum,
-                                         int *has_content_checksum) {
-    if (!data || !has_block_checksum || !has_content_checksum) return -1;
-    if (len < 7) return -1;
-
-    uint32_t magic = ((uint32_t)data[0]) |
-                     ((uint32_t)data[1] << 8) |
-                     ((uint32_t)data[2] << 16) |
-                     ((uint32_t)data[3] << 24);
-    if (magic != 0x184D2204U) return -1;
-
-    uint8_t flg = data[4];
-    size_t header_len = 7;                /* magic + FLG + BD + HC */
-    if (flg & (1u << 3)) header_len += 8; /* content size */
-    if (flg & 1u) header_len += 4;        /* dict ID */
-    if (len < header_len) return -1;
-
-    *has_block_checksum = (flg & (1u << 4)) != 0;   /* FLG bit 4 */
-    *has_content_checksum = (flg & (1u << 2)) != 0; /* FLG bit 2 */
-    return 0;
-}
-
-/* --- Test: block_checksum config toggles integrity flag in LZ4 frame. --- */
 TEST(compression, streamWriterBlockChecksumToggle) {
-    const char *payload = "block checksum toggle payload for LZ4 frame";
-    size_t payload_len = strlen(payload);
+    const char *payload = "block checksum payload block checksum payload";
 
-    for (int checksum_on = 0; checksum_on <= 1; checksum_on++) {
-        dynamic_buf_t raw_db;
-        dynamicBufInit(&raw_db);
+    for (bool block_checksum : {false, true}) {
+        dynamic_buf_t db;
+        dynamicBufInit(&db);
 
-        stream_writer_config_t raw_cfg = makeWriterConfig(ALGO_LZ4,
-                                                          0,
-                                                          STREAM_KIND_RDB,
-                                                          true, /* make frame start at byte 0 for parser helper */
-                                                          (bool)checksum_on);
-        stream_writer_t *t = stream_writer_create(&raw_cfg, emitToDynamicBuf, &raw_db);
+        stream_writer_config_t cfg = makeWriterConfig(ALGO_LZ4, 0, STREAM_KIND_RDB,
+                                                      true, block_checksum);
+        stream_writer_t *t = stream_writer_create(&cfg, emitToDynamicBuf, &db);
         ASSERT_TRUE(t != NULL);
-        ASSERT_TRUE(stream_writer_write(t, payload, payload_len) >= 0);
+        ASSERT_TRUE(stream_writer_write(t, payload, strlen(payload)) >= 0);
         ASSERT_TRUE(stream_writer_finish(t) == 0);
 
-        int has_block_checksum = -1;
-        int has_content_checksum = -1;
-        ASSERT_TRUE(lz4FrameChecksumFlagsFromBlob(raw_db.data,
-                                                  raw_db.len,
-                                                  &has_block_checksum,
-                                                  &has_content_checksum) == 0)
-            << "frame parser should succeed";
-        ASSERT_TRUE(has_block_checksum == checksum_on) << "LZ4 block checksum flag should match config";
-        ASSERT_TRUE(has_content_checksum == 0) << "content checksum should remain disabled";
+        ASSERT_TRUE(lz4FrameHasBlockChecksum(db.data, db.len) == block_checksum)
+            << "raw LZ4 frame should reflect configured block checksum setting";
 
         stream_writer_destroy(t);
-        dynamicBufFree(&raw_db);
-
-        dynamic_buf_t env_db;
-        dynamicBufInit(&env_db);
-        stream_writer_config_t env_cfg = makeWriterConfig(ALGO_LZ4,
-                                                          0,
-                                                          STREAM_KIND_RDB,
-                                                          false,
-                                                          (bool)checksum_on);
-        stream_writer_t *env_t = stream_writer_create(&env_cfg, emitToDynamicBuf, &env_db);
-        ASSERT_TRUE(env_t != NULL);
-        ASSERT_TRUE(stream_writer_write(env_t, payload, payload_len) >= 0);
-        ASSERT_TRUE(stream_writer_finish(env_t) == 0);
-        ASSERT_TRUE(env_db.len > VKCS_ENVELOPE_SIZE);
-        int envelope_checksum = (env_db.data[6] & VKCS_FLAG_CODEC_CHECKSUM) != 0;
-        ASSERT_TRUE(envelope_checksum == checksum_on) << "VKCS checksum flag should match config";
-        stream_writer_destroy(env_t);
-        dynamicBufFree(&env_db);
+        dynamicBufFree(&db);
     }
-
-    return;
 }
 
 /* --- Test: linked block mode and stable_src config round-trip across
@@ -1200,7 +1193,7 @@ TEST(compression, compressRioTracksUncompressedChecksum) {
     rio buffer_rio;
     rioInitWithBuffer(&buffer_rio, buf);
 
-    stream_writer_config_t cfg = makeWriterConfig(ALGO_LZ4, 0, STREAM_KIND_RDB, false, true);
+    stream_writer_config_t cfg = makeWriterConfig(ALGO_LZ4, 0, STREAM_KIND_RDB);
     compress_rio_t cr;
     ASSERT_TRUE(rioInitWithCompress(&cr, &buffer_rio, &cfg) == 0);
 
@@ -1224,7 +1217,7 @@ TEST(compression, compressRioPreservesSkipRdbChecksumFlag) {
     rioInitWithBuffer(&buffer_rio, buf);
     buffer_rio.flags |= RIO_FLAG_SKIP_RDB_CHECKSUM;
 
-    stream_writer_config_t cfg = makeWriterConfig(ALGO_LZ4, 0, STREAM_KIND_RDB, false, true);
+    stream_writer_config_t cfg = makeWriterConfig(ALGO_LZ4, 0, STREAM_KIND_RDB);
     compress_rio_t cr;
     ASSERT_TRUE(rioInitWithCompress(&cr, &buffer_rio, &cfg) == 0);
     ASSERT_TRUE((((rio *)&cr)->flags & RIO_FLAG_SKIP_RDB_CHECKSUM) != 0);
@@ -1239,7 +1232,7 @@ TEST(compression, compressRioPreservesSkipRdbChecksumFlag) {
     return;
 }
 
-TEST(compression, compressRioWithoutCodecChecksumDoesNotTrackChecksum) {
+TEST(compression, compressRioTracksUncompressedChecksumByDefault) {
     sds buf = sdsempty();
     rio buffer_rio;
     rioInitWithBuffer(&buffer_rio, buf);
@@ -1249,8 +1242,13 @@ TEST(compression, compressRioWithoutCodecChecksumDoesNotTrackChecksum) {
     ASSERT_TRUE(rioInitWithCompress(&cr, &buffer_rio, &cfg) == 0);
 
     const char *payload = "no-codec-checksum";
-    ASSERT_TRUE(rioWrite((rio *)&cr, payload, strlen(payload)) != 0);
-    ASSERT_TRUE(cr.base.cksum == 0) << "compressed rio should not hash data when checksums are disabled";
+    size_t payload_len = strlen(payload);
+    ASSERT_TRUE(rioWrite((rio *)&cr, payload, payload_len) != 0);
+
+    rio expected = {};
+    rioGenericUpdateChecksum(&expected, payload, payload_len);
+    ASSERT_TRUE(cr.base.cksum == expected.cksum)
+        << "compressed rio should hash uncompressed bytes by default";
 
     ASSERT_TRUE(compress_rio_finish(&cr) == 0);
     compress_rio_destroy(&cr);
@@ -1273,7 +1271,7 @@ TEST(compression, rioDecoratorsPreserveInnerType) {
     sds raw = sdsnew("plain-rdb-prefix");
     rio raw_rio;
     rioInitWithBuffer(&raw_rio, raw);
-    stream_reader_config_t rcfg = makeReaderConfig(ALGO_NONE, STREAM_KIND_ANY, false, true, 0);
+    stream_reader_config_t rcfg = makeReaderConfig(ALGO_NONE, STREAM_KIND_RDB, false, true, 0);
     decompress_rio_t dr;
     ASSERT_TRUE(decompress_rio_init_with_config(&dr, &raw_rio, &rcfg) == 0);
     ASSERT_TRUE(rioCheckType((rio *)&dr) == RIO_TYPE_BUFFER);
@@ -1332,7 +1330,7 @@ TEST(compression, decompressRioPassthroughReplay) {
     rio buffer_rio;
     rioInitWithBuffer(&buffer_rio, buf);
 
-    stream_reader_config_t cfg = makeReaderConfig(ALGO_NONE, STREAM_KIND_ANY, false, true, 0);
+    stream_reader_config_t cfg = makeReaderConfig(ALGO_NONE, STREAM_KIND_RDB, false, true, 0);
     decompress_rio_t dr;
     ASSERT_TRUE(decompress_rio_init_with_config(&dr, &buffer_rio, &cfg) == 0);
 
@@ -1615,7 +1613,7 @@ TEST(compression, streamReaderRejectsTruncatedFrameTrailer) {
     dynamic_buf_t db;
     dynamicBufInit(&db);
 
-    stream_writer_config_t cfg = makeWriterConfig(ALGO_LZ4, 0, STREAM_KIND_RDB, false, true);
+    stream_writer_config_t cfg = makeWriterConfig(ALGO_LZ4, 0, STREAM_KIND_RDB, false, false, true);
     stream_writer_t *w = stream_writer_create(&cfg, emitToDynamicBuf, &db);
     ASSERT_TRUE(w != NULL);
     ASSERT_TRUE(stream_writer_write(w, payload, payload_len) >= 0);
