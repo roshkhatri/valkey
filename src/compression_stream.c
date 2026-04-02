@@ -29,6 +29,35 @@ static bool vkcsCodecIsSupported(vkcs_codec_t codec) {
     }
 }
 
+static bool vkcsProbeHasMagicPrefix(const vkcs_probe_t *probe) {
+    size_t magic_prefix_len;
+
+    if (!probe || probe->header_len == 0) return false;
+    magic_prefix_len = probe->header_len < 4 ? probe->header_len : 4;
+    return memcmp(probe->header, "VKCS", magic_prefix_len) == 0;
+}
+
+static void vkcsProbeSetPassthrough(vkcs_probe_t *probe) {
+    if (!probe) return;
+    probe->ready = true;
+    probe->compressed = false;
+    probe->codec_checksum_enabled = false;
+    probe->algo = ALGO_NONE;
+    probe->stream_kind = 0;
+}
+
+static void vkcsProbeSetCompressed(vkcs_probe_t *probe,
+                                   compression_algo_t algo,
+                                   uint8_t stream_kind,
+                                   bool codec_checksum_enabled) {
+    if (!probe) return;
+    probe->ready = true;
+    probe->compressed = true;
+    probe->codec_checksum_enabled = codec_checksum_enabled;
+    probe->algo = algo;
+    probe->stream_kind = stream_kind;
+}
+
 int compressionAlgoToVkcsCodec(compression_algo_t algo, vkcs_codec_t *codec) {
     if (!codec) return -1;
     switch (algo) {
@@ -137,11 +166,7 @@ vkcs_probe_result_t vkcsProbeFeed(vkcs_probe_t *probe,
             memcmp(probe->header, "VKCS", 4) != 0) {
             if (src_consumed) *src_consumed = consumed;
             if (!cfg->allow_passthrough) return VKCS_PROBE_ERROR;
-            probe->ready = true;
-            probe->compressed = false;
-            probe->codec_checksum_enabled = false;
-            probe->algo = ALGO_NONE;
-            probe->stream_kind = 0;
+            vkcsProbeSetPassthrough(probe);
             return VKCS_PROBE_PASSTHROUGH;
         }
 
@@ -159,11 +184,7 @@ vkcs_probe_result_t vkcsProbeFeed(vkcs_probe_t *probe,
                 return VKCS_PROBE_ERROR;
             }
 
-            probe->ready = true;
-            probe->compressed = true;
-            probe->codec_checksum_enabled = codec_checksum_enabled;
-            probe->algo = algo;
-            probe->stream_kind = stream_kind;
+            vkcsProbeSetCompressed(probe, algo, stream_kind, codec_checksum_enabled);
             if (src_consumed) *src_consumed = consumed;
             return VKCS_PROBE_COMPRESSED;
         }
@@ -171,12 +192,12 @@ vkcs_probe_result_t vkcsProbeFeed(vkcs_probe_t *probe,
 
     if (input_eof) {
         if (src_consumed) *src_consumed = consumed;
+        /* If EOF lands in the middle of a potential VKCS header, treat it as
+         * a malformed compressed stream rather than silently downgrading it to
+         * passthrough mode. */
+        if (vkcsProbeHasMagicPrefix(probe)) return VKCS_PROBE_ERROR;
         if (!cfg->allow_passthrough) return VKCS_PROBE_ERROR;
-        probe->ready = true;
-        probe->compressed = false;
-        probe->codec_checksum_enabled = false;
-        probe->algo = ALGO_NONE;
-        probe->stream_kind = 0;
+        vkcsProbeSetPassthrough(probe);
         return VKCS_PROBE_PASSTHROUGH;
     }
 
@@ -544,6 +565,7 @@ static int streamReaderDrainReadBuf(stream_reader_t *t,
                                     uint8_t *out,
                                     size_t out_size,
                                     size_t *out_written) {
+    if (!t || !out_written) return -1;
     *out_written = 0;
     while (t->read_buf_fill > 0 && *out_written < out_size) {
         size_t consumed = 0;
@@ -553,6 +575,10 @@ static int streamReaderDrainReadBuf(stream_reader_t *t,
             t->read_buf + t->read_buf_pos,
             t->read_buf_fill, &consumed);
         if (produced < 0) return -1;
+        if (consumed > t->read_buf_fill ||
+            (size_t)produced > out_size - *out_written) {
+            return -1;
+        }
         *out_written += (size_t)produced;
         t->read_buf_pos += consumed;
         t->read_buf_fill -= consumed;
@@ -586,6 +612,7 @@ static size_t streamReaderReadBufTailSpace(stream_reader_t *t) {
 
 static int streamReaderReadMoreCompressed(stream_reader_t *t) {
     size_t read_size = streamReaderReadBufTailSpace(t);
+    if (read_size > (size_t)SSIZE_MAX) read_size = (size_t)SSIZE_MAX;
     if (read_size == 0) return -1;
 
     ssize_t got = t->read_cb(
@@ -631,6 +658,7 @@ ssize_t stream_reader_read(stream_reader_t *t, void *buf, size_t len) {
     if (!t || !buf) return -1;
     if (t->errored) return -1;
     if (len == 0) return 0;
+    if (len > (size_t)SSIZE_MAX) return -1;
 
     if (stream_reader_probe(t) != 0) return -1;
 

@@ -160,6 +160,7 @@ stream_reader_t *stream_reader_create(const stream_reader_config_t *cfg,
  * Returns 0 on success, -1 on error. */
 int stream_reader_probe(stream_reader_t *t);
 /* Read up to len bytes into buf.
+ * len must fit in ssize_t; larger requests return -1 without consuming input.
  * Returns:
  * - >0: bytes produced (decompressed or passthrough)
  * -  0: EOF
