@@ -44,6 +44,7 @@ typedef struct {
     size_t header_len;
     bool ready;
     bool compressed;
+    bool codec_checksum_enabled;
     compression_algo_t algo;
     uint8_t stream_kind;
 } vkcs_probe_t;
@@ -78,7 +79,8 @@ typedef struct stream_writer stream_writer_t;
 typedef struct stream_reader stream_reader_t;
 
 typedef struct {
-    bool compressed; /* true => stream is VKCS+codec compressed, false => passthrough */
+    bool compressed;             /* true => stream is VKCS+codec compressed, false => passthrough */
+    bool codec_checksum_enabled; /* Parsed VKCS checksum policy. Ignore when compressed is false. */
     compression_algo_t algo;
     uint8_t stream_kind; /* Parsed VKCS kind. Ignore when compressed is false. */
 } stream_reader_info_t;

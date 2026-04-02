@@ -308,7 +308,7 @@ start_server {overrides {save "" enable-debug-command local}} {
         assert_equal "-9" [lindex [r config get rdb-compression-level] 1]
     }
 
-    test {LZ4 compressed RDB with rdb-checksum yes keeps CRC64 and leaves VKCS flags clear} {
+    test {LZ4 compressed RDB with rdb-checksum yes sets the VKCS codec checksum flag} {
         r config set rdbcompression yes
         r config set rdb-compression-algo lz4
         r config set rdb-compression-level 0
@@ -321,7 +321,7 @@ start_server {overrides {save "" enable-debug-command local}} {
         set header [read_dump_rdb_header_bytes r]
         assert_equal "VKCS" [string range $header 0 3]
         binary scan [string index $header 6] cu flags
-        assert {$flags == 0}
+        assert {$flags == 1}
 
         set digest [debug_digest]
         restart_server 0 true false
@@ -330,7 +330,7 @@ start_server {overrides {save "" enable-debug-command local}} {
         assert_equal [string repeat "payload42 " 200] [r get cksum:42]
     }
 
-    test {LZ4 compressed RDB still validates the footer CRC64} {
+    test {LZ4 compressed RDB detects tail corruption when codec checksums are enabled} {
         r config set rdb-compression-algo lz4
         r flushall
         for {set i 0} {$i < 100} {incr i} {
