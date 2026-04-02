@@ -20,38 +20,56 @@
 #define STREAM_KIND_RDB 0x00
 #define STREAM_KIND_REPL 0x01
 
-/* Emit callback used by the VKCS envelope and generic streaming writer. */
+typedef enum {
+    VKCS_CODEC_LZ4 = 0x01,
+} vkcs_codec_t;
+
+/* Emit callback used by the VKCS envelope and streaming writer. */
 typedef int (*vkcsEmitFn)(void *ctx, const uint8_t *data, size_t len);
 
-/* Default decode/read window for stream_reader when cfg->batch_size == 0. */
+typedef enum {
+    VKCS_PROBE_NEED_INPUT = 0,
+    VKCS_PROBE_PASSTHROUGH = 1,
+    VKCS_PROBE_COMPRESSED = 2,
+    VKCS_PROBE_ERROR = 3,
+} vkcs_probe_result_t;
+
+typedef struct {
+    bool allow_passthrough;
+    uint8_t expected_stream_kind;
+} vkcs_probe_config_t;
+
+typedef struct {
+    uint8_t header[VKCS_ENVELOPE_SIZE];
+    size_t header_len;
+    bool ready;
+    bool compressed;
+    compression_algo_t algo;
+    uint8_t stream_kind;
+} vkcs_probe_t;
+
+/* Default initial compressed read buffer size for stream_reader when
+ * cfg->batch_size == 0. The buffer may grow if the codec needs more input
+ * before it can make progress. */
 #define STREAM_READER_BATCH_SIZE_DEFAULT (1024 * 1024)
 
-/* Generic caller-agnostic streaming writer config.
- * - raw_frame=0: emits VKCS envelope + codec frame
- * - raw_frame=1: emits codec frame only (no envelope) */
+/* Streaming writer config. */
 typedef struct {
     compression_algo_t algo;
     int level;
-    uint8_t stream_kind;              /* Concrete on-wire stream kind. */
-    bool block_checksum;              /* Enable codec-native integrity checks when supported. */
-    bool stable_src;                  /* Caller guarantees input remains valid until the
-                                       * next write/flush on this writer. */
-    bool raw_frame;                   /* true => emit raw codec frame (no VKCS envelope) */
-    compress_block_mode_t block_mode; /* LZ4 block mode (default: independent) */
+    uint8_t stream_kind; /* Concrete on-wire stream kind. */
+    bool codec_checksum; /* Enable codec-native integrity checks when supported. */
 } stream_writer_config_t;
 
-/* Generic caller-agnostic streaming reader config.
- * - raw_frame=0: auto-detect VKCS envelope, decode if compressed
- * - raw_frame=1: treat input as raw codec frame for cfg->algo
- * - allow_passthrough: when raw_frame=0, forward non-VKCS bytes as-is
+/* Streaming reader config.
+ * - auto-detect VKCS envelope, decode if compressed
+ * - allow_passthrough: forward non-VKCS bytes as-is
  * - expected_stream_kind: enforce envelope stream kind when compressed
- * - batch_size=0: uses internal default window/read size */
+ * - batch_size=0: uses the internal default initial read buffer size */
 typedef struct {
-    compression_algo_t algo;      /* Required only when raw_frame=1 */
     uint8_t expected_stream_kind; /* Concrete stream kind to enforce for compressed input. */
-    bool raw_frame;               /* true => input is raw codec frame (no VKCS envelope) */
     bool allow_passthrough;       /* true => non-VKCS input is passed through */
-    size_t batch_size;            /* Decode/read batch size; 0 => internal default */
+    size_t batch_size;            /* Initial compressed read buffer size; 0 => internal default */
 } stream_reader_config_t;
 
 /* Opaque writer context owned by the streaming writer API. */
@@ -62,9 +80,7 @@ typedef struct stream_reader stream_reader_t;
 typedef struct {
     bool compressed; /* true => stream is VKCS+codec compressed, false => passthrough */
     compression_algo_t algo;
-    bool codec_checksum_enabled; /* VKCS-advertised codec checksum flag. Ignore when compressed is false. */
-    uint8_t stream_kind;         /* Parsed VKCS kind, or cfg->expected_stream_kind for raw_frame readers.
-                                  * Ignore when compressed is false. */
+    uint8_t stream_kind; /* Parsed VKCS kind. Ignore when compressed is false. */
 } stream_reader_info_t;
 
 /* Caller-provided input callback.
@@ -74,24 +90,43 @@ typedef struct {
  * - -1: read error */
 typedef ssize_t (*stream_reader_read_fn)(void *ctx, void *buf, size_t len);
 
+/* Map between the VKCS codec registry and internal compression algorithms.
+ * Returns 0 on success, -1 when there is no mapping. */
+int compressionAlgoToVkcsCodec(compression_algo_t algo, vkcs_codec_t *codec);
+int vkcsCodecToCompressionAlgo(vkcs_codec_t codec, compression_algo_t *algo);
+
 /* Write VKCS envelope via callback. Returns 0 on success, -1 on error
- * (invalid algo or emit_cb failure). */
+ * (invalid codec or emit_cb failure). */
 int writeVkcsEnvelope(vkcsEmitFn emit_cb,
                       void *ctx,
-                      compression_algo_t algo,
+                      vkcs_codec_t codec,
                       uint8_t stream_kind,
                       bool codec_checksum_enabled);
 
 /* Parse VKCS envelope from buffer. Returns 0 on success, -1 on error.
- * On success, *algo and *stream_kind are populated when corresponding pointers
+ * On success, *codec and *stream_kind are populated when corresponding pointers
  * are non-NULL. */
 int readVkcsEnvelope(const uint8_t *buf,
                      size_t len,
-                     compression_algo_t *algo,
+                     vkcs_codec_t *codec,
                      uint8_t *stream_kind,
                      bool *codec_checksum_enabled);
 
-/* Generic streaming writer API.
+/* Incrementally inspect a stream prefix and decide whether it is a VKCS-wrapped
+ * compressed stream or plain passthrough data.
+ *
+ * The probe consumes only the bytes needed to decide. Any consumed bytes are
+ * retained in probe->header so callers can replay passthrough prefixes without
+ * losing input. */
+void vkcsProbeInit(vkcs_probe_t *probe);
+vkcs_probe_result_t vkcsProbeFeed(vkcs_probe_t *probe,
+                                  const vkcs_probe_config_t *cfg,
+                                  const uint8_t *src,
+                                  size_t src_len,
+                                  bool input_eof,
+                                  size_t *src_consumed);
+
+/* Streaming writer API.
  * Ownership: returned context is owned by caller and must be destroyed.
  * Threading: stream_writer_t is NOT thread-safe; all API calls on a given
  * instance must be externally serialized and single-owner at any instant. */
@@ -108,14 +143,12 @@ int stream_writer_flush(stream_writer_t *t);
  * Calling finish more than once is a no-op success. */
 int stream_writer_finish(stream_writer_t *t);
 void stream_writer_destroy(stream_writer_t *t);
-/* Returns cumulative bytes successfully passed to emit_cb for this writer. */
-uint64_t stream_writer_bytes_emitted(const stream_writer_t *t);
 /* Snapshot only; cross-thread readers must synchronize externally
  * (for example via waitForClientIO-equivalent quiesce). */
 int stream_writer_is_errored(const stream_writer_t *t);
 void stream_writer_set_error(stream_writer_t *t);
 
-/* Generic streaming reader API.
+/* Streaming reader API.
  * Ownership: returned context is owned by caller and must be destroyed. */
 stream_reader_t *stream_reader_create(const stream_reader_config_t *cfg,
                                       stream_reader_read_fn read_cb,
@@ -131,8 +164,7 @@ int stream_reader_probe(stream_reader_t *t);
  * - -1: error */
 ssize_t stream_reader_read(stream_reader_t *t, void *buf, size_t len);
 /* Populate stream metadata after probing.
- * For passthrough streams: compressed=0, algo=ALGO_NONE,
- * stream_kind is unspecified.
+ * For passthrough streams: compressed=0, algo=ALGO_NONE, stream_kind=0.
  * Returns 0 on success, -1 on error. */
 int stream_reader_get_info(stream_reader_t *t, stream_reader_info_t *info);
 /* Drain and discard any remaining decompressed bytes in the current frame.

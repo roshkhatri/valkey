@@ -620,9 +620,7 @@ int redis_check_rdb(char *rdbfilename, FILE *fp) {
 
     /* Support both plain RDB files and VKCS-wrapped streaming-compressed RDBs. */
     stream_reader_config_t reader_cfg = {
-        .algo = ALGO_NONE,
         .expected_stream_kind = STREAM_KIND_RDB,
-        .raw_frame = 0,
         .allow_passthrough = 1,
         .batch_size = 0,
     };

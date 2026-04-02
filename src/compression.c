@@ -102,7 +102,7 @@ void streamDecompressorDestroy(stream_decompressor_t *sd) {
 /* Shared LZ4F preferences template.
  * - Used by streamCompressOutputBound() for bounds.
  * - Copied and selectively overridden in streamCompressFeed() before
- *   LZ4F_compressBegin() (compression level and block mode).
+ *   LZ4F_compressBegin() (compression level and checksum mode).
  *
  * Bounds are computed with block-independent mode and block checksums enabled
  * so the returned capacity is safe for both checksum settings. */
@@ -160,13 +160,10 @@ ssize_t streamCompressFeed(stream_compressor_t *sc,
         /* Begin frame on first call */
         if (!sc->frame_started) {
             /* Local copy of shared prefs so we can set the actual level
-             * and block mode per-stream. */
+             * and checksum mode per-stream. */
             LZ4F_preferences_t prefs = lz4f_prefs;
             prefs.compressionLevel = sc->level;
-            prefs.frameInfo.blockMode = sc->block_mode == COMPRESS_BLOCK_LINKED
-                                            ? LZ4F_blockLinked
-                                            : LZ4F_blockIndependent;
-            prefs.frameInfo.blockChecksumFlag = sc->block_checksum
+            prefs.frameInfo.blockChecksumFlag = sc->codec_checksum
                                                     ? LZ4F_blockChecksumEnabled
                                                     : LZ4F_noBlockChecksum;
             size_t r = LZ4F_compressBegin((LZ4F_cctx *)sc->ctx.lz4f,
@@ -184,16 +181,10 @@ ssize_t streamCompressFeed(stream_compressor_t *sc,
         /* Compress input data */
         if (input_len > 0) {
             if (offset >= output_capacity) goto lz4_error;
-            /* stableSrc is caller-controlled. The async replication path
-             * sets sc->stable_src=true because the accumulator sds is swapped
-             * out before submission (exclusive ownership). The sync RDB
-             * path leaves it at false (default) since callers may reuse the
-             * input buffer between writes. */
-            LZ4F_compressOptions_t opts = {.stableSrc = (unsigned)sc->stable_src};
             size_t r = LZ4F_compressUpdate((LZ4F_cctx *)sc->ctx.lz4f,
                                            output + offset,
                                            output_capacity - offset,
-                                           input, input_len, &opts);
+                                           input, input_len, NULL);
             if (LZ4F_isError(r)) goto lz4_error;
             offset += r;
         }
