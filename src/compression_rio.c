@@ -65,8 +65,10 @@ static void rioInitBase(rio *base,
  * Wraps an inner rio for transparent compression on write.
  * Currently used by file-backed RDB save paths.
  *
- * RDB CHECKSUM SEMANTICS: When streaming compression is active, integrity
- * still comes from the standard RDB CRC64 footer.
+ * RDB CHECKSUM SEMANTICS:
+ * - when codec checksums are enabled, they are the authoritative integrity
+ *   signal for the compressed stream and the RDB checksum field is left zero.
+ * - otherwise the standard RDB checksum protects the logical stream.
  * =================================================================== */
 
 /* Emit callback for compress_rio: writes compressed bytes to inner rio.
@@ -121,13 +123,16 @@ int rioInitWithCompress(compress_rio_t *cr, rio *inner, const stream_writer_conf
     memset(cr, 0, sizeof(*cr));
 
     uint64_t flags = RIO_FLAG_STREAMING_COMPRESSION;
+    if (cfg->codec_checksum) flags |= RIO_FLAG_STREAMING_CODEC_CHECKSUM;
     flags |= inner->flags & RIO_FLAG_SKIP_RDB_CHECKSUM;
 
     rioInitBase(&cr->base, rioReadUnsupported, compressRioWrite, compressRioTell,
                 compressRioFlush, flags, rioCheckType(inner));
-    /* Track the uncompressed byte stream so compressed RDBs keep a valid
-     * footer CRC64. Honor skip-checksum requests from the wrapped rio. */
-    if (!(flags & RIO_FLAG_SKIP_RDB_CHECKSUM)) {
+    /* Track the uncompressed byte stream only when the standard RDB checksum is
+     * the active integrity mechanism. Honor explicit skip requests from the
+     * wrapped rio and skip checksum tracking whenever codec checksums are
+     * authoritative. */
+    if (!(flags & (RIO_FLAG_SKIP_RDB_CHECKSUM | RIO_FLAG_STREAMING_CODEC_CHECKSUM))) {
         cr->base.update_cksum = rioGenericUpdateChecksum;
     }
 
@@ -227,6 +232,9 @@ static int decompressRioLoadInfo(decompress_rio_t *dr, stream_reader_info_t *inf
     dr->info_ready = true;
     if (local_info.compressed) {
         dr->base.flags |= RIO_FLAG_STREAMING_COMPRESSION;
+        if (local_info.codec_checksum_enabled) {
+            dr->base.flags |= RIO_FLAG_STREAMING_CODEC_CHECKSUM;
+        }
     }
     if (info) *info = local_info;
     return 0;

@@ -61,7 +61,7 @@ tags {"check-rdb network external:skip logreqres:skip"} {
                 exec $::VALKEY_CHECK_RDB_BIN $dump_rdb
             } result
             assert_match {*RDB looks OK!*} $result
-            assert_match {*Checksum OK*} $result
+            assert_match {*Streaming-compressed RDB: integrity validated by codec checksums.*} $result
 
             # Keep subsequent tests on default path unless they explicitly change it.
             r config set rdb-compression-algo lzf

@@ -606,6 +606,7 @@ int redis_check_rdb(char *rdbfilename, FILE *fp) {
     static rio file_rdb;
     rio *rdb = &file_rdb; /* Pointed by global struct riostate. */
     decompress_rio_t dr;
+    stream_reader_info_t stream_info = {0};
     int dr_initialized = 0;
     struct stat sb;
 
@@ -630,6 +631,13 @@ int redis_check_rdb(char *rdbfilename, FILE *fp) {
     }
     dr_initialized = 1;
     rdb = (rio *)&dr;
+    if (decompress_rio_get_info(&dr, &stream_info) != 0) {
+        rdbCheckError("Failed to inspect RDB stream metadata");
+        goto err;
+    }
+    if (stream_info.compressed && stream_info.codec_checksum_enabled) {
+        rdb->flags |= RIO_FLAG_STREAMING_CODEC_CHECKSUM;
+    }
 
     rdbstate.rio = rdb;
     rdb->update_cksum = rdbLoadProgressCallback;
@@ -832,7 +840,9 @@ int redis_check_rdb(char *rdbfilename, FILE *fp) {
         rdbstate.doing = RDB_CHECK_DOING_CHECK_SUM;
         if (rioRead(rdb, &cksum, 8) == 0) goto eoferr;
         memrev64ifbe(&cksum);
-        if (rdb->flags & RIO_FLAG_SKIP_RDB_CHECKSUM) {
+        if (rdb->flags & RIO_FLAG_STREAMING_CODEC_CHECKSUM) {
+            rdbCheckInfo("Streaming-compressed RDB: integrity validated by codec checksums.");
+        } else if (rdb->flags & RIO_FLAG_SKIP_RDB_CHECKSUM) {
             rdbCheckInfo("RDB file was saved with checksum disabled: skipped checksum for this transfer.");
         } else if (cksum == 0) {
             rdbCheckInfo("RDB file was saved with checksum disabled: no check performed.");

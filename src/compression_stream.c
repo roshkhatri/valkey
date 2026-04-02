@@ -107,6 +107,7 @@ void vkcsProbeInit(vkcs_probe_t *probe) {
     if (!probe) return;
     memset(probe, 0, sizeof(*probe));
     probe->algo = ALGO_NONE;
+    probe->codec_checksum_enabled = false;
 }
 
 vkcs_probe_result_t vkcsProbeFeed(vkcs_probe_t *probe,
@@ -138,6 +139,7 @@ vkcs_probe_result_t vkcsProbeFeed(vkcs_probe_t *probe,
             if (!cfg->allow_passthrough) return VKCS_PROBE_ERROR;
             probe->ready = true;
             probe->compressed = false;
+            probe->codec_checksum_enabled = false;
             probe->algo = ALGO_NONE;
             probe->stream_kind = 0;
             return VKCS_PROBE_PASSTHROUGH;
@@ -146,10 +148,11 @@ vkcs_probe_result_t vkcsProbeFeed(vkcs_probe_t *probe,
         if (probe->header_len == VKCS_ENVELOPE_SIZE) {
             vkcs_codec_t codec;
             uint8_t stream_kind = 0;
+            bool codec_checksum_enabled = false;
             compression_algo_t algo = ALGO_NONE;
 
             if (readVkcsEnvelope(probe->header, probe->header_len, &codec,
-                                 &stream_kind, NULL) != 0 ||
+                                 &stream_kind, &codec_checksum_enabled) != 0 ||
                 stream_kind != cfg->expected_stream_kind ||
                 vkcsCodecToCompressionAlgo(codec, &algo) != 0) {
                 if (src_consumed) *src_consumed = consumed;
@@ -158,6 +161,7 @@ vkcs_probe_result_t vkcsProbeFeed(vkcs_probe_t *probe,
 
             probe->ready = true;
             probe->compressed = true;
+            probe->codec_checksum_enabled = codec_checksum_enabled;
             probe->algo = algo;
             probe->stream_kind = stream_kind;
             if (src_consumed) *src_consumed = consumed;
@@ -170,6 +174,7 @@ vkcs_probe_result_t vkcsProbeFeed(vkcs_probe_t *probe,
         if (!cfg->allow_passthrough) return VKCS_PROBE_ERROR;
         probe->ready = true;
         probe->compressed = false;
+        probe->codec_checksum_enabled = false;
         probe->algo = ALGO_NONE;
         probe->stream_kind = 0;
         return VKCS_PROBE_PASSTHROUGH;
@@ -645,6 +650,7 @@ int stream_reader_get_info(stream_reader_t *t, stream_reader_info_t *info) {
     if (stream_reader_probe(t) != 0) return -1;
 
     info->compressed = t->probe.compressed;
+    info->codec_checksum_enabled = t->probe.compressed ? t->probe.codec_checksum_enabled : false;
     info->algo = t->probe.compressed ? t->probe.algo : ALGO_NONE;
     info->stream_kind = t->probe.stream_kind;
     return 0;
