@@ -30,9 +30,7 @@ typedef enum {
 typedef struct {
     compression_algo_t algo;
     int level;
-    union {
-        void *lz4f; /* LZ4F_cctx* */
-    } ctx;
+    void *ctx; /* Private codec-specific compressor context. */
     bool frame_started;
     bool errored;        /* Permanently failed — algorithm state is undefined after
                           * an error. All subsequent streamCompressFeed calls return
@@ -47,9 +45,7 @@ typedef struct {
 /* --- Streaming decompressor context --- */
 typedef struct {
     compression_algo_t algo;
-    union {
-        void *lz4f; /* LZ4F_dctx* */
-    } ctx;
+    void *ctx;       /* Private codec-specific decompressor context. */
     bool errored;    /* Permanently failed — algorithm state is undefined after
                       * an error. All subsequent streamDecompressFeed calls
                       * return -1 immediately until reinitialized. */
@@ -77,10 +73,9 @@ void streamCompressorDestroy(stream_compressor_t *sc);
 int streamDecompressorInit(stream_decompressor_t *sd, compression_algo_t algo);
 void streamDecompressorDestroy(stream_decompressor_t *sd);
 
-/* Return upper bound on compressed output size.
- * frame_started: whether the algorithm frame header has already been written.
+/* Return upper bound on compressed output size for the current stream state.
  * flush_mode: FLUSH_CONTINUE, FLUSH_SYNC, or FLUSH_END. */
-size_t streamCompressOutputBound(compression_algo_t algo, size_t input_len, bool frame_started, compress_flush_mode_t flush_mode);
+size_t streamCompressOutputBound(const stream_compressor_t *sc, size_t input_len, compress_flush_mode_t flush_mode);
 
 /* Feed data through streaming compressor.
  * flush_mode: FLUSH_CONTINUE, FLUSH_SYNC, or FLUSH_END.
