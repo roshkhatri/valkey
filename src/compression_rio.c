@@ -63,8 +63,7 @@ static void rioInitBase(rio *base,
 /* ===================================================================
  * Compression Rio Decorator
  * Wraps an inner rio for transparent compression on write.
- * Currently used by file-backed RDB save paths. Replication wiring will
- * reuse the same writer abstraction once that path lands.
+ * Currently used by file-backed RDB save paths.
  *
  * RDB CHECKSUM SEMANTICS: When streaming compression is active, integrity
  * still comes from the standard RDB CRC64 footer.
@@ -171,7 +170,7 @@ void compress_rio_destroy(compress_rio_t *cr) {
 
 /* ===================================================================
  * Decompression Rio Decorator
- * Thin rio adapter around generic stream_reader_t.
+ * Thin rio adapter around stream_reader_t.
  * =================================================================== */
 
 /* Read up to `len` bytes from the inner rio (partial reads allowed).
@@ -197,17 +196,21 @@ static ssize_t decompressRioReadPartial(void *ctx, void *buf, size_t len) {
     }
 
     /* conn rios: use connRead directly for partial-read support.
-     * rioRead is all-or-nothing and would block on a live connection
-     * when the compressed stream has ended but the connection stays
-     * open (e.g. diskless replication full sync). */
+     * This rio decorator is synchronous, so callers must only wrap
+     * blocking connections. Retry only explicit retryable read failures,
+     * mirroring the base rio connection reader. */
     if (inner_type == RIO_TYPE_CONN) {
-        int nread = connRead(inner->io.conn.conn, buf, len);
-        if (nread > 0) {
-            inner->processed_bytes += nread;
-            return (ssize_t)nread;
+        while (1) {
+            connection *conn = inner->io.conn.conn;
+            int nread = connRead(inner->io.conn.conn, buf, len);
+            if (nread > 0) {
+                inner->processed_bytes += nread;
+                return (ssize_t)nread;
+            }
+            if (nread == 0) return 0;
+            if (connLastErrorRetryable(conn)) continue;
+            return -1;
         }
-        /* 0 = EOF, <0 = error or EAGAIN */
-        return nread == 0 ? 0 : -1;
     }
 
     /* fd rios are all-or-nothing via rioRead() */
@@ -215,10 +218,28 @@ static ssize_t decompressRioReadPartial(void *ctx, void *buf, size_t len) {
     return rioGetReadError(inner) ? -1 : 0;
 }
 
+static int decompressRioLoadInfo(decompress_rio_t *dr, stream_reader_info_t *info) {
+    stream_reader_info_t local_info;
+
+    if (!dr || !dr->reader) return -1;
+    if (stream_reader_get_info(dr->reader, &local_info) != 0) return -1;
+
+    dr->info_ready = true;
+    if (local_info.compressed) {
+        dr->base.flags |= RIO_FLAG_STREAMING_COMPRESSION;
+    }
+    if (info) *info = local_info;
+    return 0;
+}
+
 static size_t decompressRioRead(rio *r, void *buf, size_t len) {
     decompress_rio_t *dr = (decompress_rio_t *)r;
     if (dr->base.flags & RIO_FLAG_READ_ERROR) return 0;
     if (!dr->reader) {
+        dr->base.flags |= RIO_FLAG_READ_ERROR;
+        return 0;
+    }
+    if (!dr->info_ready && decompressRioLoadInfo(dr, NULL) != 0) {
         dr->base.flags |= RIO_FLAG_READ_ERROR;
         return 0;
     }
@@ -298,23 +319,12 @@ int decompress_rio_init_with_config(decompress_rio_t *dr, rio *inner, const stre
         return -1;
     }
 
-    stream_reader_info_t info;
-    if (stream_reader_get_info(dr->reader, &info) != 0) {
-        stream_reader_destroy(dr->reader);
-        dr->reader = NULL;
-        dr->base.flags |= RIO_FLAG_READ_ERROR;
-        return -1;
-    }
-    if (info.compressed) {
-        dr->base.flags |= RIO_FLAG_STREAMING_COMPRESSION;
-    }
-
     return 0;
 }
 
 int decompress_rio_get_info(decompress_rio_t *dr, stream_reader_info_t *info) {
-    if (!dr || !dr->reader || !info) return -1;
-    return stream_reader_get_info(dr->reader, info);
+    if (!dr || !info) return -1;
+    return decompressRioLoadInfo(dr, info);
 }
 
 void decompress_rio_destroy(decompress_rio_t *dr) {

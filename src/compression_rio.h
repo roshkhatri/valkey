@@ -15,7 +15,7 @@ typedef struct {
     rio base; /* Must be first — allows casting to (rio *) */
     rio *inner;
     stream_writer_t *compressor;
-    int finalized;
+    bool finalized;
 } compress_rio_t;
 
 /* --- Decompression rio decorator (RDB load) --- */
@@ -23,6 +23,7 @@ typedef struct {
     rio base; /* Must be first */
     rio *inner;
     stream_reader_t *reader;
+    bool info_ready;
 } decompress_rio_t;
 
 /* --- Rio Decorator API --- */
@@ -30,7 +31,8 @@ int rioInitWithCompress(compress_rio_t *cr, rio *inner, const stream_writer_conf
 int compress_rio_finish(compress_rio_t *cr);
 void compress_rio_destroy(compress_rio_t *cr);
 
-/* Initialize with explicit reader config (auto-detect or raw frame). */
+/* Initialize with explicit reader config.
+ * The wrapped source must provide synchronous reads. */
 int decompress_rio_init_with_config(decompress_rio_t *dr, rio *inner, const stream_reader_config_t *cfg);
 /* Retrieve probed stream metadata (compressed/algo/kind). */
 int decompress_rio_get_info(decompress_rio_t *dr, stream_reader_info_t *info);
