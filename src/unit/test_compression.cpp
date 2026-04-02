@@ -14,6 +14,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <gtest/gtest.h>
+#include <limits>
 #include <random>
 
 extern "C" {
@@ -414,6 +415,34 @@ TEST(compression, vkcsProbeRejectsUnexpectedStreamKind) {
     ASSERT_TRUE(!probe.ready);
 }
 
+TEST(compression, vkcsProbeRejectsTruncatedVkcsPrefixAtEof) {
+    const uint8_t input[] = {'V', 'K', 'C'};
+    vkcs_probe_t probe;
+    vkcsProbeInit(&probe);
+    vkcs_probe_config_t cfg = {};
+    cfg.allow_passthrough = true;
+    cfg.expected_stream_kind = STREAM_KIND_RDB;
+
+    size_t consumed = 0;
+    ASSERT_TRUE(vkcsProbeFeed(&probe, &cfg, input, sizeof(input), true, &consumed) == VKCS_PROBE_ERROR);
+    ASSERT_TRUE(consumed == sizeof(input));
+    ASSERT_TRUE(!probe.ready);
+}
+
+TEST(compression, vkcsProbeRejectsTruncatedVkcsHeaderAtEof) {
+    const uint8_t input[] = {'V', 'K', 'C', 'S'};
+    vkcs_probe_t probe;
+    vkcsProbeInit(&probe);
+    vkcs_probe_config_t cfg = {};
+    cfg.allow_passthrough = true;
+    cfg.expected_stream_kind = STREAM_KIND_RDB;
+
+    size_t consumed = 0;
+    ASSERT_TRUE(vkcsProbeFeed(&probe, &cfg, input, sizeof(input), true, &consumed) == VKCS_PROBE_ERROR);
+    ASSERT_TRUE(consumed == sizeof(input));
+    ASSERT_TRUE(!probe.ready);
+}
+
 /* --- Property: emit_cb failure propagates through writeVkcsEnvelope --- */
 static int emitAlwaysFail(void *ctx, const uint8_t *data, size_t len) {
     (void)ctx;
@@ -680,6 +709,49 @@ TEST(compression, streamReaderTruncatedPassthrough) {
                 memcmp(out, input, sizeof(input)) == 0)
         << "passthrough bytes should match";
     ASSERT_TRUE(stream_reader_read(t, out, sizeof(out)) == 0) << "stream_reader_read should return EOF after payload";
+
+    stream_reader_destroy(t);
+    return;
+}
+
+TEST(compression, streamReaderRejectsTruncatedVkcsPrefix) {
+    const uint8_t input[] = {'V', 'K', 'C'};
+    mem_reader_t mr = makeMemReader(input, sizeof(input), 2);
+    stream_reader_config_t cfg = makeReaderConfig(STREAM_KIND_RDB, true, 0);
+
+    stream_reader_t *t = stream_reader_create(&cfg, memReaderRead, &mr);
+    ASSERT_TRUE(t != NULL) << "stream_reader_create should succeed";
+
+    ASSERT_TRUE(stream_reader_probe(t) == -1) << "truncated VKCS prefix should fail probe";
+    stream_reader_info_t info;
+    ASSERT_TRUE(stream_reader_get_info(t, &info) == -1) << "metadata lookup should fail after truncated VKCS";
+    uint8_t out[8] = {0};
+    ASSERT_TRUE(stream_reader_read(t, out, sizeof(out)) == -1) << "reads should fail after truncated VKCS";
+
+    stream_reader_destroy(t);
+    return;
+}
+
+TEST(compression, streamReaderRejectsOversizedReadRequest) {
+    const uint8_t input[] = {'H', 'E', 'L', 'L', 'O'};
+    mem_reader_t mr = makeMemReader(input, sizeof(input), 2);
+    stream_reader_config_t cfg = makeReaderConfig(STREAM_KIND_RDB, true, 0);
+
+    stream_reader_t *t = stream_reader_create(&cfg, memReaderRead, &mr);
+    ASSERT_TRUE(t != NULL) << "stream_reader_create should succeed";
+
+    uint8_t out[8] = {0};
+    size_t oversized = (size_t)std::numeric_limits<ssize_t>::max() + 1;
+    ASSERT_TRUE(stream_reader_read(t, out, oversized) == -1)
+        << "oversized reads should fail before touching stream state";
+
+    stream_reader_info_t info;
+    ASSERT_TRUE(stream_reader_get_info(t, &info) == 0)
+        << "oversized read failure should not poison the reader";
+    ASSERT_TRUE(info.compressed == 0) << "plain input should still probe as passthrough";
+
+    ASSERT_TRUE(stream_reader_read(t, out, sizeof(input)) == (ssize_t)sizeof(input));
+    ASSERT_TRUE(memcmp(out, input, sizeof(input)) == 0) << "subsequent valid read should still succeed";
 
     stream_reader_destroy(t);
     return;
