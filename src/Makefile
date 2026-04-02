@@ -469,6 +469,7 @@ ENGINE_SERVER_OBJ = \
     commandlog.o \
     commands.o \
     compression.o \
+    compression_lz4.o \
     compression_stream.o \
     compression_rio.o \
     config.o \
@@ -659,7 +660,8 @@ endif
 all-with-unit-tests: all $(ENGINE_UNIT_GTESTS)
 .PHONY: all
 
-persist-settings: distclean
+write-make-settings:
+	rm -f .make-settings
 	echo STD=$(STD) >> .make-settings
 	echo WARN=$(WARN) >> .make-settings
 	echo OPT=$(OPT) >> .make-settings
@@ -679,6 +681,10 @@ persist-settings: distclean
 	echo PREV_FINAL_CFLAGS=$(FINAL_CFLAGS) >> .make-settings
 	echo PREV_FINAL_LDFLAGS=$(FINAL_LDFLAGS) >> .make-settings
 	echo ENGINE_SERVER_OBJ=$(ENGINE_SERVER_OBJ) >> .make-settings
+
+.PHONY: write-make-settings
+
+persist-settings: distclean write-make-settings
 	-(cd ../deps && $(MAKE) $(DEPENDENCY_TARGETS))
 
 .PHONY: persist-settings

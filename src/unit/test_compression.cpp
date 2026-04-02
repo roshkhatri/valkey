@@ -467,9 +467,9 @@ TEST(compression, streamCompressorInitDestroy) {
     ASSERT_TRUE(streamCompressorInit(&sc, ALGO_LZ4, 0) == 0) << "LZ4 init should succeed";
     ASSERT_TRUE(sc.algo == ALGO_LZ4) << "algo should be LZ4";
     ASSERT_TRUE(sc.frame_started == false) << "frame_started should be false";
-    ASSERT_TRUE(sc.ctx.lz4f != NULL) << "ctx should be non-NULL";
+    ASSERT_TRUE(sc.ctx != NULL) << "ctx should be non-NULL";
     streamCompressorDestroy(&sc);
-    ASSERT_TRUE(sc.ctx.lz4f == NULL) << "ctx should be NULL after destroy";
+    ASSERT_TRUE(sc.ctx == NULL) << "ctx should be NULL after destroy";
     ASSERT_TRUE(sc.algo == ALGO_NONE) << "algo should be NONE after destroy";
 
     /* ALGO_NONE should fail */
@@ -487,9 +487,9 @@ TEST(compression, streamDecompressorInitDestroy) {
     stream_decompressor_t sd;
     ASSERT_TRUE(streamDecompressorInit(&sd, ALGO_LZ4) == 0) << "LZ4 decomp init should succeed";
     ASSERT_TRUE(sd.algo == ALGO_LZ4) << "algo should be LZ4";
-    ASSERT_TRUE(sd.ctx.lz4f != NULL) << "ctx should be non-NULL";
+    ASSERT_TRUE(sd.ctx != NULL) << "ctx should be non-NULL";
     streamDecompressorDestroy(&sd);
-    ASSERT_TRUE(sd.ctx.lz4f == NULL) << "ctx should be NULL after destroy";
+    ASSERT_TRUE(sd.ctx == NULL) << "ctx should be NULL after destroy";
     ASSERT_TRUE(sd.algo == ALGO_NONE) << "algo should be NONE after destroy";
 
     return;
@@ -504,7 +504,7 @@ TEST(compression, streamCompressDecompressRoundTrip) {
     stream_compressor_t sc;
     ASSERT_TRUE(streamCompressorInit(&sc, ALGO_LZ4, 0) == 0);
 
-    size_t bound = streamCompressOutputBound(ALGO_LZ4, input_len, 0, FLUSH_END);
+    size_t bound = streamCompressOutputBound(&sc, input_len, FLUSH_END);
     ASSERT_TRUE(bound > 0) << "bound should be > 0";
 
     uint8_t *compressed = (uint8_t *)zmalloc(bound);
@@ -537,28 +537,38 @@ TEST(compression, streamCompressDecompressRoundTrip) {
 
 /* --- Test: streamCompressOutputBound returns sane values --- */
 TEST(compression, streamCompressOutputBound) {
+    stream_compressor_t sc;
+    ASSERT_TRUE(streamCompressorInit(&sc, ALGO_LZ4, 0) == 0);
+
     /* Basic: bound for 1KB input should be > 0 */
-    size_t b1 = streamCompressOutputBound(ALGO_LZ4, 1024, 0, FLUSH_CONTINUE);
+    size_t b1 = streamCompressOutputBound(&sc, 1024, FLUSH_CONTINUE);
     ASSERT_TRUE(b1 > 0) << "bound for 1KB continue should be > 0";
 
     /* Bound with frame header should be larger than without */
-    size_t b_no_frame = streamCompressOutputBound(ALGO_LZ4, 1024, 1, FLUSH_CONTINUE);
-    size_t b_with_frame = streamCompressOutputBound(ALGO_LZ4, 1024, 0, FLUSH_CONTINUE);
+    size_t b_with_frame = streamCompressOutputBound(&sc, 1024, FLUSH_CONTINUE);
+    uint8_t *seed_buf = (uint8_t *)zmalloc(b_with_frame);
+    ASSERT_TRUE(seed_buf != NULL);
+    ASSERT_TRUE(streamCompressFeed(&sc, seed_buf, b_with_frame,
+                                   (const uint8_t *)"x", 1, FLUSH_CONTINUE) >= 0)
+        << "seed write should start the frame";
+    size_t b_no_frame = streamCompressOutputBound(&sc, 1024, FLUSH_CONTINUE);
     ASSERT_TRUE(b_with_frame >= b_no_frame) << "bound with frame header should be >= without frame";
 
     /* Flush bound should be >= continue bound */
-    size_t b_flush = streamCompressOutputBound(ALGO_LZ4, 1024, 1, FLUSH_SYNC);
-    size_t b_cont = streamCompressOutputBound(ALGO_LZ4, 1024, 1, FLUSH_CONTINUE);
+    size_t b_flush = streamCompressOutputBound(&sc, 1024, FLUSH_SYNC);
+    size_t b_cont = streamCompressOutputBound(&sc, 1024, FLUSH_CONTINUE);
     ASSERT_TRUE(b_flush >= b_cont) << "flush bound should be >= continue bound";
 
     /* End bound should be >= flush bound */
-    size_t b_end = streamCompressOutputBound(ALGO_LZ4, 1024, 1, FLUSH_END);
+    size_t b_end = streamCompressOutputBound(&sc, 1024, FLUSH_END);
     ASSERT_TRUE(b_end >= b_flush) << "end bound should be >= flush bound";
 
     /* Zero input should still return > 0 for flush/end (internal buffering) */
-    size_t b_zero_flush = streamCompressOutputBound(ALGO_LZ4, 0, 1, FLUSH_SYNC);
+    size_t b_zero_flush = streamCompressOutputBound(&sc, 0, FLUSH_SYNC);
     ASSERT_TRUE(b_zero_flush > 0) << "zero input flush bound should be > 0";
 
+    zfree(seed_buf);
+    streamCompressorDestroy(&sc);
     return;
 }
 
@@ -610,7 +620,7 @@ TEST(compression, streamDecompressFeedErrors) {
     /* Once errored, all subsequent feeds fail immediately. */
     stream_compressor_t sc;
     ASSERT_TRUE(streamCompressorInit(&sc, ALGO_LZ4, 0) == 0);
-    size_t bound = streamCompressOutputBound(ALGO_LZ4, strlen(payload), 0, FLUSH_END);
+    size_t bound = streamCompressOutputBound(&sc, strlen(payload), FLUSH_END);
     uint8_t *compressed = (uint8_t *)zmalloc(bound);
     ASSERT_TRUE(compressed != NULL);
     ssize_t compressed_len = streamCompressFeed(&sc, compressed, bound,
@@ -644,7 +654,7 @@ TEST(compression, streamCompressFeedErrorRecovery) {
     ASSERT_TRUE(sc.frame_started == false) << "frame_started should still be false";
 
     /* Retry with a proper buffer — should succeed */
-    size_t bound = streamCompressOutputBound(ALGO_LZ4, 9, 0, FLUSH_END);
+    size_t bound = streamCompressOutputBound(&sc, 9, FLUSH_END);
     uint8_t *buf = (uint8_t *)zmalloc(bound);
     ssize_t ret2 = streamCompressFeed(&sc, buf, bound,
                                       (const uint8_t *)"test data", 9, FLUSH_END);
@@ -657,7 +667,7 @@ TEST(compression, streamCompressFeedErrorRecovery) {
     ASSERT_TRUE(streamCompressorInit(&sc2, ALGO_LZ4, 0) == 0);
 
     /* First call with enough space to start the frame */
-    size_t bound2 = streamCompressOutputBound(ALGO_LZ4, 5, 0, FLUSH_CONTINUE);
+    size_t bound2 = streamCompressOutputBound(&sc2, 5, FLUSH_CONTINUE);
     uint8_t *buf2 = (uint8_t *)zmalloc(bound2);
     ssize_t ret3 = streamCompressFeed(&sc2, buf2, bound2,
                                       (const uint8_t *)"hello", 5, FLUSH_CONTINUE);
@@ -673,7 +683,7 @@ TEST(compression, streamCompressFeedErrorRecovery) {
     ASSERT_TRUE(sc2.errored == true) << "errored should be set (mid-frame failure)";
 
     /* Subsequent calls must fail immediately */
-    size_t bound3 = streamCompressOutputBound(ALGO_LZ4, 5, 0, FLUSH_END);
+    size_t bound3 = streamCompressOutputBound(&sc2, 5, FLUSH_END);
     uint8_t *buf3 = (uint8_t *)zmalloc(bound3);
     ssize_t ret5 = streamCompressFeed(&sc2, buf3, bound3,
                                       (const uint8_t *)"hello", 5, FLUSH_END);
@@ -960,7 +970,7 @@ TEST(compression, streamReaderPartialThenErrorSetsErrored) {
 
     stream_reader_destroy(r);
 
-    /* Passthrough mode should also preserve partial bytes when backend read
+    /* Passthrough mode should also preserve partial bytes when source read
      * fails after probe/prefix buffering, then latch sticky error state. */
     const uint8_t plain[] = "NOTVKCS-passthrough-regression";
     flaky_reader_t fr_passthrough = makeFlakyReader(plain, sizeof(plain) - 1, 0, 1); /* probe succeeds, next read fails */
