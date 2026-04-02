@@ -1628,8 +1628,7 @@ int rdbSaveRioWithEOFMark(int req, int rdbver, rio *rdb, int *error, rdbSaveInfo
             .algo = (compression_algo_t)server.repl_compression_algo,
             .level = server.repl_compression_level,
             .stream_kind = STREAM_KIND_RDB,
-            .block_checksum = server.rdb_checksum != 0,
-            .raw_frame = 0,
+            .codec_checksum = server.rdb_checksum != 0,
         };
         if (rioInitWithCompress(&cr, rdb, &cfg) != 0) {
             if (error) *error = EIO;

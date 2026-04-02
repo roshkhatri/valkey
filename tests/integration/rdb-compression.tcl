@@ -474,7 +474,7 @@ start_server {tags {"rdb-compression repl external:skip"}} {
             for {set i 0} {$i < 500} {incr i} {
                 $primary set "repl:$i" [string repeat "payload$i " 40]
             }
-            set compression_count_before [count_message_lines $primary_log "RDB saved with LZ4 streaming compression"]
+            set compression_count_before [count_message_lines $primary_log "RDB saved with lz4 streaming compression"]
 
             $replica replicaof $primary_host $primary_port
             wait_for_sync $replica
@@ -486,7 +486,7 @@ start_server {tags {"rdb-compression repl external:skip"}} {
                 fail "Replica digest mismatch after LZ4 RDB full sync"
             }
 
-            assert_equal $compression_count_before [count_message_lines $primary_log "RDB saved with LZ4 streaming compression"]
+            assert_equal $compression_count_before [count_message_lines $primary_log "RDB saved with lz4 streaming compression"]
             assert_equal [string repeat "payload42 " 40] [$replica get repl:42]
         }
 
@@ -496,7 +496,7 @@ start_server {tags {"rdb-compression repl external:skip"}} {
             for {set i 0} {$i < 500} {incr i} {
                 $primary set "crepl:$i" [string repeat "payload$i " 40]
             }
-            set compression_count_before [count_message_lines $primary_log "RDB saved with LZ4 streaming compression"]
+            set compression_count_before [count_message_lines $primary_log "RDB saved with lz4 streaming compression"]
 
             start_server {overrides {save "" enable-debug-command local replcompression yes}} {
                 set compressed_replica [srv 0 client]
@@ -510,7 +510,7 @@ start_server {tags {"rdb-compression repl external:skip"}} {
                     fail "Replica digest mismatch after compressed disk-based full sync"
                 }
 
-                assert_equal [expr {$compression_count_before + 1}] [count_message_lines $primary_log "RDB saved with LZ4 streaming compression"]
+                assert_equal [expr {$compression_count_before + 1}] [count_message_lines $primary_log "RDB saved with lz4 streaming compression"]
                 assert_equal [string repeat "payload42 " 40] [$compressed_replica get crepl:42]
             }
         }

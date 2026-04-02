@@ -2422,7 +2422,7 @@ void replicaAfterLoadPrimaryRDB(connection *conn, rdbSaveInfo *rsi, int disk_bas
     }
 }
 
-int replicaLoadPrimaryRDBFromSocket(connection *conn, char *buf, char *eofmark, int *usemark, rdbSaveInfo *rsi) {
+int replicaLoadPrimaryRDBFromSocket(connection *conn, char *buf, char *eofmark, int *usemark, rdbSaveInfo *rsi, sds *remaining_repl_data) {
     rio rdb;
     serverDb **dbarray;
     functionsLibCtx *functions_lib_ctx;
@@ -2481,10 +2481,10 @@ int replicaLoadPrimaryRDBFromSocket(connection *conn, char *buf, char *eofmark, 
     int dr_initialized = 0;
     rio *load_rio = &rdb;
 
+    if (remaining_repl_data) *remaining_repl_data = NULL;
+
     stream_reader_config_t reader_cfg = {
-        .algo = ALGO_NONE,
         .expected_stream_kind = STREAM_KIND_RDB,
-        .raw_frame = 0,
         .allow_passthrough = true,
         .batch_size = 0,
     };
@@ -2579,7 +2579,7 @@ int replicaLoadPrimaryRDBFromSocket(connection *conn, char *buf, char *eofmark, 
 
     /* Cleanup and restore the socket to the original state to continue
      * with the normal replication. */
-    rioFreeConn(&rdb, NULL);
+    rioFreeConn(&rdb, remaining_repl_data);
     connNonBlock(conn);
     connRecvTimeout(conn, 0);
     return C_OK;
@@ -2677,6 +2677,7 @@ void replicaReceiveRDBFromPrimaryToMemory(connection *conn) {
     char buf[PROTO_IOBUF_LEN];
     int ret;
     rdbSaveInfo rsi = RDB_SAVE_INFO_INIT;
+    sds remaining_repl_data = NULL;
 
     /* Static vars used to hold the EOF mark, and the last bytes received
      * from the server: when they match, we reached the end of the transfer. */
@@ -2712,12 +2713,20 @@ read_from_socket:
     }
 
     replicaBeforeLoadPrimaryRDB(conn, 1);
-    if (replicaLoadPrimaryRDBFromSocket(conn, buf, eofmark, &usemark, &rsi) == C_ERR) {
+    if (replicaLoadPrimaryRDBFromSocket(conn, buf, eofmark, &usemark, &rsi, &remaining_repl_data) == C_ERR) {
         serverLog(LL_WARNING, "Failed to load RDB");
         cancelReplicationHandshake(1);
         return;
     }
     replicaAfterLoadPrimaryRDB(conn, &rsi, 0);
+    if (remaining_repl_data) {
+        if (conn != server.repl_rdb_transfer_s && server.primary) {
+            server.primary->querybuf = sdscatlen(server.primary->querybuf, remaining_repl_data, sdslen(remaining_repl_data));
+            server.primary->repl_data->read_reploff += sdslen(remaining_repl_data);
+            processInputBuffer(server.primary);
+        }
+        sdsfree(remaining_repl_data);
+    }
 }
 
 int tryReadBulkPayload(connection *conn, char *buf, int usemark, ssize_t *nread_out) {
@@ -2800,9 +2809,7 @@ static int replicaReceiveRDBWithEOFToDisk(connection *conn, const char *eofmark,
     size_t pending_len = 0;
     replicaFullSyncReadCtx read_ctx = {.conn = conn};
     stream_reader_config_t reader_cfg = {
-        .algo = ALGO_NONE,
         .expected_stream_kind = STREAM_KIND_RDB,
-        .raw_frame = 0,
         .allow_passthrough = true,
         .batch_size = 0,
     };
