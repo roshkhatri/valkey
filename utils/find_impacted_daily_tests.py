@@ -27,6 +27,9 @@ from typing import Iterable
 ROOT = Path(__file__).resolve().parents[1]
 TMP_ROOT = ROOT / "tests" / "tmp" / "impact-map"
 SOURCE_SUFFIXES = {".c", ".cc", ".cpp"}
+EXCLUDED_MAIN_TESTS = {
+    "integration/valkey-benchmark",
+}
 BROAD_RISK_PREFIXES = (
     ".github/",
     "deps/",
@@ -202,7 +205,9 @@ class ImpactMapper:
         self.main_tests += list_tests(ROOT / "tests" / "unit" / "type", canonical_main_test)
         self.main_tests += list_tests(ROOT / "tests" / "unit" / "cluster", canonical_main_test)
         self.main_tests += list_tests(ROOT / "tests" / "integration", canonical_main_test)
-        self.main_tests = sorted(dict.fromkeys(self.main_tests))
+        self.main_tests = sorted(
+            test for test in dict.fromkeys(self.main_tests) if test not in EXCLUDED_MAIN_TESTS
+        )
         self.moduleapi_tests = list_tests(ROOT / "tests" / "unit" / "moduleapi", canonical_moduleapi_test)
         self.cluster_tests = list_tests(ROOT / "tests" / "cluster" / "tests", canonical_cluster_test)
         self.sentinel_tests = list_tests(ROOT / "tests" / "sentinel" / "tests", canonical_sentinel_test)
@@ -274,7 +279,18 @@ class ImpactMapper:
         env["OPTIMIZATION"] = "-O0"
         env["SERVER_CFLAGS"] = "-fprofile-instr-generate -fcoverage-mapping"
         env["SERVER_LDFLAGS"] = "-fprofile-instr-generate"
-        run(["make", f"-j{os.cpu_count() or 4}", "all"], env=env)
+        run(
+            [
+                "make",
+                f"-j{os.cpu_count() or 4}",
+                "valkey-server",
+                "valkey-cli",
+                "valkey-sentinel",
+                "valkey-check-rdb",
+                "valkey-check-aof",
+            ],
+            env=env,
+        )
         self.binaries = [
             str(path)
             for path in (
