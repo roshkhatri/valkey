@@ -1,0 +1,100 @@
+name: Daily PR Selection
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+    branches:
+      - "[0-9].[0-9]"
+      - "unstable"
+    paths-ignore:
+      - "**/*.md"
+      - "**/00-RELEASENOTES"
+      - "**/COPYING"
+
+concurrency:
+  group: daily-pr-${{ github.head_ref || github.ref }}
+  cancel-in-progress: ${{ github.event.action != 'labeled' }}
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  select-impacted-tests:
+    runs-on: ubuntu-latest
+    if: |
+      (github.event.pull_request.base.ref != 'unstable' ||
+        contains(github.event.pull_request.labels.*.name, 'run-extra-tests')) &&
+      (github.event.action != 'labeled' ||
+        (github.event.pull_request.base.ref == 'unstable' && github.event.label.name == 'run-extra-tests'))
+    outputs:
+      mode: ${{ steps.emit.outputs.mode }}
+      reason: ${{ steps.emit.outputs.reason }}
+      main_test_args: ${{ steps.emit.outputs.main_test_args }}
+      moduleapi_test_args: ${{ steps.emit.outputs.moduleapi_test_args }}
+      cluster_test_args: ${{ steps.emit.outputs.cluster_test_args }}
+    steps:
+      - name: Checkout PR merge ref
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Install mapper dependencies
+        run: sudo apt-get update && sudo apt-get install -y clang llvm tcl8.6 tclx
+      - name: Generate impacted test map
+        run: |
+          python3 ./utils/find_impacted_daily_tests.py \
+            --base-sha "${{ github.event.pull_request.base.sha }}" \
+            --head-sha "${{ github.event.pull_request.head.sha }}" \
+            --output "${RUNNER_TEMP}/impacted-tests.json"
+      - name: Emit outputs
+        id: emit
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          payload = json.loads(Path(os.environ["RUNNER_TEMP"], "impacted-tests.json").read_text())
+          output_path = Path(os.environ["GITHUB_OUTPUT"])
+          with output_path.open("a", encoding="utf-8") as fh:
+              for key in (
+                  "mode",
+                  "reason",
+                  "main_test_args",
+                  "moduleapi_test_args",
+                  "cluster_test_args",
+              ):
+                  print(f"{key}={payload.get(key, '')}", file=fh)
+          PY
+      - name: Workflow summary
+        if: always()
+        run: |
+          {
+            echo "## Impacted daily tests"
+            echo
+            echo "- mode: ${{ steps.emit.outputs.mode }}"
+            echo "- reason: ${{ steps.emit.outputs.reason }}"
+            echo "- main args: \`${{ steps.emit.outputs.main_test_args || '(full suite)' }}\`"
+            echo "- moduleapi args: \`${{ steps.emit.outputs.moduleapi_test_args || '(full suite)' }}\`"
+            echo "- cluster args: \`${{ steps.emit.outputs.cluster_test_args || '(full suite)' }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload mapping artifact
+        if: always()
+        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808 # v4.3.3
+        with:
+          name: impacted-daily-tests
+          path: ${{ runner.temp }}/impacted-tests.json
+          if-no-files-found: ignore
+
+  run-daily:
+    needs: select-impacted-tests
+    if: ${{ needs.select-impacted-tests.result == 'success' }}
+    uses: ./.github/workflows/daily.yml
+    with:
+      use_repo: ${{ github.event.pull_request.head.repo.full_name }}
+      use_git_ref: ${{ github.event.pull_request.head.sha }}
+      test_args: ${{ needs.select-impacted-tests.outputs.main_test_args }}
+      moduleapi_test_args: ${{ needs.select-impacted-tests.outputs.moduleapi_test_args }}
+      cluster_test_args: ${{ needs.select-impacted-tests.outputs.cluster_test_args }}
