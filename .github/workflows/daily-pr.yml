@@ -22,11 +22,6 @@ permissions:
 jobs:
   select-impacted-tests:
     runs-on: ubuntu-latest
-    if: |
-      (github.event.pull_request.base.ref != 'unstable' ||
-        contains(github.event.pull_request.labels.*.name, 'run-extra-tests')) &&
-      (github.event.action != 'labeled' ||
-        (github.event.pull_request.base.ref == 'unstable' && github.event.label.name == 'run-extra-tests'))
     outputs:
       mode: ${{ steps.emit.outputs.mode }}
       reason: ${{ steps.emit.outputs.reason }}
