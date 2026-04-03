@@ -80,6 +80,7 @@
 #include "expire.h"     /* Expiration public API */
 #include "rax.h"        /* Radix tree */
 #include "connection.h" /* Connection abstraction */
+#include "compression.h" /* Compression algorithm types */
 #include "memory_prefetch.h"
 #include "vset.h"
 #include "trace/trace.h"
@@ -1252,6 +1253,9 @@ typedef struct ClientPubSubData {
                                       context of client side caching. */
 } ClientPubSubData;
 
+typedef struct stream_writer stream_writer_t;
+typedef struct repl_stream_decoder repl_stream_decoder_t;
+
 typedef struct ClientReplicationData {
     int repl_state;                      /* Replication state if this is a replica. */
     int repl_start_cmd_stream_on_ack;    /* Install replica write handler on first ACK. */
@@ -1283,6 +1287,12 @@ typedef struct ClientReplicationData {
     size_t ref_block_pos;                /* Access position of referenced buffer block,
                                            i.e. the next offset to send. */
     sds replica_nodeid;                  /* Node id in cluster mode. */
+    stream_writer_t *repl_compressor;    /* Per-replica replication compressor. */
+    sds compressed_buf;                  /* Pending compressed bytes for this replica. */
+    size_t compressed_buf_pos;           /* Next byte to write from compressed_buf. */
+    size_t compressed_raw_bytes;         /* Raw bytes represented by compressed_buf. */
+    int affinity_tid;                    /* Sticky IO thread ID, -1 if unset. */
+    int compression_error;               /* Async compression error flag. */
 } ClientReplicationData;
 
 typedef struct ClientModuleData {
@@ -2083,34 +2093,35 @@ struct valkeyServer {
                                            * ALGO_LZF (default), ALGO_LZ4 */
     int rdb_compression_level;            /* Compression level for streaming RDB codecs that support one. */
     /* Replication compression */
-    int repl_compression;          /* Use compression for replication? 0=no (default) */
-    int repl_compression_algo;     /* Replication compression algorithm: ALGO_LZ4 (default) */
-    int repl_compression_level;    /* Compression level for replication. Default: -5 */
-    int rdb_checksum;              /* Use RDB checksum? */
-    int rdb_del_sync_files;        /* Remove RDB files used only for SYNC if
-                                      the instance does not use persistence. */
-    time_t lastsave;               /* Unix time of last successful save */
-    time_t lastbgsave_try;         /* Unix time of last attempted bgsave */
-    time_t rdb_save_time_last;     /* Time used by last RDB save run. */
-    time_t rdb_save_time_start;    /* Current RDB save start time. */
-    int rdb_bgsave_scheduled;      /* BGSAVE when possible if true. */
-    int rdb_child_type;            /* Type of save by active child. */
-    int lastbgsave_status;         /* C_OK or C_ERR */
-    int stop_writes_on_bgsave_err; /* Don't allow writes if can't BGSAVE */
-    int rdb_pipe_read;             /* RDB pipe used to transfer the rdb data */
-                                   /* to the parent process in diskless repl. */
-    int rdb_child_exit_pipe;       /* Used by the diskless parent allow child exit. */
-    connection **rdb_pipe_conns;   /* Connections which are currently the */
-    int rdb_pipe_numconns;         /* target of diskless rdb fork child. */
-    int rdb_pipe_numconns_writing; /* Number of rdb conns with pending writes. */
-    char *rdb_pipe_buff;           /* In diskless replication, this buffer holds data */
-    int rdb_pipe_bufflen;          /* that was read from the rdb pipe. */
-    int rdb_key_save_delay;        /* Delay in microseconds between keys while
-                                    * writing aof or rdb. (for testings). negative
-                                    * value means fractions of microseconds (on average). */
-    int key_load_delay;            /* Delay in microseconds between keys while
-                                    * loading aof or rdb. (for testings). negative
-                                    * value means fractions of microseconds (on average). */
+    int repl_compression;                 /* Use compression for replication? 0=no (default) */
+    int repl_compression_algo;            /* Replication compression algorithm: ALGO_LZ4 (default) */
+    int repl_compression_level;           /* Compression level for replication. Default: -5 */
+    int repl_compression_thread_affinity; /* Pin compressed replicas to one IO thread. */
+    int rdb_checksum;                     /* Use RDB checksum? */
+    int rdb_del_sync_files;               /* Remove RDB files used only for SYNC if
+                                             the instance does not use persistence. */
+    time_t lastsave;                      /* Unix time of last successful save */
+    time_t lastbgsave_try;                /* Unix time of last attempted bgsave */
+    time_t rdb_save_time_last;            /* Time used by last RDB save run. */
+    time_t rdb_save_time_start;           /* Current RDB save start time. */
+    int rdb_bgsave_scheduled;             /* BGSAVE when possible if true. */
+    int rdb_child_type;                   /* Type of save by active child. */
+    int lastbgsave_status;                /* C_OK or C_ERR */
+    int stop_writes_on_bgsave_err;        /* Don't allow writes if can't BGSAVE */
+    int rdb_pipe_read;                    /* RDB pipe used to transfer the rdb data */
+                                          /* to the parent process in diskless repl. */
+    int rdb_child_exit_pipe;              /* Used by the diskless parent allow child exit. */
+    connection **rdb_pipe_conns;          /* Connections which are currently the */
+    int rdb_pipe_numconns;                /* target of diskless rdb fork child. */
+    int rdb_pipe_numconns_writing;        /* Number of rdb conns with pending writes. */
+    char *rdb_pipe_buff;                  /* In diskless replication, this buffer holds data */
+    int rdb_pipe_bufflen;                 /* that was read from the rdb pipe. */
+    int rdb_key_save_delay;               /* Delay in microseconds between keys while
+                                           * writing aof or rdb. (for testings). negative
+                                           * value means fractions of microseconds (on average). */
+    int key_load_delay;                   /* Delay in microseconds between keys while
+                                           * loading aof or rdb. (for testings). negative
+                                           * value means fractions of microseconds (on average). */
     /* Pipe and data structures for child -> parent info sharing. */
     int child_info_pipe[2]; /* Pipe used to write the child_info_data. */
     int child_info_nread;   /* Num of bytes of the last read from pipe */
@@ -2225,6 +2236,8 @@ struct valkeyServer {
                                            * when it receives an error on the replication stream */
     int repl_ignore_disk_write_error;     /* Configures whether replicas panic when unable to
                                            * persist writes to AOF. */
+    repl_stream_decoder_t *repl_stream_decoder; /* Replica-side replication transport decoder. */
+    sds repl_stream_decode_buf;                /* Scratch buffer for decoded replication bytes. */
 
     /* The following two fields is where we store primary PSYNC replid/offset
      * while the PSYNC is in progress. At the end we'll copy the fields into
@@ -3257,6 +3270,11 @@ int replicaRdbVersion(client *replica);
 void addRdbReplicaToPsyncWait(client *replica);
 void initClientReplicationData(client *c);
 void freeClientReplicationData(client *c);
+int replInitCompression(client *c, compression_algo_t algo, int level);
+void replDestroyCompression(client *c);
+void disconnectCompressedReplicas(void);
+int replInitDecompression(void);
+void replDestroyDecompression(void);
 void replicaReceiveRDBFromPrimaryToDisk(connection *conn, int is_dual_channel);
 sds replicationSendAuth(connection *conn);
 sds receiveSynchronousResponse(connection *conn);

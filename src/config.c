@@ -2590,6 +2590,16 @@ static int updateJemallocBgThread(const char **err) {
     return 1;
 }
 
+/* Turning replication compression off at runtime requires existing compressed
+ * replicas to reconnect so their transport matches the new config. */
+static int updateReplCompression(const char **err) {
+    UNUSED(err);
+    if (!server.repl_compression) {
+        disconnectCompressedReplicas();
+    }
+    return 1;
+}
+
 static int updateReplBacklogSize(const char **err) {
     UNUSED(err);
     resizeReplicationBacklog();
@@ -3314,7 +3324,7 @@ standardConfig static_configs[] = {
     createBoolConfig("always-show-logo", NULL, IMMUTABLE_CONFIG, server.always_show_logo, 0, NULL, NULL),
     createBoolConfig("protected-mode", NULL, MODIFIABLE_CONFIG, server.protected_mode, 1, NULL, NULL),
     createBoolConfig("rdbcompression", NULL, MODIFIABLE_CONFIG, server.rdb_compression, 1, NULL, NULL),
-    createBoolConfig("replcompression", NULL, MODIFIABLE_CONFIG, server.repl_compression, 0, NULL, NULL),
+    createBoolConfig("replcompression", NULL, MODIFIABLE_CONFIG, server.repl_compression, 0, NULL, updateReplCompression),
     createBoolConfig("rdb-del-sync-files", NULL, MODIFIABLE_CONFIG, server.rdb_del_sync_files, 0, NULL, NULL),
     createBoolConfig("activerehashing", NULL, MODIFIABLE_CONFIG, server.activerehashing, 1, NULL, NULL),
     createBoolConfig("stop-writes-on-bgsave-error", NULL, MODIFIABLE_CONFIG, server.stop_writes_on_bgsave_err, 1, NULL, NULL),
@@ -3327,6 +3337,7 @@ standardConfig static_configs[] = {
     createBoolConfig("repl-disable-tcp-nodelay", NULL, MODIFIABLE_CONFIG, server.repl_disable_tcp_nodelay, 0, NULL, NULL),
     createBoolConfig("repl-mptcp", NULL, IMMUTABLE_CONFIG, server.repl_mptcp, 0, isValidMptcp, NULL),
     createBoolConfig("repl-diskless-sync", NULL, DEBUG_CONFIG | MODIFIABLE_CONFIG, server.repl_diskless_sync, 1, NULL, NULL),
+    createBoolConfig("repl-compression-thread-affinity", NULL, MODIFIABLE_CONFIG, server.repl_compression_thread_affinity, 1, NULL, NULL),
     createBoolConfig("dual-channel-replication-enabled", NULL, DEBUG_CONFIG | MODIFIABLE_CONFIG, server.dual_channel_replication, 0, NULL, NULL),
     createBoolConfig("aof-rewrite-incremental-fsync", NULL, MODIFIABLE_CONFIG, server.aof_rewrite_incremental_fsync, 1, NULL, NULL),
     createBoolConfig("no-appendfsync-on-rewrite", NULL, MODIFIABLE_CONFIG, server.aof_no_fsync_on_rewrite, 0, NULL, NULL),

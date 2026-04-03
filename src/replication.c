@@ -37,9 +37,11 @@
 #include "cluster.h"
 #include "cluster_slot_stats.h"
 #include "bio.h"
+#include "compression_stream.h"
 #include "functions.h"
 #include "compression_rio.h"
 #include "connection.h"
+#include "repl_stream.h"
 #include "module.h"
 #include "cluster_migrateslots.h"
 
@@ -845,6 +847,85 @@ int replicationSetupReplicaForFullResync(client *replica, long long offset) {
     return C_OK;
 }
 
+/* Check if replication compression should be enabled for a replica.
+ * Compression is only valid when both the global feature flag is on and the
+ * replica explicitly advertised compression capability. */
+static int shouldEnableReplicaCompression(client *c) {
+    if (!server.repl_compression || !c || !c->repl_data) return 0;
+    return (c->repl_data->replica_capa & REPLICA_CAPA_COMPRESSION) != 0;
+}
+
+static int replRefreshDecompression(void) {
+    replDestroyDecompression();
+
+    /* The active primary->replica transport is chosen during handshake and can
+     * remain compressed even if the replica flips replcompression afterward.
+     * Keep the auto-detecting reader installed for the current primary link so
+     * already-negotiated sessions continue to handle both compressed and plain
+     * command streams correctly. */
+    return replInitDecompression();
+}
+
+int replInitDecompression(void) {
+    replDestroyDecompression();
+
+    server.repl_stream_decoder = replStreamDecoderCreate();
+    if (!server.repl_stream_decoder) return C_ERR;
+    server.repl_stream_decode_buf = sdsempty();
+    return C_OK;
+}
+
+void replDestroyDecompression(void) {
+    if (server.repl_stream_decoder) {
+        replStreamDecoderDestroy(server.repl_stream_decoder);
+        server.repl_stream_decoder = NULL;
+    }
+    if (server.repl_stream_decode_buf) {
+        sdsfree(server.repl_stream_decode_buf);
+        server.repl_stream_decode_buf = NULL;
+    }
+}
+
+void disconnectCompressedReplicas(void) {
+    listIter li;
+    listNode *ln;
+    int disconnected = 0;
+
+    listRewind(server.replicas, &li);
+    while ((ln = listNext(&li))) {
+        client *replica = ln->value;
+        if (replica->repl_data && replica->repl_data->repl_compressor) {
+            serverLog(LL_NOTICE,
+                      "Disconnecting compressed replica %s due to replication compression config change",
+                      replicationGetReplicaName(replica));
+            freeClientAsync(replica);
+            disconnected++;
+        }
+    }
+
+    if (disconnected > 0) {
+        serverLog(LL_NOTICE, "Disconnected %d compressed replicas", disconnected);
+    }
+}
+
+/* Initialize framed transport compression for a replica at PSYNC completion.
+ * The stream writer emits the VKCS envelope lazily on its first write. */
+static int replicaInitCompressionOnPsync(client *c) {
+    compression_algo_t algo = (compression_algo_t)server.repl_compression_algo;
+    int level = server.repl_compression_level;
+
+    serverAssert(c->io_write_state == CLIENT_IDLE);
+    if (replInitCompression(c, algo, level) != C_OK) {
+        serverLog(LL_WARNING, "Failed to initialize compression for replica %s",
+                  replicationGetReplicaName(c));
+        return C_ERR;
+    }
+
+    serverLog(LL_NOTICE, "Replication compression enabled for replica %s (algo=%s, level=%d)",
+              replicationGetReplicaName(c), compressionAlgoName(algo), level);
+    return C_OK;
+}
+
 /* This function handles the PSYNC command from the point of view of a
  * primary receiving a request for partial resynchronization.
  *
@@ -939,6 +1020,19 @@ int primaryTryPartialResynchronization(client *c, long long psync_offset) {
         freeClientAsync(c);
         return C_OK;
     }
+
+    /* Initialize replication compression if negotiated.
+     * Must happen after +CONTINUE (plaintext) and before addReplyReplicationBacklog
+     * so the backlog data goes through the compressed path. This applies to
+     * both regular partial resync and dual-channel replicas still loading the
+     * RDB in the background. */
+    if (shouldEnableReplicaCompression(c)) {
+        if (replicaInitCompressionOnPsync(c) != C_OK) {
+            freeClientAsync(c);
+            return C_OK;
+        }
+    }
+
     psync_len = addReplyReplicationBacklog(c, psync_offset);
     serverLog(
         LL_NOTICE,
@@ -1316,6 +1410,7 @@ int anyOtherReplicaWaitRdb(client *except_me) {
 void initClientReplicationData(client *c) {
     if (c->repl_data) return;
     c->repl_data = (ClientReplicationData *)zcalloc(sizeof(ClientReplicationData));
+    c->repl_data->affinity_tid = -1;
 }
 
 void freeClientReplicationData(client *c) {
@@ -1493,7 +1588,9 @@ void replconfCommand(client *c) {
                 checkChildrenDone();
             if (c->repl_data->repl_start_cmd_stream_on_ack && c->repl_data->repl_state == REPLICA_STATE_ONLINE) replicaStartCommandStream(c);
             if (c->repl_data->repl_state == REPLICA_STATE_BG_RDB_LOAD) {
-                replicaPutOnline(c);
+                if (!replicaPutOnline(c)) {
+                    freeClientAsync(c);
+                }
             }
             /* Note: this command does not reply anything! */
             return;
@@ -1614,6 +1711,18 @@ int replicaPutOnline(client *replica) {
     }
     replica->repl_data->repl_state = REPLICA_STATE_ONLINE;
     replica->repl_data->repl_ack_time = server.unixtime; /* Prevent false timeout. */
+
+    /* Initialize replication compression if configured.
+     * Must happen after state is ONLINE and before any replication data is sent.
+     * Dual-channel replicas may already have an active compressor from the
+     * +CONTINUE/backlog phase, so only initialize on the first transition. */
+    if (shouldEnableReplicaCompression(replica) && !replica->repl_data->repl_compressor) {
+        if (replicaInitCompressionOnPsync(replica) != C_OK) {
+            serverLog(LL_WARNING, "Failed to init compression for replica %s during full sync, disconnecting",
+                      replicationGetReplicaName(replica));
+            return 0; /* Signal caller to disconnect */
+        }
+    }
 
     refreshGoodReplicasCount();
     /* Fire the replica change modules event. */
@@ -2371,6 +2480,11 @@ void replicaAfterLoadPrimaryRDB(connection *conn, rdbSaveInfo *rsi, int disk_bas
         replicationCreatePrimaryClient(server.repl_transfer_s, rsi->repl_stream_db);
         server.repl_state = REPL_STATE_CONNECTED;
         server.repl_down_since = 0;
+        if (replRefreshDecompression() != C_OK) {
+            serverLog(LL_WARNING, "Failed to initialize replication decompression after full sync");
+            freeClientAsync(server.primary);
+            return;
+        }
         /* Send the initial ACK immediately to put this replica in online state. */
         replicationSendAck();
     }
@@ -2682,7 +2796,6 @@ void replicaReceiveRDBFromPrimaryToMemory(connection *conn) {
     int ret;
     rdbSaveInfo rsi = RDB_SAVE_INFO_INIT;
     sds remaining_repl_data = NULL;
-
     /* Static vars used to hold the EOF mark, and the last bytes received
      * from the server: when they match, we reached the end of the transfer. */
     static char eofmark[RDB_EOF_MARK_SIZE];
@@ -2725,8 +2838,31 @@ read_from_socket:
     replicaAfterLoadPrimaryRDB(conn, &rsi, 0);
     if (remaining_repl_data) {
         if (conn != server.repl_rdb_transfer_s && server.primary) {
-            server.primary->querybuf = sdscatlen(server.primary->querybuf, remaining_repl_data, sdslen(remaining_repl_data));
-            server.primary->repl_data->read_reploff += sdslen(remaining_repl_data);
+            if (server.repl_stream_decoder) {
+                /* These bytes bypass readQueryFromClient(), so decode them
+                 * before handing the stream to processInputBuffer(). */
+                serverAssert(server.repl_stream_decode_buf != NULL);
+                sdsclear(server.repl_stream_decode_buf);
+                if (replStreamDecoderFeed(server.repl_stream_decoder,
+                                          remaining_repl_data,
+                                          sdslen(remaining_repl_data),
+                                          &server.repl_stream_decode_buf) != C_OK) {
+                    serverLog(LL_WARNING,
+                              "Disconnecting primary due to replication stream decompression failure after full sync");
+                    freeClientAsync(server.primary);
+                    sdsfree(remaining_repl_data);
+                    return;
+                }
+                server.primary->querybuf = sdscatlen(server.primary->querybuf,
+                                                     server.repl_stream_decode_buf,
+                                                     sdslen(server.repl_stream_decode_buf));
+                server.primary->repl_data->read_reploff += sdslen(server.repl_stream_decode_buf);
+            } else {
+                server.primary->querybuf = sdscatlen(server.primary->querybuf,
+                                                     remaining_repl_data,
+                                                     sdslen(remaining_repl_data));
+                server.primary->repl_data->read_reploff += sdslen(remaining_repl_data);
+            }
             processInputBuffer(server.primary);
         }
         sdsfree(remaining_repl_data);
@@ -2785,6 +2921,94 @@ static int replicaWriteRDBChunkToDisk(const char *buf, size_t len, off_t *repl_t
 
     return C_OK;
 }
+
+static ssize_t replicaReadEOFSyncPayload(void *ctx, void *buf, size_t len) {
+    replicaFullSyncReadCtx *read_ctx = ctx;
+
+    while (1) {
+        if (server.replica_bio_abort_save) return -1;
+
+        ssize_t nread = connRead(read_ctx->conn, buf, len);
+        if (nread > 0) {
+            server.bio_stat_net_repl_input_bytes += nread;
+            server.repl_transfer_lastio = server.unixtime;
+            return nread;
+        }
+        /* Propagate EOF (peer closed) to the stream reader. */
+        if (nread == 0) return 0;
+
+        if (connGetState(read_ctx->conn) != CONN_STATE_CONNECTED) return -1;
+    }
+}
+
+static int replicaReceiveRDBWithEOFToDisk(connection *conn, const char *eofmark, off_t *repl_transfer_last_fsync_off) {
+    char decoded[PROTO_IOBUF_LEN];
+    char pending[PROTO_IOBUF_LEN + RDB_EOF_MARK_SIZE];
+    size_t pending_len = 0;
+    replicaFullSyncReadCtx read_ctx = {.conn = conn};
+    stream_reader_config_t reader_cfg = {
+        .expected_stream_kind = STREAM_KIND_RDB,
+        .allow_passthrough = true,
+        .batch_size = 0,
+    };
+    stream_reader_t *reader = stream_reader_create(&reader_cfg, replicaReadEOFSyncPayload, &read_ctx);
+    int retval = C_ERR;
+
+    if (!reader) {
+        replicaBioSaveServerLog(LL_WARNING, "Failed to initialize EOF full-sync stream reader");
+        return C_ERR;
+    }
+
+    if (stream_reader_probe(reader) != 0) {
+        replicaBioSaveServerLog(LL_WARNING, "Failed to probe EOF full-sync stream");
+        goto cleanup;
+    }
+
+    stream_reader_info_t info;
+    if (stream_reader_get_info(reader, &info) != 0) {
+        replicaBioSaveServerLog(LL_WARNING, "Failed to inspect EOF full-sync stream");
+        goto cleanup;
+    }
+    if (info.compressed) {
+        replicaBioSaveServerLog(LL_NOTICE, "PRIMARY <-> REPLICA sync: decoding compressed EOF stream to disk");
+    }
+
+    while (1) {
+        ssize_t nread = stream_reader_read(reader, decoded, sizeof(decoded));
+        if (nread < 0) {
+            replicaBioSaveServerLog(LL_WARNING, "Error reading EOF full-sync payload");
+            goto cleanup;
+        }
+        if (nread == 0) {
+            replicaBioSaveServerLog(LL_WARNING, "Unexpected EOF reading EOF full-sync payload");
+            goto cleanup;
+        }
+
+        memcpy(pending + pending_len, decoded, nread);
+        pending_len += nread;
+        if (pending_len < RDB_EOF_MARK_SIZE) continue;
+
+        if (memcmp(pending + pending_len - RDB_EOF_MARK_SIZE, eofmark, RDB_EOF_MARK_SIZE) == 0) {
+            if (replicaWriteRDBChunkToDisk(pending, pending_len - RDB_EOF_MARK_SIZE, repl_transfer_last_fsync_off) == C_ERR) {
+                goto cleanup;
+            }
+            retval = C_OK;
+            goto cleanup;
+        }
+
+        size_t flush_len = pending_len - RDB_EOF_MARK_SIZE;
+        if (replicaWriteRDBChunkToDisk(pending, flush_len, repl_transfer_last_fsync_off) == C_ERR) {
+            goto cleanup;
+        }
+        memmove(pending, pending + flush_len, RDB_EOF_MARK_SIZE);
+        pending_len = RDB_EOF_MARK_SIZE;
+    }
+
+cleanup:
+    stream_reader_destroy(reader);
+    return retval;
+}
+
 void replicaReceiveRDBFromPrimaryToDisk(connection *conn, int is_dual_channel) {
     int usemark;
     char lastbytes[RDB_EOF_MARK_SIZE];
@@ -3436,8 +3660,26 @@ int streamReplDataBufToDb(client *c) {
         /* Read and process repl data block */
         replDataBufBlock *o = listNodeValue(cur);
         used = o->used;
-        c->querybuf = sdscatlen(c->querybuf, o->buf, used);
-        c->repl_data->read_reploff += used;
+        if (server.repl_stream_decoder) {
+            size_t querybuf_len_before, decompressed_len;
+
+            serverAssert(server.repl_stream_decode_buf != NULL);
+            querybuf_len_before = sdslen(c->querybuf);
+            sdsclear(server.repl_stream_decode_buf);
+            if (replStreamDecoderFeed(server.repl_stream_decoder, o->buf, used,
+                                      &server.repl_stream_decode_buf) != C_OK) {
+                blockingOperationEnds();
+                return C_ERR;
+            }
+            c->querybuf = sdscatlen(c->querybuf, server.repl_stream_decode_buf,
+                                    sdslen(server.repl_stream_decode_buf));
+            decompressed_len = sdslen(c->querybuf) - querybuf_len_before;
+            c->repl_data->read_reploff += decompressed_len;
+            if (c->querybuf_peak < sdslen(c->querybuf)) c->querybuf_peak = sdslen(c->querybuf);
+        } else {
+            c->querybuf = sdscatlen(c->querybuf, o->buf, used);
+            c->repl_data->read_reploff += used;
+        }
         processInputBuffer(c);
         server.pending_repl_data.mem -= (used + sizeof(replDataBufBlock) + sizeof(listNode));
         server.pending_repl_data.len -= used;
@@ -3461,6 +3703,19 @@ int streamReplDataBufToDb(client *c) {
 void dualChannelSyncSuccess(void) {
     server.primary_initial_offset = server.repl_provisional_primary.reploff;
     replicationResurrectProvisionalPrimary();
+    /* Initialize decompression before draining any buffered main-channel data so
+     * compressed bytes accumulated during BG_RDB_LOAD are decoded before command
+     * parsing and the same reader state is preserved for steady-state reads.
+     *
+     * The bytes buffered on the main channel after +CONTINUE are expected to
+     * already be in the final incremental transport format for that session.
+     * In particular, we do not expect this buffered stream to start as plain
+     * RESP and later switch to a VKCS-framed incremental stream. */
+    if (replRefreshDecompression() != C_OK) {
+        serverLog(LL_WARNING, "Failed to initialize replication decompression after dual-channel sync");
+        freeClientAsync(server.primary);
+        return;
+    }
     /* Wait for the accumulated buffer to be processed before reading any more replication updates */
     if (server.pending_repl_data.blocks && streamReplDataBufToDb(server.primary) == C_ERR) {
         /* Sync session aborted during repl data streaming. */
@@ -3693,6 +3948,12 @@ int replicaProcessPsyncReply(connection *conn) {
             }
         }
 
+        if (replRefreshDecompression() != C_OK) {
+            serverLog(LL_WARNING, "Failed to refresh replication decompression on partial resync");
+            sdsfree(reply);
+            return PSYNC_TRY_LATER;
+        }
+
         /* Setup the replication to continue. */
         sdsfree(reply);
         replicationResurrectCachedPrimary(conn);
@@ -3789,6 +4050,10 @@ int dualChannelReplMainConnRecvPsyncReply(connection *conn, sds *err) {
     if (psync_result == PSYNC_WAIT_REPLY) return C_OK; /* Try again later... */
 
     if (psync_result == PSYNC_CONTINUE) {
+        if (replRefreshDecompression() != C_OK) {
+            *err = sdsnew("REPL_DECOMPRESSION_INIT_ERROR");
+            return C_ERR;
+        }
         dualChannelServerLog(LL_NOTICE, "PRIMARY <-> REPLICA sync: Primary accepted a Partial Resynchronization%s",
                              server.repl_rdb_transfer_s != NULL ? ", RDB load in background." : ".");
         if (server.supervised_mode == SUPERVISED_SYSTEMD) {
@@ -3926,8 +4191,8 @@ int syncWithPrimaryHandleSendHandshakeState(connection *conn) {
     int use_diskless_load = useDisklessLoad();
     /* We can ignore primary's conditions when sending capa (is_primary_stream_verified=1). */
     int send_skip_rdb_checksum_capa = replicationSupportSkipRDBChecksum(conn, use_diskless_load, 1);
-    char *argv[11] = {"REPLCONF", "capa", "eof", "capa", "psync2", NULL, NULL, NULL, NULL, NULL, NULL};
-    size_t lens[11] = {8, 4, 3, 4, 6, 0, 0, 0, 0, 0, 0};
+    char *argv[13] = {"REPLCONF", "capa", "eof", "capa", "psync2", NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL};
+    size_t lens[13] = {8, 4, 3, 4, 6, 0, 0, 0, 0, 0, 0, 0, 0};
     int argc = 5;
     if (send_skip_rdb_checksum_capa) {
         argv[argc] = "capa";
@@ -3953,6 +4218,7 @@ int syncWithPrimaryHandleSendHandshakeState(connection *conn) {
         lens[argc] = strlen(REPLICA_CAPA_COMPRESSION_STR);
         argc++;
     }
+    serverAssert(argc <= (int)(sizeof(argv) / sizeof(argv[0])));
     err = sendCommandArgv(conn, argc, argv, lens);
     if (err) goto err;
 
@@ -4638,6 +4904,7 @@ void replicationHandlePrimaryDisconnection(void) {
     if (server.repl_state == REPL_STATE_CONNECTED)
         moduleFireServerEvent(VALKEYMODULE_EVENT_PRIMARY_LINK_CHANGE, VALKEYMODULE_SUBEVENT_PRIMARY_LINK_DOWN, NULL);
 
+    replDestroyDecompression();
     server.primary = NULL;
     server.repl_state = REPL_STATE_CONNECT;
     server.repl_down_since = server.unixtime;

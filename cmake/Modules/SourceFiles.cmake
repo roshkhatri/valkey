@@ -125,7 +125,8 @@ set(VALKEY_SERVER_SRCS
     ${CMAKE_SOURCE_DIR}/src/compression_lz4.c
     ${CMAKE_SOURCE_DIR}/src/compression_zstd.c
     ${CMAKE_SOURCE_DIR}/src/compression_stream.c
-    ${CMAKE_SOURCE_DIR}/src/compression_rio.c)
+    ${CMAKE_SOURCE_DIR}/src/compression_rio.c
+    ${CMAKE_SOURCE_DIR}/src/repl_stream.c)
 
 
 # valkey-cli
