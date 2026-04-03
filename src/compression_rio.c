@@ -10,16 +10,6 @@
 #include <string.h>
 #include <unistd.h>
 
-/* Flush the wrapped inner rio and map failure to the stream writer's
- * sticky error state. */
-static int compressRioFlushInner(stream_writer_t *t, rio *inner) {
-    if (inner->flush && inner->flush(inner) == 0) {
-        stream_writer_set_error(t);
-        return -1;
-    }
-    return 0;
-}
-
 /* Shared rio callbacks for unsupported/no-op operations. */
 static size_t rioReadUnsupported(rio *r, void *buf, size_t len) {
     (void)r;
@@ -108,8 +98,10 @@ static int compressRioFlush(rio *r) {
 
     if (stream_writer_flush(cr->compressor) != 0) return 0;
 
-    /* Flush inner rio */
-    if (compressRioFlushInner(cr->compressor, cr->inner) != 0) return 0;
+    if (cr->inner->flush && cr->inner->flush(cr->inner) == 0) {
+        stream_writer_set_error(cr->compressor);
+        return 0;
+    }
     return 1;
 }
 
@@ -159,7 +151,9 @@ int compress_rio_finish(compress_rio_t *cr) {
     /* Flush inner rio to ensure all bytes reach the destination.
      * Propagate flush failure to the compressor error state so
      * callers can detect it. */
-    compressRioFlushInner(cr->compressor, cr->inner);
+    if (cr->inner->flush && cr->inner->flush(cr->inner) == 0) {
+        stream_writer_set_error(cr->compressor);
+    }
     return stream_writer_is_errored(cr->compressor) ? -1 : 0;
 }
 
@@ -231,6 +225,11 @@ int decompress_rio_detach(decompress_rio_t *dr) {
     }
     dr->detached = true;
     return 0;
+}
+
+stream_reader_error_t decompress_rio_get_error(const decompress_rio_t *dr) {
+    if (!dr || !dr->reader) return STREAM_READER_ERROR_IO;
+    return stream_reader_get_error(dr->reader);
 }
 
 /* Initialize a decompression rio and eagerly probe the wrapped stream so the

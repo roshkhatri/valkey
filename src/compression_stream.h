@@ -25,7 +25,7 @@ typedef enum {
 } vkcs_codec_t;
 
 /* Emit callback used by the VKCS envelope and streaming writer. */
-typedef int (*vkcsEmitFn)(void *ctx, const uint8_t *data, size_t len);
+typedef int (*vkcs_emit_fn)(void *ctx, const uint8_t *data, size_t len);
 
 /* Default initial compressed read buffer size for stream_reader when
  * cfg->batch_size == 0. The buffer may grow if the codec needs more input
@@ -67,6 +67,7 @@ typedef enum {
     STREAM_READER_ERROR_NONE = 0,
     STREAM_READER_ERROR_IO = 1,
     STREAM_READER_ERROR_INCOMPATIBLE = 2,
+    STREAM_READER_ERROR_CORRUPT = 3,
 } stream_reader_error_t;
 
 /* Caller-provided input callback.
@@ -78,27 +79,27 @@ typedef ssize_t (*stream_reader_read_fn)(void *ctx, void *buf, size_t len);
 
 /* Write VKCS envelope via callback. Returns 0 on success, -1 on error
  * (invalid codec or emit_cb failure). */
-int writeVkcsEnvelope(vkcsEmitFn emit_cb,
-                      void *ctx,
-                      vkcs_codec_t codec,
-                      uint8_t stream_kind,
-                      bool codec_checksum_enabled);
+int write_vkcs_envelope(vkcs_emit_fn emit_cb,
+                        void *ctx,
+                        vkcs_codec_t codec,
+                        uint8_t stream_kind,
+                        bool codec_checksum_enabled);
 
 /* Parse VKCS envelope from buffer. Returns 0 on success, -1 on error.
  * On success, *codec and *stream_kind are populated when corresponding pointers
  * are non-NULL. */
-int readVkcsEnvelope(const uint8_t *buf,
-                     size_t len,
-                     vkcs_codec_t *codec,
-                     uint8_t *stream_kind,
-                     bool *codec_checksum_enabled);
+int read_vkcs_envelope(const uint8_t *buf,
+                       size_t len,
+                       vkcs_codec_t *codec,
+                       uint8_t *stream_kind,
+                       bool *codec_checksum_enabled);
 
 /* Streaming writer API.
  * Ownership: returned context is owned by caller and must be destroyed.
  * Threading: stream_writer_t is NOT thread-safe; all API calls on a given
  * instance must be externally serialized and single-owner at any instant. */
 stream_writer_t *stream_writer_create(const stream_writer_config_t *cfg,
-                                      vkcsEmitFn emit_cb,
+                                      vkcs_emit_fn emit_cb,
                                       void *emit_ctx);
 /* Returns emitted bytes for this call (>=0), -1 on error.
  * After stream_writer_finish(), write returns -1 and does not emit bytes. */
@@ -145,8 +146,11 @@ int stream_reader_finish(stream_reader_t *t);
  * callers that need to continue reading from the wrapped transport. */
 int stream_reader_detach(stream_reader_t *t, const uint8_t **buf, size_t *len);
 /* Expose unread raw input bytes that were pulled from the source but not yet
- * consumed by the reader. Callers can use this to preserve trailing bytes
- * across stream handoff boundaries before destroying the reader. */
+ * consumed by the reader. For passthrough streams this is the unread probe
+ * prefix. For compressed streams, callers that need bytes following the
+ * current frame should use stream_reader_detach() or stream_reader_finish()
+ * first; calling this mid-frame may return compressed input that still belongs
+ * to the active frame. */
 int stream_reader_get_pending_input(stream_reader_t *t, const uint8_t **buf, size_t *len);
 void stream_reader_destroy(stream_reader_t *t);
 

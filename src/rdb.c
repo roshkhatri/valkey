@@ -3667,6 +3667,12 @@ int rdbLoadRioWithLoadingCtx(rio *rdb, int rdbflags, rdbSaveInfo *rsi, rdbLoadin
      * the RDB file from a socket during initial SYNC (diskless replica mode),
      * we'll report the error to the caller, so that we can retry. */
 eoferr:
+    if ((rdb->flags & RIO_FLAG_STREAMING_DECOMPRESSION) &&
+        decompress_rio_get_error((decompress_rio_t *)rdb) == STREAM_READER_ERROR_CORRUPT) {
+        serverLog(LL_WARNING, "Corrupt streaming-compressed RDB input. Unrecoverable error, aborting now.");
+        rdbReportCorruptRDB("Corrupt compressed RDB stream");
+        return RDB_FAILED;
+    }
     serverLog(LL_WARNING, "Short read or OOM loading DB. Unrecoverable error, aborting now.");
     rdbReportReadError("Unexpected EOF reading RDB file");
     return RDB_FAILED;

@@ -210,8 +210,8 @@ static ssize_t flakyReaderRead(void *ctx, void *buf, size_t len) {
 }
 
 /* --- Property: Envelope round-trip ---
- * For every valid (codec, stream_kind, checksum flag) tuple, writeVkcsEnvelope
- * followed by readVkcsEnvelope must recover the original fields. */
+ * For every valid (codec, stream_kind, checksum flag) tuple, write_vkcs_envelope
+ * followed by read_vkcs_envelope must recover the original fields. */
 TEST(compression, envelopeRoundTrip) {
     vkcs_codec_t codecs[] = {VKCS_CODEC_LZ4};
     size_t codec_count = sizeof(codecs) / sizeof(codecs[0]);
@@ -221,15 +221,15 @@ TEST(compression, envelopeRoundTrip) {
         for (size_t k = 0; k < sizeof(kinds) / sizeof(kinds[0]); k++) {
             for (bool checksum_enabled : {false, true}) {
                 emit_buf_t eb = makeEmitBuf(0);
-                int wret = writeVkcsEnvelope(emitToBuf, &eb, codecs[a], kinds[k], checksum_enabled);
-                ASSERT_TRUE(wret == 0) << "writeVkcsEnvelope should succeed for valid params";
+                int wret = write_vkcs_envelope(emitToBuf, &eb, codecs[a], kinds[k], checksum_enabled);
+                ASSERT_TRUE(wret == 0) << "write_vkcs_envelope should succeed for valid params";
                 ASSERT_TRUE(eb.pos == VKCS_ENVELOPE_SIZE) << "envelope should be exactly 8 bytes";
 
                 vkcs_codec_t got_codec = (vkcs_codec_t)0;
                 uint8_t got_kind = 0xFF;
                 bool got_checksum_enabled = false;
-                int rret = readVkcsEnvelope(eb.buf, eb.pos, &got_codec, &got_kind, &got_checksum_enabled);
-                ASSERT_TRUE(rret == 0) << "readVkcsEnvelope should succeed";
+                int rret = read_vkcs_envelope(eb.buf, eb.pos, &got_codec, &got_kind, &got_checksum_enabled);
+                ASSERT_TRUE(rret == 0) << "read_vkcs_envelope should succeed";
                 ASSERT_TRUE(got_codec == codecs[a]) << "round-trip codec must match";
                 ASSERT_TRUE(got_kind == kinds[k]) << "round-trip stream_kind must match";
                 ASSERT_TRUE(got_checksum_enabled == checksum_enabled) << "round-trip checksum flag must match";
@@ -242,7 +242,7 @@ TEST(compression, envelopeRoundTrip) {
 /* --- Property: Envelope magic bytes are "VKCS" (Req 2.3) --- */
 TEST(compression, envelopeMagicBytes) {
     emit_buf_t eb = makeEmitBuf(0);
-    int ret = writeVkcsEnvelope(emitToBuf, &eb, VKCS_CODEC_LZ4, STREAM_KIND_RDB, 0);
+    int ret = write_vkcs_envelope(emitToBuf, &eb, VKCS_CODEC_LZ4, STREAM_KIND_RDB, 0);
     ASSERT_TRUE(ret == 0) << "write must succeed";
 
     ASSERT_TRUE(eb.buf[0] == 0x56) << "magic[0] == 'V'";
@@ -261,7 +261,7 @@ TEST(compression, envelopeStreamKindByte) {
 
     for (size_t i = 0; i < sizeof(kinds) / sizeof(kinds[0]); i++) {
         emit_buf_t eb = makeEmitBuf(0);
-        int ret = writeVkcsEnvelope(emitToBuf, &eb, VKCS_CODEC_LZ4, kinds[i], false);
+        int ret = write_vkcs_envelope(emitToBuf, &eb, VKCS_CODEC_LZ4, kinds[i], false);
         ASSERT_TRUE(ret == 0) << "write must succeed";
         ASSERT_TRUE(eb.buf[6] == 0) << "flags should stay clear when checksum is disabled";
         ASSERT_TRUE(eb.buf[7] == kinds[i]) << "stream_kind must be stored in byte 7";
@@ -273,7 +273,7 @@ TEST(compression, envelopeStreamKindByte) {
 TEST(compression, envelopeRejectsUnknownCodec) {
     /* Build a valid envelope, then corrupt the codec_id byte */
     emit_buf_t eb = makeEmitBuf(0);
-    int wret = writeVkcsEnvelope(emitToBuf, &eb, VKCS_CODEC_LZ4, STREAM_KIND_RDB, 0);
+    int wret = write_vkcs_envelope(emitToBuf, &eb, VKCS_CODEC_LZ4, STREAM_KIND_RDB, 0);
     ASSERT_TRUE(wret == 0) << "write must succeed";
 
     /* Try every invalid codec_id value 0..255 except VKCS_CODEC_LZ4 */
@@ -282,39 +282,39 @@ TEST(compression, envelopeRejectsUnknownCodec) {
         eb.buf[5] = (uint8_t)i;
         vkcs_codec_t c;
         uint8_t k;
-        int ret = readVkcsEnvelope(eb.buf, eb.pos, &c, &k, NULL);
-        ASSERT_TRUE(ret == -1) << "readVkcsEnvelope must reject unknown codec_id";
+        int ret = read_vkcs_envelope(eb.buf, eb.pos, &c, &k, NULL);
+        ASSERT_TRUE(ret == -1) << "read_vkcs_envelope must reject unknown codec_id";
     }
     return;
 }
 
 TEST(compression, envelopeWriteRejectsUnknownCodec) {
     emit_buf_t eb = makeEmitBuf(0);
-    ASSERT_TRUE(writeVkcsEnvelope(emitToBuf, &eb, (vkcs_codec_t)0x7f,
-                                  STREAM_KIND_RDB, false) == -1)
-        << "writeVkcsEnvelope must reject unknown codec_id";
+    ASSERT_TRUE(write_vkcs_envelope(emitToBuf, &eb, (vkcs_codec_t)0x7f,
+                                    STREAM_KIND_RDB, false) == -1)
+        << "write_vkcs_envelope must reject unknown codec_id";
 }
 
-/* --- Property: readVkcsEnvelope rejects truncated input --- */
+/* --- Property: read_vkcs_envelope rejects truncated input --- */
 TEST(compression, envelopeRejectsTruncated) {
     emit_buf_t eb = makeEmitBuf(0);
-    int wret = writeVkcsEnvelope(emitToBuf, &eb, VKCS_CODEC_LZ4, STREAM_KIND_RDB, 0);
+    int wret = write_vkcs_envelope(emitToBuf, &eb, VKCS_CODEC_LZ4, STREAM_KIND_RDB, 0);
     ASSERT_TRUE(wret == 0) << "write must succeed";
 
     /* Every length < 8 must fail */
     for (size_t l = 0; l < VKCS_ENVELOPE_SIZE; l++) {
         vkcs_codec_t c;
         uint8_t k;
-        int ret = readVkcsEnvelope(eb.buf, l, &c, &k, NULL);
+        int ret = read_vkcs_envelope(eb.buf, l, &c, &k, NULL);
         ASSERT_TRUE(ret == -1) << "truncated envelope must be rejected";
     }
     return;
 }
 
-/* --- Property: readVkcsEnvelope rejects bad magic --- */
+/* --- Property: read_vkcs_envelope rejects bad magic --- */
 TEST(compression, envelopeRejectsBadMagic) {
     emit_buf_t eb = makeEmitBuf(0);
-    int wret = writeVkcsEnvelope(emitToBuf, &eb, VKCS_CODEC_LZ4, STREAM_KIND_RDB, 0);
+    int wret = write_vkcs_envelope(emitToBuf, &eb, VKCS_CODEC_LZ4, STREAM_KIND_RDB, 0);
     ASSERT_TRUE(wret == 0) << "write must succeed";
 
     /* Flip each magic byte and verify rejection */
@@ -323,17 +323,17 @@ TEST(compression, envelopeRejectsBadMagic) {
         eb.buf[i] = ~orig;
         vkcs_codec_t c;
         uint8_t k;
-        int ret = readVkcsEnvelope(eb.buf, eb.pos, &c, &k, NULL);
+        int ret = read_vkcs_envelope(eb.buf, eb.pos, &c, &k, NULL);
         ASSERT_TRUE(ret == -1) << "bad magic must be rejected";
         eb.buf[i] = orig;
     }
     return;
 }
 
-/* --- Property: readVkcsEnvelope rejects reserved bits (Req 2.19) --- */
+/* --- Property: read_vkcs_envelope rejects reserved bits (Req 2.19) --- */
 TEST(compression, envelopeRejectsReservedBits) {
     emit_buf_t eb = makeEmitBuf(0);
-    int wret = writeVkcsEnvelope(emitToBuf, &eb, VKCS_CODEC_LZ4, STREAM_KIND_RDB, 0);
+    int wret = write_vkcs_envelope(emitToBuf, &eb, VKCS_CODEC_LZ4, STREAM_KIND_RDB, 0);
     ASSERT_TRUE(wret == 0) << "write must succeed";
 
     /* Setting any reserved flag bit (1-7) must cause rejection */
@@ -342,7 +342,7 @@ TEST(compression, envelopeRejectsReservedBits) {
         eb.buf[6] = orig | (1 << bit);
         vkcs_codec_t c;
         uint8_t k;
-        int ret = readVkcsEnvelope(eb.buf, eb.pos, &c, &k, NULL);
+        int ret = read_vkcs_envelope(eb.buf, eb.pos, &c, &k, NULL);
         ASSERT_TRUE(ret == -1) << "reserved flag bits must be rejected";
         eb.buf[6] = orig;
     }
@@ -351,7 +351,7 @@ TEST(compression, envelopeRejectsReservedBits) {
 }
 
 /* --- Property: Bit-flip fuzz — write valid envelope, flip random bit,
- * verify readVkcsEnvelope exercises rejection paths.
+ * verify read_vkcs_envelope exercises rejection paths.
  * Replaces the previous random round-trip test which only covered 4
  * combinations and added no coverage beyond the exhaustive test. */
 TEST(compression, envelopeBitFlipFuzz) {
@@ -366,7 +366,7 @@ TEST(compression, envelopeBitFlipFuzz) {
         uint8_t kind = kinds[randomInt((int)(sizeof(kinds) / sizeof(kinds[0])))];
 
         emit_buf_t eb = makeEmitBuf(0);
-        int wret = writeVkcsEnvelope(emitToBuf, &eb, codec, kind, 0);
+        int wret = write_vkcs_envelope(emitToBuf, &eb, codec, kind, 0);
         ASSERT_TRUE(wret == 0) << "write must succeed";
         ASSERT_TRUE(eb.pos == VKCS_ENVELOPE_SIZE) << "size must be 8";
 
@@ -379,7 +379,7 @@ TEST(compression, envelopeBitFlipFuzz) {
         /* Most flips should cause rejection; some may land on don't-care
          * bits and still parse. When parse succeeds, validate the returned
          * values are valid registry members. */
-        int ret = readVkcsEnvelope(eb.buf, eb.pos, &got_codec, &got_kind, NULL);
+        int ret = read_vkcs_envelope(eb.buf, eb.pos, &got_codec, &got_kind, NULL);
         if (ret == 0) {
             ASSERT_TRUE(got_codec == VKCS_CODEC_LZ4) << "parsed codec must be LZ4";
             ASSERT_TRUE(got_kind == eb.buf[7]) << "parsed kind should match encoded kind";
@@ -388,7 +388,7 @@ TEST(compression, envelopeBitFlipFuzz) {
     return;
 }
 
-/* --- Property: emit_cb failure propagates through writeVkcsEnvelope --- */
+/* --- Property: emit_cb failure propagates through write_vkcs_envelope --- */
 static int emitAlwaysFail(void *ctx, const uint8_t *data, size_t len) {
     (void)ctx;
     (void)data;
@@ -397,8 +397,8 @@ static int emitAlwaysFail(void *ctx, const uint8_t *data, size_t len) {
 }
 
 TEST(compression, envelopeEmitFailure) {
-    int ret = writeVkcsEnvelope(emitAlwaysFail, NULL, VKCS_CODEC_LZ4, STREAM_KIND_RDB, 0);
-    ASSERT_TRUE(ret == -1) << "writeVkcsEnvelope must propagate emit_cb failure";
+    int ret = write_vkcs_envelope(emitAlwaysFail, NULL, VKCS_CODEC_LZ4, STREAM_KIND_RDB, 0);
+    ASSERT_TRUE(ret == -1) << "write_vkcs_envelope must propagate emit_cb failure";
     return;
 }
 
@@ -1841,6 +1841,8 @@ TEST(compression, streamReaderRejectsTruncatedFrameTrailer) {
     ASSERT_TRUE(stream_reader_read(r, out, payload_len) == (ssize_t)payload_len);
     ASSERT_TRUE(memcmp(out, payload, payload_len) == 0);
     ASSERT_TRUE(stream_reader_read(r, out, 1) < 0) << "EOF before frame end should be treated as corruption";
+    ASSERT_TRUE(stream_reader_get_error(r) == STREAM_READER_ERROR_CORRUPT)
+        << "truncated compressed frame should latch corruption, not I/O";
 
     stream_reader_destroy(r);
     dynamicBufFree(&db);

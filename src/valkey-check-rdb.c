@@ -95,6 +95,15 @@ struct {
     char *stats_output;
 } rdbstate;
 
+static unsigned long long rdbCheckOffset(void) {
+    if (!rdbstate.rio) return 0;
+
+    off_t pos = rioTell(rdbstate.rio);
+    if (pos >= 0) return (unsigned long long)pos;
+
+    return (unsigned long long)rdbstate.rio->processed_bytes;
+}
+
 /* At every loading step try to remember what we were about to do, so that
  * we can log this information when an error is encountered. */
 #define RDB_CHECK_DOING_START 0
@@ -523,7 +532,7 @@ void rdbCheckError(const char *fmt, ...) {
     va_end(ap);
 
     printf("--- RDB ERROR DETECTED ---\n");
-    printf("[offset %llu] %s\n", (unsigned long long)(rdbstate.rio ? rdbstate.rio->processed_bytes : 0), msg);
+    printf("[offset %llu] %s\n", rdbCheckOffset(), msg);
     printf("[additional info] While doing: %s\n", rdb_check_doing_string[rdbstate.doing]);
     if (rdbstate.key) printf("[additional info] Reading key '%s'\n", (char *)objectGetVal(rdbstate.key));
     if (rdbstate.key_type != -1)
@@ -552,7 +561,7 @@ void rdbCheckInfo(const char *fmt, ...) {
         va_end(ap);
     }
 
-    printf("[offset %llu] %s\n", (unsigned long long)(rdbstate.rio ? rdbstate.rio->processed_bytes : 0), msgbuf);
+    printf("[offset %llu] %s\n", rdbCheckOffset(), msgbuf);
 
     if (msgbuf != msg) sdsfree(msgbuf);
 }
@@ -861,6 +870,9 @@ int redis_check_rdb(char *rdbfilename, FILE *fp) {
 eoferr: /* unexpected end of file is handled here with a fatal exit */
     if (rdbstate.error_set) {
         rdbCheckError(rdbstate.error);
+    } else if (dr_initialized &&
+               decompress_rio_get_error(&dr) == STREAM_READER_ERROR_CORRUPT) {
+        rdbCheckError("Corrupt compressed RDB stream");
     } else {
         rdbCheckError("Unexpected EOF reading RDB file");
     }
