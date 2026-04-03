@@ -91,7 +91,17 @@ def git_changed_files(base_sha: str, head_sha: str) -> list[str]:
 def is_broad_risk(path: str) -> bool:
     if any(path == prefix or path.startswith(prefix) for prefix in BROAD_RISK_PREFIXES):
         return True
-    return Path(path).suffix in {".h", ".hh", ".hpp"}
+    suffix = Path(path).suffix
+    if suffix not in {".h", ".hh", ".hpp"}:
+        return False
+
+    # Repository-local source headers often change alongside the implementation
+    # files we can map with fresh coverage, so they should not force a full
+    # daily fallback on their own.
+    if path.startswith("src/") or path.startswith("modules/lua/"):
+        return False
+
+    return True
 
 
 def is_eligible_source(path: str) -> bool:
