@@ -23,19 +23,32 @@ typedef struct {
     rio base; /* Must be first */
     rio *inner;
     stream_reader_t *reader;
-    bool info_ready;
+    bool detached;
 } decompress_rio_t;
+
+typedef enum {
+    DECOMPRESS_RIO_INIT_ERROR = -1,
+    DECOMPRESS_RIO_INIT_OK = 0,
+    DECOMPRESS_RIO_INIT_INCOMPATIBLE = 1,
+} decompress_rio_init_result_t;
 
 /* --- Rio Decorator API --- */
 int rioInitWithCompress(compress_rio_t *cr, rio *inner, const stream_writer_config_t *cfg);
 int compress_rio_finish(compress_rio_t *cr);
 void compress_rio_destroy(compress_rio_t *cr);
 
-/* Initialize with explicit reader config.
- * The wrapped source must provide synchronous reads. */
-int decompress_rio_init_with_config(decompress_rio_t *dr, rio *inner, const stream_reader_config_t *cfg);
-/* Retrieve probed stream metadata (compressed/algo/kind). */
-int decompress_rio_get_info(decompress_rio_t *dr, stream_reader_info_t *info);
+/* Initialize and probe a decompression adapter in one step.
+ * Returns OK for both passthrough and compressed streams, INCOMPATIBLE for
+ * malformed/unexpected stream envelopes, and ERROR for I/O or setup failures. */
+decompress_rio_init_result_t rioInitWithDecompress(decompress_rio_t *dr,
+                                                   rio *inner,
+                                                   const stream_reader_config_t *cfg,
+                                                   stream_reader_info_t *info);
+/* Finish the current frame/prefix and hand any unread raw bytes back to the
+ * wrapped rio so it can continue reading after the adapter is removed. */
+int decompress_rio_detach(decompress_rio_t *dr);
+/* Destroy the adapter without additional I/O. Call decompress_rio_detach()
+ * first if the wrapped rio must continue reading after this stream. */
 void decompress_rio_destroy(decompress_rio_t *dr);
 
 #endif /* COMPRESSION_RIO_H */

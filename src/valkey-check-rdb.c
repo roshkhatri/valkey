@@ -625,19 +625,17 @@ int redis_check_rdb(char *rdbfilename, FILE *fp) {
         .allow_passthrough = 1,
         .batch_size = 0,
     };
-    if (decompress_rio_init_with_config(&dr, &file_rdb, &reader_cfg) != 0) {
-        rdbCheckError("Failed to initialize RDB stream reader");
+    decompress_rio_init_result_t init_rc = rioInitWithDecompress(&dr, &file_rdb, &reader_cfg, &stream_info);
+    if (init_rc == DECOMPRESS_RIO_INIT_INCOMPATIBLE) {
+        rdbCheckError("Invalid RDB stream envelope");
+        goto err;
+    }
+    if (init_rc != DECOMPRESS_RIO_INIT_OK) {
+        rdbCheckError("Failed to inspect RDB stream metadata");
         goto err;
     }
     dr_initialized = 1;
     rdb = (rio *)&dr;
-    if (decompress_rio_get_info(&dr, &stream_info) != 0) {
-        rdbCheckError("Failed to inspect RDB stream metadata");
-        goto err;
-    }
-    if (stream_info.compressed && stream_info.codec_checksum_enabled) {
-        rdb->flags |= RIO_FLAG_STREAMING_CODEC_CHECKSUM;
-    }
 
     rdbstate.rio = rdb;
     rdb->update_cksum = rdbLoadProgressCallback;

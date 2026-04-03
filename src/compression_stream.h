@@ -27,28 +27,6 @@ typedef enum {
 /* Emit callback used by the VKCS envelope and streaming writer. */
 typedef int (*vkcsEmitFn)(void *ctx, const uint8_t *data, size_t len);
 
-typedef enum {
-    VKCS_PROBE_NEED_INPUT = 0,
-    VKCS_PROBE_PASSTHROUGH = 1,
-    VKCS_PROBE_COMPRESSED = 2,
-    VKCS_PROBE_ERROR = 3,
-} vkcs_probe_result_t;
-
-typedef struct {
-    bool allow_passthrough;
-    uint8_t expected_stream_kind;
-} vkcs_probe_config_t;
-
-typedef struct {
-    uint8_t header[VKCS_ENVELOPE_SIZE];
-    size_t header_len;
-    bool ready;
-    bool compressed;
-    bool codec_checksum_enabled;
-    compression_algo_t algo;
-    uint8_t stream_kind;
-} vkcs_probe_t;
-
 /* Default initial compressed read buffer size for stream_reader when
  * cfg->batch_size == 0. The buffer may grow if the codec needs more input
  * before it can make progress. */
@@ -85,17 +63,18 @@ typedef struct {
     uint8_t stream_kind; /* Parsed VKCS kind. Ignore when compressed is false. */
 } stream_reader_info_t;
 
+typedef enum {
+    STREAM_READER_ERROR_NONE = 0,
+    STREAM_READER_ERROR_IO = 1,
+    STREAM_READER_ERROR_INCOMPATIBLE = 2,
+} stream_reader_error_t;
+
 /* Caller-provided input callback.
  * Returns:
  * - >0: bytes read into buf (partial reads allowed)
  * -  0: EOF
  * - -1: read error */
 typedef ssize_t (*stream_reader_read_fn)(void *ctx, void *buf, size_t len);
-
-/* Map between the VKCS codec registry and internal compression algorithms.
- * Returns 0 on success, -1 when there is no mapping. */
-int compressionAlgoToVkcsCodec(compression_algo_t algo, vkcs_codec_t *codec);
-int vkcsCodecToCompressionAlgo(vkcs_codec_t codec, compression_algo_t *algo);
 
 /* Write VKCS envelope via callback. Returns 0 on success, -1 on error
  * (invalid codec or emit_cb failure). */
@@ -113,20 +92,6 @@ int readVkcsEnvelope(const uint8_t *buf,
                      vkcs_codec_t *codec,
                      uint8_t *stream_kind,
                      bool *codec_checksum_enabled);
-
-/* Incrementally inspect a stream prefix and decide whether it is a VKCS-wrapped
- * compressed stream or plain passthrough data.
- *
- * The probe consumes only the bytes needed to decide. Any consumed bytes are
- * retained in probe->header so callers can replay passthrough prefixes without
- * losing input. */
-void vkcsProbeInit(vkcs_probe_t *probe);
-vkcs_probe_result_t vkcsProbeFeed(vkcs_probe_t *probe,
-                                  const vkcs_probe_config_t *cfg,
-                                  const uint8_t *src,
-                                  size_t src_len,
-                                  bool input_eof,
-                                  size_t *src_consumed);
 
 /* Streaming writer API.
  * Ownership: returned context is owned by caller and must be destroyed.
@@ -170,10 +135,15 @@ ssize_t stream_reader_read(stream_reader_t *t, void *buf, size_t len);
  * For passthrough streams: compressed=0, algo=ALGO_NONE, stream_kind=0.
  * Returns 0 on success, -1 on error. */
 int stream_reader_get_info(stream_reader_t *t, stream_reader_info_t *info);
+stream_reader_error_t stream_reader_get_error(const stream_reader_t *t);
 /* Drain and discard any remaining decompressed bytes in the current frame.
  * After success, any pending raw input exposed by stream_reader_get_pending_input()
  * belongs to data following the compressed frame. */
 int stream_reader_finish(stream_reader_t *t);
+/* Finish the current frame/prefix and expose any raw input already pulled from
+ * the source but not yet consumed by the reader. This is the handoff point for
+ * callers that need to continue reading from the wrapped transport. */
+int stream_reader_detach(stream_reader_t *t, const uint8_t **buf, size_t *len);
 /* Expose unread raw input bytes that were pulled from the source but not yet
  * consumed by the reader. Callers can use this to preserve trailing bytes
  * across stream handoff boundaries before destroying the reader. */

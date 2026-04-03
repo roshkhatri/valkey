@@ -75,59 +75,6 @@ static inline bool isRdbStreamingCompressionEnabled(void) {
            compressionAlgoSupportsStreaming((compression_algo_t)server.rdb_compression_algo);
 }
 
-/* Inspect seekable file input before wiring the streaming reader so
- * malformed VKCS wrappers are classified as incompatible RDB input rather than as a
- * generic load failure. This preserves existing caller behavior that keeps
- * the current dataset until the RDB compatibility gate passes.
- *
- * Returns 0 when inspection completed, 1 when the stream is not seekable and
- * the caller should fall back to the streaming reader probe, or -1 on error. */
-static int inspectRdbLoadStream(FILE *fp,
-                                stream_reader_info_t *stream_info,
-                                bool *compressed_stream,
-                                bool *incompatible_stream) {
-    unsigned char header[VKCS_ENVELOPE_SIZE];
-    compression_algo_t algo = ALGO_NONE;
-    vkcs_codec_t codec;
-    uint8_t stream_kind = 0;
-    bool codec_checksum_enabled = false;
-
-    if (!fp || !compressed_stream || !incompatible_stream) return -1;
-
-    *compressed_stream = false;
-    *incompatible_stream = false;
-
-    off_t start_offset = ftello(fp);
-    if (start_offset == (off_t)-1) {
-        if (errno == ESPIPE) return 1;
-        return -1;
-    }
-
-    size_t nread = fread(header, 1, sizeof(header), fp);
-    if (ferror(fp)) return -1;
-
-    clearerr(fp);
-    if (fseeko(fp, start_offset, SEEK_SET) == -1) return -1;
-
-    if (nread < 4 || memcmp(header, "VKCS", 4) != 0) return 0;
-    if (nread < sizeof(header) ||
-        readVkcsEnvelope(header, sizeof(header), &codec, &stream_kind, &codec_checksum_enabled) != 0 ||
-        vkcsCodecToCompressionAlgo(codec, &algo) != 0 ||
-        stream_kind != STREAM_KIND_RDB) {
-        *incompatible_stream = true;
-        return 0;
-    }
-
-    *compressed_stream = true;
-    if (stream_info) {
-        stream_info->compressed = true;
-        stream_info->codec_checksum_enabled = codec_checksum_enabled;
-        stream_info->algo = algo;
-        stream_info->stream_kind = stream_kind;
-    }
-    return 0;
-}
-
 /* This macro tells if we are in the context of a RESTORE command, and not loading an RDB or AOF. */
 #define isRestoreContext() ((server.current_client == NULL || server.current_client->id == CLIENT_ID_AOF) ? 0 : 1)
 
@@ -3175,18 +3122,12 @@ void rdbLoadProgressCallback(rio *r, const void *buf, size_t len) {
     if (server.rdb_checksum && !(r->flags & RIO_FLAG_STREAMING_CODEC_CHECKSUM))
         rioGenericUpdateChecksum(r, buf, len);
 
-    /* For streaming-compressed load paths, processed_bytes counts bytes
-     * returned by the decompressor (logical/uncompressed). Progress and
-     * event throttling should be based on source-stream progress
-     * (compressed bytes) instead.
-     *
-     * Use the wrapped inner rio's processed_bytes (already tracked by the
-     * decompressor read path) to avoid calling rioTell() on every chunk. */
+    /* For streaming-decompressed load paths, processed_bytes counts logical
+     * bytes returned by the adapter. Progress and throttling should follow the
+     * underlying transport position instead. */
     off_t progress_pos = (off_t)(r->processed_bytes + len);
-    if ((r->flags & RIO_FLAG_STREAMING_COMPRESSION) &&
-        (r->flags & RIO_FLAG_STREAMING_DECOMPRESSION)) {
-        decompress_rio_t *dr = (decompress_rio_t *)r;
-        progress_pos = (off_t)dr->inner->processed_bytes;
+    if (r->flags & RIO_FLAG_STREAMING_DECOMPRESSION) {
+        progress_pos = rioTell(r);
     }
 
     if (server.loading_process_events_interval_bytes &&
@@ -3761,55 +3702,29 @@ int rdbLoad(char *filename, rdbSaveInfo *rsi, int rdbflags) {
     decompress_rio_t dr;
     bool dr_initialized = false;
     stream_reader_info_t stream_info = {0};
-    rio *load_rio = &rdb;
-    bool compressed_stream = false;
-    bool incompatible_stream = false;
-    bool nonseekable_stream = false;
 
-    int inspect_rc = inspectRdbLoadStream(fp, &stream_info, &compressed_stream,
-                                          &incompatible_stream);
-    if (inspect_rc == -1) {
-        serverLog(LL_WARNING, "Failed to inspect the RDB stream header for %s: %s",
-                  filename, strerror(errno));
-        goto done;
-    }
-    nonseekable_stream = inspect_rc == 1;
-    if (incompatible_stream) {
+    stream_reader_config_t reader_cfg = {
+        .expected_stream_kind = STREAM_KIND_RDB,
+        .allow_passthrough = true,
+        .batch_size = 0,
+    };
+    decompress_rio_init_result_t init_rc = rioInitWithDecompress(&dr, &rdb, &reader_cfg, &stream_info);
+    if (init_rc == DECOMPRESS_RIO_INIT_INCOMPATIBLE) {
         serverLog(LL_WARNING, "Invalid RDB stream envelope in %s", filename);
         retval = RDB_INCOMPATIBLE;
         goto done;
     }
-    if (compressed_stream || nonseekable_stream) {
-        stream_reader_config_t reader_cfg = {
-            .expected_stream_kind = STREAM_KIND_RDB,
-            .allow_passthrough = nonseekable_stream,
-            .batch_size = 0,
-        };
-        if (decompress_rio_init_with_config(&dr, &rdb, &reader_cfg) != 0) {
-            serverLog(LL_WARNING, "Failed to initialize RDB stream reader for %s", filename);
-            goto done;
-        }
-        dr_initialized = true;
-        load_rio = (rio *)&dr;
-
-        if (nonseekable_stream) {
-            if (decompress_rio_get_info(&dr, &stream_info) != 0) {
-                serverLog(LL_WARNING, "Failed to inspect probed RDB stream metadata for %s",
-                          filename);
-                goto done;
-            }
-            compressed_stream = stream_info.compressed;
-        }
-        if (compressed_stream && stream_info.codec_checksum_enabled) {
-            load_rio->flags |= RIO_FLAG_STREAMING_CODEC_CHECKSUM;
-        }
-        if (compressed_stream) {
-            serverLog(LL_NOTICE, "Loading compressed RDB (algo=%s) from %s",
-                      compressionAlgoName(stream_info.algo), filename);
-        }
+    if (init_rc == DECOMPRESS_RIO_INIT_ERROR) {
+        serverLog(LL_WARNING, "Failed to initialize RDB stream reader for %s", filename);
+        goto done;
+    }
+    dr_initialized = true;
+    if (stream_info.compressed) {
+        serverLog(LL_NOTICE, "Loading compressed RDB (algo=%s) from %s",
+                  compressionAlgoName(stream_info.algo), filename);
     }
 
-    retval = rdbLoadRio(load_rio, rdbflags, rsi);
+    retval = rdbLoadRio((rio *)&dr, rdbflags, rsi);
 
 done:
     if (dr_initialized) {
