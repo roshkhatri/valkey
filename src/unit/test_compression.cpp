@@ -1111,6 +1111,52 @@ TEST(compression, streamWriterLargeSingleWrite) {
     return;
 }
 
+/* --- Test: small caller reads should still drain a compressed stream
+ * correctly. This exercises the buffered decompressed window path. --- */
+TEST(compression, streamReaderSmallReadsRoundTrip) {
+    const size_t payload_len = 256 * 1024;
+    uint8_t *payload = (uint8_t *)zmalloc(payload_len);
+    ASSERT_TRUE(payload != NULL);
+    for (size_t i = 0; i < payload_len; i++) {
+        payload[i] = (uint8_t)((i * 29 + 7) % 251);
+    }
+
+    dynamic_buf_t db;
+    dynamicBufInit(&db);
+
+    stream_writer_config_t wcfg = makeWriterConfig(ALGO_LZ4, -5, STREAM_KIND_RDB);
+    stream_writer_t *w = stream_writer_create(&wcfg, emitToDynamicBuf, &db);
+    ASSERT_TRUE(w != NULL);
+    ASSERT_TRUE(stream_writer_write(w, payload, payload_len) >= 0);
+    ASSERT_TRUE(stream_writer_finish(w) == 0);
+    stream_writer_destroy(w);
+
+    mem_reader_t mr = makeMemReader(db.data, db.len, 4096);
+    stream_reader_config_t rcfg = makeReaderConfig(STREAM_KIND_RDB, false, 64 * 1024);
+    stream_reader_t *r = stream_reader_create(&rcfg, memReaderRead, &mr);
+    ASSERT_TRUE(r != NULL);
+
+    uint8_t *out = (uint8_t *)zmalloc(payload_len);
+    ASSERT_TRUE(out != NULL);
+    size_t total = 0;
+    while (total < payload_len) {
+        size_t step = payload_len - total;
+        if (step > 17) step = 17;
+        ssize_t nread = stream_reader_read(r, out + total, step);
+        ASSERT_TRUE(nread > 0) << "stream_reader_read should keep making progress";
+        total += (size_t)nread;
+    }
+
+    ASSERT_TRUE(memcmp(out, payload, payload_len) == 0);
+    ASSERT_TRUE(stream_reader_read(r, out, 1) == 0) << "reader should stop at frame end";
+
+    zfree(out);
+    zfree(payload);
+    stream_reader_destroy(r);
+    dynamicBufFree(&db);
+    return;
+}
+
 /* --- Test: stream_writer_flush semantics (no-op before writes, valid mid-stream) --- */
 TEST(compression, streamWriterFlushBehavior) {
     dynamic_buf_t db;

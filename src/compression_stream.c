@@ -9,11 +9,6 @@
 #include <limits.h>
 #include <string.h>
 
-/* Prevent corrupt or adversarial compressed streams from growing the buffered
- * input window without bound. LZ4 frames use 64KB blocks today, so 16MB leaves
- * ample headroom for valid data while still bounding failure modes. */
-#define STREAM_READER_BATCH_SIZE_MAX (16 * 1024 * 1024)
-
 /* --- VKCS envelope --- */
 
 typedef enum {
@@ -248,8 +243,8 @@ static vkcs_probe_result_t vkcsProbeFeed(vkcs_probe_t *probe,
 
 struct stream_writer {
     stream_compressor_t compressor;
-    uint8_t *out_buf;    /* Reusable output buffer, sized via streamCompressOutputBound */
-    size_t out_buf_size; /* Current allocation size of out_buf */
+    uint8_t *out_buf;     /* Reusable output buffer, sized via streamCompressOutputBound */
+    size_t out_buf_size;  /* Current allocation size of out_buf */
     vkcs_emit_fn emit_cb; /* Returns 0 on success, -1 on error */
     void *emit_ctx;
     uint8_t stream_kind; /* Concrete on-wire stream kind */
@@ -446,11 +441,16 @@ struct stream_reader {
     stream_decompressor_t decompressor;
     bool decompressor_initialized;
 
+    uint8_t *buf_slab; /* Combined allocation for compressed input + output window */
     uint8_t *read_buf; /* Buffered compressed input */
     size_t read_buf_size;
-    size_t read_buf_size_limit;
     size_t read_buf_pos;
     size_t read_buf_fill;
+
+    uint8_t *window_buf; /* Buffered decompressed output for small caller reads */
+    size_t window_size;
+    size_t window_pos;
+    size_t window_len;
 };
 
 static void streamReaderSetError(stream_reader_t *t, stream_reader_error_t error_kind) {
@@ -477,16 +477,22 @@ static ssize_t streamReaderFailWithError(stream_reader_t *t,
 static int streamReaderInitCompressedState(stream_reader_t *t, size_t batch_size) {
     if (!t->probe.ready || !t->probe.compressed) return -1;
     if (!compressionAlgoSupportsStreaming(t->probe.algo)) return -1;
+    if (batch_size > SIZE_MAX / 2) return -1;
 
     if (streamDecompressorInit(&t->decompressor, t->probe.algo) != 0) {
         return -1;
     }
     t->decompressor_initialized = true;
 
-    t->read_buf = zmalloc(batch_size);
+    t->buf_slab = zmalloc(batch_size * 2);
+    t->read_buf = t->buf_slab;
+    t->window_buf = t->buf_slab + batch_size;
     t->read_buf_size = batch_size;
     t->read_buf_pos = 0;
     t->read_buf_fill = 0;
+    t->window_size = batch_size;
+    t->window_pos = 0;
+    t->window_len = 0;
     return 0;
 }
 
@@ -495,14 +501,18 @@ static void streamReaderResetCompressedState(stream_reader_t *t) {
         streamDecompressorDestroy(&t->decompressor);
         t->decompressor_initialized = false;
     }
-    if (t->read_buf) {
-        zfree(t->read_buf);
-        t->read_buf = NULL;
+    if (t->buf_slab) {
+        zfree(t->buf_slab);
+        t->buf_slab = NULL;
     }
+    t->read_buf = NULL;
+    t->window_buf = NULL;
     t->read_buf_size = 0;
-    t->read_buf_size_limit = 0;
     t->read_buf_pos = 0;
     t->read_buf_fill = 0;
+    t->window_size = 0;
+    t->window_pos = 0;
+    t->window_len = 0;
 }
 
 stream_reader_t *stream_reader_create(const stream_reader_config_t *cfg,
@@ -519,9 +529,9 @@ stream_reader_t *stream_reader_create(const stream_reader_config_t *cfg,
     t->probe_cfg.expected_stream_kind = cfg->expected_stream_kind;
     vkcsProbeInit(&t->probe);
     t->batch_size = cfg->batch_size ? cfg->batch_size : STREAM_READER_BATCH_SIZE_DEFAULT;
-    t->read_buf_size_limit = t->batch_size > STREAM_READER_BATCH_SIZE_MAX
-                                 ? t->batch_size
-                                 : STREAM_READER_BATCH_SIZE_MAX;
+    if (t->batch_size < STREAM_READER_BATCH_SIZE_MIN) {
+        t->batch_size = STREAM_READER_BATCH_SIZE_MIN;
+    }
     return t;
 }
 
@@ -645,21 +655,12 @@ static size_t streamReaderReadBufTailSpace(stream_reader_t *t) {
         return t->read_buf_size - t->read_buf_fill;
     }
 
-    size_t new_size = t->read_buf_size ? t->read_buf_size * 2 : STREAM_READER_BATCH_SIZE_DEFAULT;
-    if (new_size <= t->read_buf_size) {
-        streamReaderSetError(t, STREAM_READER_ERROR_CORRUPT);
-        return 0;
-    }
-    if (new_size > t->read_buf_size_limit) {
-        if (t->read_buf_size >= t->read_buf_size_limit) {
-            streamReaderSetError(t, STREAM_READER_ERROR_CORRUPT);
-            return 0;
-        }
-        new_size = t->read_buf_size_limit;
-    }
-    t->read_buf = zrealloc(t->read_buf, new_size);
-    t->read_buf_size = new_size;
-    return t->read_buf_size - t->read_buf_fill;
+    /* The generic stream reader intentionally keeps a fixed-size compressed
+     * input buffer and a fixed-size decompressed output window. If the codec
+     * cannot make progress while the compressed buffer is full, treat the
+     * stream as corrupt instead of growing more state. */
+    streamReaderSetError(t, STREAM_READER_ERROR_CORRUPT);
+    return 0;
 }
 
 static int streamReaderReadMoreCompressed(stream_reader_t *t) {
@@ -678,34 +679,72 @@ static int streamReaderReadMoreCompressed(stream_reader_t *t) {
     return 1;
 }
 
+static ssize_t streamReaderFillWindow(stream_reader_t *t) {
+    size_t written = 0;
+
+    t->window_pos = 0;
+    t->window_len = 0;
+
+    while (written < t->window_size) {
+        if (t->read_buf_fill > 0) {
+            size_t chunk_written = 0;
+            if (streamReaderDrainReadBuf(t, t->window_buf + written,
+                                         t->window_size - written, &chunk_written) != 0) {
+                return -1;
+            }
+            written += chunk_written;
+            if (written >= t->window_size) break;
+        }
+
+        int read_rc = streamReaderReadMoreCompressed(t);
+        if (read_rc < 0) return -1;
+        if (read_rc == 0) break;
+    }
+
+    t->window_len = written;
+    return (ssize_t)written;
+}
+
+static inline size_t streamReaderWindowAvail(const stream_reader_t *t) {
+    if (!t || t->window_len <= t->window_pos) return 0;
+    return t->window_len - t->window_pos;
+}
+
+static size_t streamReaderCopyFromWindow(stream_reader_t *t,
+                                         uint8_t **dst,
+                                         size_t *remaining) {
+    size_t avail = streamReaderWindowAvail(t);
+    if (avail == 0 || *remaining == 0) return 0;
+
+    size_t to_copy = avail < *remaining ? avail : *remaining;
+    memcpy(*dst, t->window_buf + t->window_pos, to_copy);
+    t->window_pos += to_copy;
+    *dst += to_copy;
+    *remaining -= to_copy;
+    return to_copy;
+}
+
 static ssize_t streamReaderReadCompressed(stream_reader_t *t, uint8_t *dst, size_t len) {
+    size_t remaining = len;
     size_t total = 0;
 
-    while (total < len) {
-        if (t->read_buf_fill > 0) {
-            size_t written = 0;
-            if (streamReaderDrainReadBuf(t, dst + total, len - total, &written) != 0) {
+    total += streamReaderCopyFromWindow(t, &dst, &remaining);
+    while (remaining > 0) {
+        if (streamReaderWindowAvail(t) == 0) {
+            ssize_t filled = streamReaderFillWindow(t);
+            if (filled < 0) {
                 return streamReaderFailWithError(
                     t, total,
                     t->error_kind == STREAM_READER_ERROR_NONE ? STREAM_READER_ERROR_IO
                                                               : t->error_kind);
             }
-            total += written;
-            if (total >= len || t->decompressor.frame_done) break;
+            if (filled == 0 && !t->decompressor.frame_done) {
+                return streamReaderFailWithError(t, total, STREAM_READER_ERROR_CORRUPT);
+            }
+            if (filled == 0) break;
         }
 
-        if (t->decompressor.frame_done) break;
-
-        int read_rc = streamReaderReadMoreCompressed(t);
-        if (read_rc < 0) {
-            return streamReaderFailWithError(
-                t, total,
-                t->error_kind == STREAM_READER_ERROR_NONE ? STREAM_READER_ERROR_IO
-                                                          : t->error_kind);
-        }
-        if (read_rc == 0) {
-            return streamReaderFailWithError(t, total, STREAM_READER_ERROR_CORRUPT);
-        }
+        total += streamReaderCopyFromWindow(t, &dst, &remaining);
     }
 
     return (ssize_t)total;

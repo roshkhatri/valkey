@@ -27,10 +27,13 @@ typedef enum {
 /* Emit callback used by the VKCS envelope and streaming writer. */
 typedef int (*vkcs_emit_fn)(void *ctx, const uint8_t *data, size_t len);
 
-/* Default initial compressed read buffer size for stream_reader when
- * cfg->batch_size == 0. The buffer may grow if the codec needs more input
- * before it can make progress. */
+/* Default fixed buffer size for stream_reader when cfg->batch_size == 0.
+ * The reader uses one compressed input buffer and one decompressed output
+ * window of this size. */
 #define STREAM_READER_BATCH_SIZE_DEFAULT (1024 * 1024)
+/* Tiny caller-provided batches are rounded up so the current LZ4 streaming
+ * decoder can always make forward progress without growing internal state. */
+#define STREAM_READER_BATCH_SIZE_MIN (128 * 1024)
 
 /* Streaming writer config. */
 typedef struct {
@@ -44,11 +47,12 @@ typedef struct {
  * - auto-detect VKCS envelope, decode if compressed
  * - allow_passthrough: forward non-VKCS bytes as-is
  * - expected_stream_kind: enforce envelope stream kind when compressed
- * - batch_size=0: uses the internal default initial read buffer size */
+ * - batch_size=0: uses the internal default fixed buffer/window size
+ * - batch_size>0: clamped to an internal minimum before allocating buffers */
 typedef struct {
     uint8_t expected_stream_kind; /* Concrete stream kind to enforce for compressed input. */
     bool allow_passthrough;       /* true => non-VKCS input is passed through */
-    size_t batch_size;            /* Initial compressed read buffer size; 0 => internal default */
+    size_t batch_size;            /* Fixed compressed read buffer and output window size; 0 => internal default */
 } stream_reader_config_t;
 
 /* Opaque writer context owned by the streaming writer API. */
