@@ -282,6 +282,8 @@ class ImpactMapper:
         run(
             [
                 "make",
+                "-C",
+                "src",
                 f"-j{os.cpu_count() or 4}",
                 "valkey-server",
                 "valkey-cli",
