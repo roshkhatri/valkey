@@ -376,19 +376,22 @@ void dictHashtableDestructor(void *val) {
     hashtableRelease((hashtable *)val);
 }
 
-/* Returns 1 when keys match */
-int dictSdsKeyCompare(const void *key1, const void *key2) {
-    int l1, l2;
-    l1 = sdslen((sds)key1);
-    l2 = sdslen((sds)key2);
+static int sdsKeysAreEqual(const void *key1, const void *key2) {
+    size_t l1 = sdslen((const sds)key1);
+    size_t l2 = sdslen((const sds)key2);
+
     if (l1 != l2) return 0;
     return memcmp(key1, key2, l1) == 0;
 }
 
+/* Returns 1 when keys match */
+int dictSdsKeyCompare(const void *key1, const void *key2) {
+    return sdsKeysAreEqual(key1, key2);
+}
+
 /* Returns 0 when keys match */
 int hashtableSdsKeyCompare(const void *key1, const void *key2) {
-    const sds sds1 = (const sds)key1, sds2 = (const sds)key2;
-    return sdslen(sds1) != sdslen(sds2) || sdscmp(sds1, sds2);
+    return !sdsKeysAreEqual(key1, key2);
 }
 
 /* A case insensitive version used for the command lookup table and other
