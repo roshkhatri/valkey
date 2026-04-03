@@ -348,8 +348,8 @@ mstime_t commandTimeSnapshot(void) {
 
 /* After an RDB dump or AOF rewrite we exit from children using _exit() instead of
  * exit(), because the latter may interact with the same file objects used by
- * the parent process. However if we are testing the coverage normal exit() is
- * used in order to obtain the right coverage information. */
+ * the parent process. However if we are testing coverage, normal exit() is
+ * used instead so the profile data is flushed before the child exits. */
 void exitFromChild(int retcode) {
 #ifdef COVERAGE_TEST
     exit(retcode);
