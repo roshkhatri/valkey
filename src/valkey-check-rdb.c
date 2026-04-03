@@ -30,7 +30,6 @@
 #include "mt19937-64.h"
 #include "server.h"
 #include "rdb.h"
-#include "compression_rio.h"
 #include "module.h"
 #include "hdr_histogram.h"
 #include "fpconv_dtoa.h"
@@ -614,9 +613,7 @@ int redis_check_rdb(char *rdbfilename, FILE *fp) {
     long long expiretime;
     static rio file_rdb;
     rio *rdb = &file_rdb; /* Pointed by global struct riostate. */
-    decompress_rio_t dr;
-    stream_reader_info_t stream_info = {0};
-    int dr_initialized = 0;
+    rdbInputStream input;
     struct stat sb;
 
     now = mstime();
@@ -627,14 +624,10 @@ int redis_check_rdb(char *rdbfilename, FILE *fp) {
 
     startLoadingFile(sb.st_size, rdbfilename, RDBFLAGS_NONE);
     rioInitWithFile(&file_rdb, fp);
+    rdbInputStreamInit(&input, &file_rdb);
 
     /* Support both plain RDB files and VKCS-wrapped streaming-compressed RDBs. */
-    stream_reader_config_t reader_cfg = {
-        .expected_stream_kind = STREAM_KIND_RDB,
-        .allow_passthrough = 1,
-        .batch_size = 0,
-    };
-    decompress_rio_init_result_t init_rc = rioInitWithDecompress(&dr, &file_rdb, &reader_cfg, &stream_info);
+    decompress_rio_init_result_t init_rc = rdbInputStreamPrepare(&input);
     if (init_rc == DECOMPRESS_RIO_INIT_INCOMPATIBLE) {
         rdbCheckError("Invalid RDB stream envelope");
         goto err;
@@ -643,8 +636,7 @@ int redis_check_rdb(char *rdbfilename, FILE *fp) {
         rdbCheckError("Failed to inspect RDB stream metadata");
         goto err;
     }
-    dr_initialized = 1;
-    rdb = (rio *)&dr;
+    rdb = input.rdb_rio;
 
     rdbstate.rio = rdb;
     rdb->update_cksum = rdbLoadProgressCallback;
@@ -861,7 +853,7 @@ int redis_check_rdb(char *rdbfilename, FILE *fp) {
         }
     }
 
-    if (dr_initialized) decompress_rio_destroy(&dr);
+    rdbInputStreamDestroy(&input);
     rdbstate.rio = &file_rdb;
     if (closefile) fclose(fp);
     stopLoading(1);
@@ -870,14 +862,13 @@ int redis_check_rdb(char *rdbfilename, FILE *fp) {
 eoferr: /* unexpected end of file is handled here with a fatal exit */
     if (rdbstate.error_set) {
         rdbCheckError(rdbstate.error);
-    } else if (dr_initialized &&
-               decompress_rio_get_error(&dr) == STREAM_READER_ERROR_CORRUPT) {
+    } else if (rdbRioHasCorruptCompressedInput(rdb)) {
         rdbCheckError("Corrupt compressed RDB stream");
     } else {
         rdbCheckError("Unexpected EOF reading RDB file");
     }
 err:
-    if (dr_initialized) decompress_rio_destroy(&dr);
+    rdbInputStreamDestroy(&input);
     rdbstate.rio = &file_rdb;
     if (closefile) fclose(fp);
     stopLoading(0);

@@ -3143,6 +3143,44 @@ void rdbLoadProgressCallback(rio *r, const void *buf, size_t len) {
     }
 }
 
+void rdbInputStreamInit(rdbInputStream *input, rio *raw_rio) {
+    memset(input, 0, sizeof(*input));
+    input->raw_rio = raw_rio;
+    input->rdb_rio = raw_rio;
+}
+
+decompress_rio_init_result_t rdbInputStreamPrepare(rdbInputStream *input) {
+    stream_reader_config_t reader_cfg = {
+        .expected_stream_kind = STREAM_KIND_RDB,
+        .allow_passthrough = true,
+        .batch_size = 0,
+    };
+
+    if (!input || !input->raw_rio) return DECOMPRESS_RIO_INIT_ERROR;
+
+    decompress_rio_init_result_t init_rc =
+        rioInitWithDecompress(&input->decompressor, input->raw_rio, &reader_cfg, &input->stream_info);
+    if (init_rc == DECOMPRESS_RIO_INIT_OK) {
+        input->initialized = true;
+        input->rdb_rio = (rio *)&input->decompressor;
+    }
+    return init_rc;
+}
+
+void rdbInputStreamDestroy(rdbInputStream *input) {
+    if (!input) return;
+    if (input->initialized) {
+        decompress_rio_destroy(&input->decompressor);
+        input->initialized = false;
+    }
+    input->rdb_rio = input->raw_rio;
+}
+
+bool rdbRioHasCorruptCompressedInput(const rio *rdb) {
+    return (rdb->flags & RIO_FLAG_STREAMING_DECOMPRESSION) &&
+           decompress_rio_get_error((const decompress_rio_t *)rdb) == STREAM_READER_ERROR_CORRUPT;
+}
+
 /* Save the given functions_ctx to the rdb.
  * The err output parameter is optional and will be set with relevant error
  * message on failure, it is the caller responsibility to free the error
@@ -3667,8 +3705,7 @@ int rdbLoadRioWithLoadingCtx(rio *rdb, int rdbflags, rdbSaveInfo *rsi, rdbLoadin
      * the RDB file from a socket during initial SYNC (diskless replica mode),
      * we'll report the error to the caller, so that we can retry. */
 eoferr:
-    if ((rdb->flags & RIO_FLAG_STREAMING_DECOMPRESSION) &&
-        decompress_rio_get_error((decompress_rio_t *)rdb) == STREAM_READER_ERROR_CORRUPT) {
+    if (rdbRioHasCorruptCompressedInput(rdb)) {
         serverLog(LL_WARNING, "Corrupt streaming-compressed RDB input. Unrecoverable error, aborting now.");
         rdbReportCorruptRDB("Corrupt compressed RDB stream");
         return RDB_FAILED;
@@ -3688,6 +3725,7 @@ eoferr:
 int rdbLoad(char *filename, rdbSaveInfo *rsi, int rdbflags) {
     FILE *fp;
     rio rdb;
+    rdbInputStream input;
     int retval = RDB_FAILED;
     struct stat sb;
     int rdb_fd;
@@ -3704,17 +3742,9 @@ int rdbLoad(char *filename, rdbSaveInfo *rsi, int rdbflags) {
 
     startLoadingFile(sb.st_size, filename, rdbflags);
     rioInitWithFile(&rdb, fp);
+    rdbInputStreamInit(&input, &rdb);
 
-    decompress_rio_t dr;
-    bool dr_initialized = false;
-    stream_reader_info_t stream_info = {0};
-
-    stream_reader_config_t reader_cfg = {
-        .expected_stream_kind = STREAM_KIND_RDB,
-        .allow_passthrough = true,
-        .batch_size = 0,
-    };
-    decompress_rio_init_result_t init_rc = rioInitWithDecompress(&dr, &rdb, &reader_cfg, &stream_info);
+    decompress_rio_init_result_t init_rc = rdbInputStreamPrepare(&input);
     if (init_rc == DECOMPRESS_RIO_INIT_INCOMPATIBLE) {
         serverLog(LL_WARNING, "Invalid RDB stream envelope in %s", filename);
         retval = RDB_INCOMPATIBLE;
@@ -3724,18 +3754,15 @@ int rdbLoad(char *filename, rdbSaveInfo *rsi, int rdbflags) {
         serverLog(LL_WARNING, "Failed to initialize RDB stream reader for %s", filename);
         goto done;
     }
-    dr_initialized = true;
-    if (stream_info.compressed) {
+    if (input.stream_info.compressed) {
         serverLog(LL_NOTICE, "Loading compressed RDB (algo=%s) from %s",
-                  compressionAlgoName(stream_info.algo), filename);
+                  compressionAlgoName(input.stream_info.algo), filename);
     }
 
-    retval = rdbLoadRio((rio *)&dr, rdbflags, rsi);
+    retval = rdbLoadRio(input.rdb_rio, rdbflags, rsi);
 
 done:
-    if (dr_initialized) {
-        decompress_rio_destroy(&dr);
-    }
+    rdbInputStreamDestroy(&input);
     fclose(fp);
     stopLoading(retval == RDB_OK);
     /* Reclaim the cache backed by rdb */
