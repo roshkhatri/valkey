@@ -1416,6 +1416,17 @@ void initClientReplicationData(client *c) {
 void freeClientReplicationData(client *c) {
     if (!c->repl_data) return;
     freeReplicaReferencedReplBuffer(c);
+    /* Defensive: clean up any residual compression state.
+     * Normally destroyed earlier by freeClient → replDestroyCompression(),
+     * but guard against future callers that skip that step. */
+    if (c->repl_data->repl_compressor) {
+        stream_writer_destroy(c->repl_data->repl_compressor);
+        c->repl_data->repl_compressor = NULL;
+    }
+    if (c->repl_data->compressed_buf) {
+        sdsfree(c->repl_data->compressed_buf);
+        c->repl_data->compressed_buf = NULL;
+    }
     /* Primary/replica cleanup Case 1:
      * we lost the connection with a replica. */
     if (c->flag.replica) {
@@ -2920,93 +2931,6 @@ static int replicaWriteRDBChunkToDisk(const char *buf, size_t len, off_t *repl_t
     }
 
     return C_OK;
-}
-
-static ssize_t replicaReadEOFSyncPayload(void *ctx, void *buf, size_t len) {
-    replicaFullSyncReadCtx *read_ctx = ctx;
-
-    while (1) {
-        if (server.replica_bio_abort_save) return -1;
-
-        ssize_t nread = connRead(read_ctx->conn, buf, len);
-        if (nread > 0) {
-            server.bio_stat_net_repl_input_bytes += nread;
-            server.repl_transfer_lastio = server.unixtime;
-            return nread;
-        }
-        /* Propagate EOF (peer closed) to the stream reader. */
-        if (nread == 0) return 0;
-
-        if (connGetState(read_ctx->conn) != CONN_STATE_CONNECTED) return -1;
-    }
-}
-
-static int replicaReceiveRDBWithEOFToDisk(connection *conn, const char *eofmark, off_t *repl_transfer_last_fsync_off) {
-    char decoded[PROTO_IOBUF_LEN];
-    char pending[PROTO_IOBUF_LEN + RDB_EOF_MARK_SIZE];
-    size_t pending_len = 0;
-    replicaFullSyncReadCtx read_ctx = {.conn = conn};
-    stream_reader_config_t reader_cfg = {
-        .expected_stream_kind = STREAM_KIND_RDB,
-        .allow_passthrough = true,
-        .batch_size = 0,
-    };
-    stream_reader_t *reader = stream_reader_create(&reader_cfg, replicaReadEOFSyncPayload, &read_ctx);
-    int retval = C_ERR;
-
-    if (!reader) {
-        replicaBioSaveServerLog(LL_WARNING, "Failed to initialize EOF full-sync stream reader");
-        return C_ERR;
-    }
-
-    if (stream_reader_probe(reader) != 0) {
-        replicaBioSaveServerLog(LL_WARNING, "Failed to probe EOF full-sync stream");
-        goto cleanup;
-    }
-
-    stream_reader_info_t info;
-    if (stream_reader_get_info(reader, &info) != 0) {
-        replicaBioSaveServerLog(LL_WARNING, "Failed to inspect EOF full-sync stream");
-        goto cleanup;
-    }
-    if (info.compressed) {
-        replicaBioSaveServerLog(LL_NOTICE, "PRIMARY <-> REPLICA sync: decoding compressed EOF stream to disk");
-    }
-
-    while (1) {
-        ssize_t nread = stream_reader_read(reader, decoded, sizeof(decoded));
-        if (nread < 0) {
-            replicaBioSaveServerLog(LL_WARNING, "Error reading EOF full-sync payload");
-            goto cleanup;
-        }
-        if (nread == 0) {
-            replicaBioSaveServerLog(LL_WARNING, "Unexpected EOF reading EOF full-sync payload");
-            goto cleanup;
-        }
-
-        memcpy(pending + pending_len, decoded, nread);
-        pending_len += nread;
-        if (pending_len < RDB_EOF_MARK_SIZE) continue;
-
-        if (memcmp(pending + pending_len - RDB_EOF_MARK_SIZE, eofmark, RDB_EOF_MARK_SIZE) == 0) {
-            if (replicaWriteRDBChunkToDisk(pending, pending_len - RDB_EOF_MARK_SIZE, repl_transfer_last_fsync_off) == C_ERR) {
-                goto cleanup;
-            }
-            retval = C_OK;
-            goto cleanup;
-        }
-
-        size_t flush_len = pending_len - RDB_EOF_MARK_SIZE;
-        if (replicaWriteRDBChunkToDisk(pending, flush_len, repl_transfer_last_fsync_off) == C_ERR) {
-            goto cleanup;
-        }
-        memmove(pending, pending + flush_len, RDB_EOF_MARK_SIZE);
-        pending_len = RDB_EOF_MARK_SIZE;
-    }
-
-cleanup:
-    stream_reader_destroy(reader);
-    return retval;
 }
 
 void replicaReceiveRDBFromPrimaryToDisk(connection *conn, int is_dual_channel) {

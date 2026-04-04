@@ -10,6 +10,8 @@
 #include "zmalloc.h"
 #include <string.h>
 
+#define REPL_STREAM_DECODER_INPUT_MAX (64 * 1024 * 1024)
+
 typedef enum {
     REPL_STREAM_MODE_PROBING = 0,
     REPL_STREAM_MODE_PASSTHROUGH,
@@ -86,17 +88,16 @@ static int replStreamDecoderProbe(repl_stream_decoder_t *decoder,
         }
 
         if (decoder->header_len == VKCS_ENVELOPE_SIZE) {
-            compression_algo_t algo = ALGO_NONE;
             vkcs_codec_t codec = 0;
             uint8_t stream_kind = 0;
             bool codec_checksum_enabled = false;
 
-            if (readVkcsEnvelope(decoder->header, VKCS_ENVELOPE_SIZE,
-                                 &codec, &stream_kind,
-                                 &codec_checksum_enabled) != 0 ||
-                vkcsCodecToCompressionAlgo(codec, &algo) != 0 ||
+            if (read_vkcs_envelope(decoder->header, VKCS_ENVELOPE_SIZE,
+                                   &codec, &stream_kind,
+                                   &codec_checksum_enabled) != 0 ||
+                codec != VKCS_CODEC_LZ4 ||
                 stream_kind != STREAM_KIND_REPL ||
-                replStreamDecoderSetCompressed(decoder, algo) != C_OK) {
+                replStreamDecoderSetCompressed(decoder, ALGO_LZ4) != C_OK) {
                 return C_ERR;
             }
             (void)codec_checksum_enabled;
@@ -167,6 +168,7 @@ int replStreamDecoderFeed(repl_stream_decoder_t *decoder, const void *src, size_
     }
 
     if (remaining > 0) decoder->input_buf = sdscatlen(decoder->input_buf, input, remaining);
+    if (sdslen(decoder->input_buf) > REPL_STREAM_DECODER_INPUT_MAX) return C_ERR;
     return replStreamDecoderDrainCompressed(decoder, dst);
 }
 

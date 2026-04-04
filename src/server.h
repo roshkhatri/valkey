@@ -63,23 +63,23 @@
 #define static_assert _Static_assert
 #endif
 
-#include "ae.h"         /* Event driven programming library */
-#include "sds.h"        /* Dynamic safe strings */
-#include "dict.h"       /* Hash tables (old implementation) */
-#include "hashtable.h"  /* Hash tables (new implementation) */
-#include "kvstore.h"    /* Slot-based hash table */
-#include "adlist.h"     /* Linked lists */
-#include "zmalloc.h"    /* total memory usage aware version of malloc/free */
-#include "anet.h"       /* Networking the easy way */
-#include "version.h"    /* Version macro */
-#include "util.h"       /* Misc functions useful in many places */
-#include "latency.h"    /* Latency monitor API */
-#include "sparkline.h"  /* ASCII graphs API */
-#include "quicklist.h"  /* Lists are encoded as linked lists of
+#include "ae.h"          /* Event driven programming library */
+#include "sds.h"         /* Dynamic safe strings */
+#include "dict.h"        /* Hash tables (old implementation) */
+#include "hashtable.h"   /* Hash tables (new implementation) */
+#include "kvstore.h"     /* Slot-based hash table */
+#include "adlist.h"      /* Linked lists */
+#include "zmalloc.h"     /* total memory usage aware version of malloc/free */
+#include "anet.h"        /* Networking the easy way */
+#include "version.h"     /* Version macro */
+#include "util.h"        /* Misc functions useful in many places */
+#include "latency.h"     /* Latency monitor API */
+#include "sparkline.h"   /* ASCII graphs API */
+#include "quicklist.h"   /* Lists are encoded as linked lists of
                            N-elements flat arrays */
-#include "expire.h"     /* Expiration public API */
-#include "rax.h"        /* Radix tree */
-#include "connection.h" /* Connection abstraction */
+#include "expire.h"      /* Expiration public API */
+#include "rax.h"         /* Radix tree */
+#include "connection.h"  /* Connection abstraction */
 #include "compression.h" /* Compression algorithm types */
 #include "memory_prefetch.h"
 #include "vset.h"
@@ -2209,35 +2209,35 @@ struct valkeyServer {
         long long read_reploff;
         int dbid;
     } repl_provisional_primary;
-    client *cached_primary;               /* Cached primary to be reused for PSYNC. */
-    rio *loading_rio;                     /* Pointer to the rio object currently used for loading data. */
-    int repl_syncio_timeout;              /* Timeout for synchronous I/O calls */
-    int repl_state;                       /* Replication status if the instance is a replica */
-    int repl_rdb_channel_state;           /* State of the replica's rdb channel during dual-channel-replication */
-    off_t repl_transfer_size;             /* Size of RDB to read from primary during sync. */
-    off_t repl_transfer_read;             /* Amount of RDB read from primary during sync. */
-    off_t repl_transfer_last_fsync_off;   /* Offset when we fsync-ed last time. */
-    connection *repl_transfer_s;          /* Replica -> Primary SYNC connection */
-    connection *repl_rdb_transfer_s;      /* Primary FULL SYNC connection (RDB download) */
-    int repl_transfer_fd;                 /* Replica -> Primary SYNC temp file descriptor */
-    char *repl_transfer_tmpfile;          /* Replica-> Primary SYNC temp file name */
-    _Atomic(time_t) repl_transfer_lastio; /* Unix time of the latest read, for timeout */
-    int repl_serve_stale_data;            /* Serve stale data when link is down? */
-    int repl_replica_ro;                  /* Replica is read only? */
-    int repl_replica_ignore_maxmemory;    /* If true replicas do not evict. */
-    time_t repl_down_since;               /* Unix time at which link with primary went down */
-    int repl_disable_tcp_nodelay;         /* Disable TCP_NODELAY after SYNC? */
-    int repl_mptcp;                       /* Use Multipath TCP for replica on client side */
-    int replica_priority;                 /* Reported in INFO and used by Sentinel. */
-    int replica_announced;                /* If true, replica is announced by Sentinel */
-    int replica_announce_port;            /* Give the primary this listening port. */
-    char *replica_announce_ip;            /* Give the primary this ip address. */
-    int propagation_error_behavior;       /* Configures the behavior of the replica
-                                           * when it receives an error on the replication stream */
-    int repl_ignore_disk_write_error;     /* Configures whether replicas panic when unable to
-                                           * persist writes to AOF. */
+    client *cached_primary;                     /* Cached primary to be reused for PSYNC. */
+    rio *loading_rio;                           /* Pointer to the rio object currently used for loading data. */
+    int repl_syncio_timeout;                    /* Timeout for synchronous I/O calls */
+    int repl_state;                             /* Replication status if the instance is a replica */
+    int repl_rdb_channel_state;                 /* State of the replica's rdb channel during dual-channel-replication */
+    off_t repl_transfer_size;                   /* Size of RDB to read from primary during sync. */
+    off_t repl_transfer_read;                   /* Amount of RDB read from primary during sync. */
+    off_t repl_transfer_last_fsync_off;         /* Offset when we fsync-ed last time. */
+    connection *repl_transfer_s;                /* Replica -> Primary SYNC connection */
+    connection *repl_rdb_transfer_s;            /* Primary FULL SYNC connection (RDB download) */
+    int repl_transfer_fd;                       /* Replica -> Primary SYNC temp file descriptor */
+    char *repl_transfer_tmpfile;                /* Replica-> Primary SYNC temp file name */
+    _Atomic(time_t) repl_transfer_lastio;       /* Unix time of the latest read, for timeout */
+    int repl_serve_stale_data;                  /* Serve stale data when link is down? */
+    int repl_replica_ro;                        /* Replica is read only? */
+    int repl_replica_ignore_maxmemory;          /* If true replicas do not evict. */
+    time_t repl_down_since;                     /* Unix time at which link with primary went down */
+    int repl_disable_tcp_nodelay;               /* Disable TCP_NODELAY after SYNC? */
+    int repl_mptcp;                             /* Use Multipath TCP for replica on client side */
+    int replica_priority;                       /* Reported in INFO and used by Sentinel. */
+    int replica_announced;                      /* If true, replica is announced by Sentinel */
+    int replica_announce_port;                  /* Give the primary this listening port. */
+    char *replica_announce_ip;                  /* Give the primary this ip address. */
+    int propagation_error_behavior;             /* Configures the behavior of the replica
+                                                 * when it receives an error on the replication stream */
+    int repl_ignore_disk_write_error;           /* Configures whether replicas panic when unable to
+                                                 * persist writes to AOF. */
     repl_stream_decoder_t *repl_stream_decoder; /* Replica-side replication transport decoder. */
-    sds repl_stream_decode_buf;                /* Scratch buffer for decoded replication bytes. */
+    sds repl_stream_decode_buf;                 /* Scratch buffer for decoded replication bytes. */
 
     /* The following two fields is where we store primary PSYNC replid/offset
      * while the PSYNC is in progress. At the end we'll copy the fields into

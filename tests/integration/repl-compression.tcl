@@ -362,11 +362,13 @@ start_server {tags {"repl external:skip"} overrides {save "" io-threads 4 repl-d
             $replica replicaof $master_host $master_port
 
             wait_for_condition 100 100 {
-                [string match "*state=wait_bgsave*" [$master info replication]]
+                [string match "*state=wait_bgsave*" [$master info replication]] ||
+                [string match "*state=bg_transfer*" [$master info replication]] ||
+                [string match "*state=send_bulk*" [$master info replication]]
             } else {
                 $master config set rdb-key-save-delay 0
                 $replica config set key-load-delay 0
-                fail "Replica did not enter wait_bgsave during dual-channel full sync"
+                fail "Replica did not enter bgsave/transfer during dual-channel full sync"
             }
 
             wait_for_condition 100 100 {
@@ -689,6 +691,13 @@ start_server {tags {"repl needs:debug"} overrides {save "" enable-debug-command 
                 [$primary debug digest] eq [$online_uncompressed_replica debug digest]
             } else {
                 fail "Uncompressed replica digest mismatch before scoped transport-compression test"
+            }
+
+            # Wait for the first transfer log to appear before capturing baseline counts.
+            wait_for_condition 50 100 {
+                [count_message_lines $primary_log "Background RDB transfer terminated with success"] > 0
+            } else {
+                fail "First RDB transfer did not complete"
             }
 
             set transfer_count_before [count_message_lines $primary_log "Background RDB transfer started by pid"]

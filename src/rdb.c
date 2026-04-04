@@ -1769,7 +1769,7 @@ int rdbSave(int req, char *filename, rdbSaveInfo *rsi, int rdbflags) {
 
     serverLog(LL_NOTICE, "DB saved on disk");
     if (shouldUseRdbStreamingCompression(rdbflags)) {
-        serverLog(LL_VERBOSE, "RDB saved with LZ4 streaming compression");
+        serverLog(LL_NOTICE, "RDB saved with LZ4 streaming compression");
     }
     server.dirty = 0;
     server.lastsave = time(NULL);

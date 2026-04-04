@@ -791,14 +791,12 @@ TEST_F(IOThreadsTest, CompressionRoundTrip) {
             input[i] = static_cast<uint8_t>(rand() & 0xFF);
         }
 
-        /* Create stream_writer with raw_frame=true (no VKCS envelope),
-         * matching the inline compression configuration from the design. */
+        /* Create stream_writer for STREAM_KIND_REPL with LZ4. */
         std::vector<uint8_t> compressed;
         stream_writer_config_t cfg = {};
         cfg.algo = ALGO_LZ4;
         cfg.level = 0;
         cfg.stream_kind = STREAM_KIND_REPL;
-        cfg.raw_frame = true;
 
         stream_writer_t *writer = stream_writer_create(&cfg, emitToVector, &compressed);
         ASSERT_NE(writer, nullptr) << "iter=" << iter << " input_len=" << input_len;
@@ -827,13 +825,17 @@ TEST_F(IOThreadsTest, CompressionRoundTrip) {
             << "iter=" << iter << " input_len=" << input_len
             << " no compressed output produced";
 
-        /* Decompress through stream_decompressor_t */
+        /* Decompress through stream_decompressor_t.
+         * The writer always emits a VKCS envelope, so skip it. */
+        ASSERT_GT(compressed.size(), (size_t)VKCS_ENVELOPE_SIZE)
+            << "iter=" << iter << " compressed output too small for envelope";
+
         stream_decompressor_t sd;
         ASSERT_EQ(streamDecompressorInit(&sd, ALGO_LZ4), 0)
             << "iter=" << iter << " decompressor init failed";
 
         std::vector<uint8_t> decompressed;
-        size_t src_offset = 0;
+        size_t src_offset = VKCS_ENVELOPE_SIZE;
         /* Decompress in chunks to exercise the decompressor state machine.
          * Heap-allocated to stay under -Wframe-larger-than=32768. */
         std::vector<uint8_t> decomp_buf(64 * 1024);

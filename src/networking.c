@@ -2465,7 +2465,7 @@ int replInitCompression(client *c, compression_algo_t algo, int level) {
         .algo = algo,
         .level = level,
         .stream_kind = STREAM_KIND_REPL,
-        .codec_checksum = 0,
+        .codec_checksum_enabled = 0,
     };
 
     c->repl_data->repl_compressor = stream_writer_create(&cfg,
