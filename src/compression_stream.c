@@ -268,7 +268,7 @@ static int streamWriterInitContext(stream_writer_t *t,
     if (streamCompressorInit(&t->compressor, cfg->algo, cfg->level) != 0) {
         return -1;
     }
-    t->compressor.codec_checksum = cfg->codec_checksum;
+    t->compressor.codec_checksum = cfg->codec_checksum_enabled;
     return 0;
 }
 
@@ -436,24 +436,24 @@ struct stream_reader {
 
     vkcs_probe_config_t probe_cfg;
     vkcs_probe_t probe;
-    size_t probe_pos; /* Unread passthrough bytes buffered by vkcsProbeFeed */
-    size_t batch_size;
+    size_t probe_replay_pos; /* Unread passthrough bytes buffered by vkcsProbeFeed */
+    size_t buffer_size;
     bool errored;
     stream_reader_error_t error_kind;
 
     stream_decompressor_t decompressor;
     bool decompressor_initialized;
 
-    uint8_t *buf_slab; /* Combined allocation for compressed input + output window */
-    uint8_t *read_buf; /* Buffered compressed input */
-    size_t read_buf_size;
-    size_t read_buf_pos;
-    size_t read_buf_fill;
+    uint8_t *io_buf_slab;    /* Combined allocation for compressed input + decompressed output buffers */
+    uint8_t *compressed_buf; /* Buffered compressed input */
+    size_t compressed_buf_size;
+    size_t compressed_buf_pos;
+    size_t compressed_buf_len;
 
-    uint8_t *window_buf; /* Buffered decompressed output for small caller reads */
-    size_t window_size;
-    size_t window_pos;
-    size_t window_len;
+    uint8_t *decompressed_buf; /* Buffered decompressed output for small caller reads */
+    size_t decompressed_buf_size;
+    size_t decompressed_buf_pos;
+    size_t decompressed_buf_len;
 };
 
 static void streamReaderSetError(stream_reader_t *t, stream_reader_error_t error_kind) {
@@ -476,23 +476,23 @@ static ssize_t streamReaderFailWithError(stream_reader_t *t,
     return partial_bytes > 0 ? (ssize_t)partial_bytes : -1;
 }
 
-static int streamReaderInitCompressedState(stream_reader_t *t, size_t batch_size) {
-    if (batch_size > SIZE_MAX / 2) return -1;
+static int streamReaderInitCompressedState(stream_reader_t *t, size_t buffer_size) {
+    if (buffer_size > SIZE_MAX / 2) return -1;
 
     if (streamDecompressorInit(&t->decompressor, t->probe.algo) != 0) {
         return -1;
     }
     t->decompressor_initialized = true;
 
-    t->buf_slab = zmalloc(batch_size * 2);
-    t->read_buf = t->buf_slab;
-    t->window_buf = t->buf_slab + batch_size;
-    t->read_buf_size = batch_size;
-    t->read_buf_pos = 0;
-    t->read_buf_fill = 0;
-    t->window_size = batch_size;
-    t->window_pos = 0;
-    t->window_len = 0;
+    t->io_buf_slab = zmalloc(buffer_size * 2);
+    t->compressed_buf = t->io_buf_slab;
+    t->decompressed_buf = t->io_buf_slab + buffer_size;
+    t->compressed_buf_size = buffer_size;
+    t->compressed_buf_pos = 0;
+    t->compressed_buf_len = 0;
+    t->decompressed_buf_size = buffer_size;
+    t->decompressed_buf_pos = 0;
+    t->decompressed_buf_len = 0;
     return 0;
 }
 
@@ -501,18 +501,18 @@ static void streamReaderResetCompressedState(stream_reader_t *t) {
         streamDecompressorDestroy(&t->decompressor);
         t->decompressor_initialized = false;
     }
-    if (t->buf_slab) {
-        zfree(t->buf_slab);
-        t->buf_slab = NULL;
+    if (t->io_buf_slab) {
+        zfree(t->io_buf_slab);
+        t->io_buf_slab = NULL;
     }
-    t->read_buf = NULL;
-    t->window_buf = NULL;
-    t->read_buf_size = 0;
-    t->read_buf_pos = 0;
-    t->read_buf_fill = 0;
-    t->window_size = 0;
-    t->window_pos = 0;
-    t->window_len = 0;
+    t->compressed_buf = NULL;
+    t->decompressed_buf = NULL;
+    t->compressed_buf_size = 0;
+    t->compressed_buf_pos = 0;
+    t->compressed_buf_len = 0;
+    t->decompressed_buf_size = 0;
+    t->decompressed_buf_pos = 0;
+    t->decompressed_buf_len = 0;
 }
 
 stream_reader_t *stream_reader_create(const stream_reader_config_t *cfg,
@@ -528,9 +528,9 @@ stream_reader_t *stream_reader_create(const stream_reader_config_t *cfg,
     t->probe_cfg.allow_passthrough = cfg->allow_passthrough;
     t->probe_cfg.expected_stream_kind = cfg->expected_stream_kind;
     vkcsProbeInit(&t->probe);
-    t->batch_size = cfg->batch_size ? cfg->batch_size : STREAM_READER_BATCH_SIZE_DEFAULT;
-    if (t->batch_size < STREAM_READER_BATCH_SIZE_MIN) {
-        t->batch_size = STREAM_READER_BATCH_SIZE_MIN;
+    t->buffer_size = cfg->buffer_size ? cfg->buffer_size : STREAM_READER_BUFFER_SIZE_DEFAULT;
+    if (t->buffer_size < STREAM_READER_BUFFER_SIZE_MIN) {
+        t->buffer_size = STREAM_READER_BUFFER_SIZE_MIN;
     }
     return t;
 }
@@ -570,7 +570,7 @@ int stream_reader_probe(stream_reader_t *t) {
         if (status == VKCS_PROBE_NEED_INPUT) continue;
         if (status == VKCS_PROBE_COMPRESSED &&
             !t->decompressor_initialized &&
-            streamReaderInitCompressedState(t, t->batch_size) != 0) {
+            streamReaderInitCompressedState(t, t->buffer_size) != 0) {
             streamReaderSetError(t, STREAM_READER_ERROR_IO);
             return -1;
         }
@@ -580,8 +580,8 @@ int stream_reader_probe(stream_reader_t *t) {
 }
 
 static size_t streamReaderProbeAvail(const stream_reader_t *t) {
-    if (t->probe.header_len <= t->probe_pos) return 0;
-    return t->probe.header_len - t->probe_pos;
+    if (t->probe.header_len <= t->probe_replay_pos) return 0;
+    return t->probe.header_len - t->probe_replay_pos;
 }
 
 /* Passthrough reads may need to replay probe bytes before reading directly
@@ -595,8 +595,8 @@ static ssize_t streamReaderReadPassthrough(stream_reader_t *t,
     size_t prefix_avail = streamReaderProbeAvail(t);
     if (prefix_avail > 0) {
         size_t from_prefix = prefix_avail < len ? prefix_avail : len;
-        memcpy(dst, t->probe.header + t->probe_pos, from_prefix);
-        t->probe_pos += from_prefix;
+        memcpy(dst, t->probe.header + t->probe_replay_pos, from_prefix);
+        t->probe_replay_pos += from_prefix;
         dst += from_prefix;
         len -= from_prefix;
         total += from_prefix;
@@ -609,49 +609,49 @@ static ssize_t streamReaderReadPassthrough(stream_reader_t *t,
     return (ssize_t)(total + (size_t)got);
 }
 
-static int streamReaderDrainReadBuf(stream_reader_t *t,
-                                    uint8_t *out,
-                                    size_t out_size,
-                                    size_t *out_written) {
+static int streamReaderDrainCompressedBuf(stream_reader_t *t,
+                                          uint8_t *out,
+                                          size_t out_size,
+                                          size_t *out_written) {
     *out_written = 0;
-    while (t->read_buf_fill > 0 && *out_written < out_size) {
+    while (t->compressed_buf_len > 0 && *out_written < out_size) {
         size_t consumed = 0;
         ssize_t produced = streamDecompressFeed(
             &t->decompressor,
             out + *out_written, out_size - *out_written,
-            t->read_buf + t->read_buf_pos,
-            t->read_buf_fill, &consumed);
+            t->compressed_buf + t->compressed_buf_pos,
+            t->compressed_buf_len, &consumed);
         if (produced < 0) {
             streamReaderSetError(t, STREAM_READER_ERROR_CORRUPT);
             return -1;
         }
-        if (consumed > t->read_buf_fill ||
+        if (consumed > t->compressed_buf_len ||
             (size_t)produced > out_size - *out_written) {
             streamReaderSetError(t, STREAM_READER_ERROR_CORRUPT);
             return -1;
         }
         *out_written += (size_t)produced;
-        t->read_buf_pos += consumed;
-        t->read_buf_fill -= consumed;
+        t->compressed_buf_pos += consumed;
+        t->compressed_buf_len -= consumed;
         if (consumed == 0 && produced == 0) break;
     }
-    if (t->read_buf_fill == 0) t->read_buf_pos = 0;
+    if (t->compressed_buf_len == 0) t->compressed_buf_pos = 0;
     return 0;
 }
 
-static size_t streamReaderReadBufTailSpace(stream_reader_t *t) {
-    size_t tail_space = t->read_buf_size - t->read_buf_pos - t->read_buf_fill;
+static size_t streamReaderCompressedBufTailSpace(stream_reader_t *t) {
+    size_t tail_space = t->compressed_buf_size - t->compressed_buf_pos - t->compressed_buf_len;
     if (tail_space > 0) return tail_space;
 
-    if (t->read_buf_fill == 0) {
-        t->read_buf_pos = 0;
-        return t->read_buf_size;
+    if (t->compressed_buf_len == 0) {
+        t->compressed_buf_pos = 0;
+        return t->compressed_buf_size;
     }
 
-    if (t->read_buf_pos > 0) {
-        memmove(t->read_buf, t->read_buf + t->read_buf_pos, t->read_buf_fill);
-        t->read_buf_pos = 0;
-        return t->read_buf_size - t->read_buf_fill;
+    if (t->compressed_buf_pos > 0) {
+        memmove(t->compressed_buf, t->compressed_buf + t->compressed_buf_pos, t->compressed_buf_len);
+        t->compressed_buf_pos = 0;
+        return t->compressed_buf_size - t->compressed_buf_len;
     }
 
     /* The generic stream reader intentionally keeps a fixed-size compressed
@@ -662,41 +662,41 @@ static size_t streamReaderReadBufTailSpace(stream_reader_t *t) {
     return 0;
 }
 
-static int streamReaderReadMoreCompressed(stream_reader_t *t) {
-    size_t read_size = streamReaderReadBufTailSpace(t);
+static int streamReaderRefillCompressedBuf(stream_reader_t *t) {
+    size_t read_size = streamReaderCompressedBufTailSpace(t);
     if (read_size > (size_t)SSIZE_MAX) read_size = (size_t)SSIZE_MAX;
     if (read_size == 0) return -1;
 
     ssize_t got = t->read_cb(
         t->read_ctx,
-        t->read_buf + t->read_buf_pos + t->read_buf_fill,
+        t->compressed_buf + t->compressed_buf_pos + t->compressed_buf_len,
         read_size);
     if (got < 0) return -1;
     if (got == 0) return 0;
     if ((size_t)got > read_size) return -1;
-    t->read_buf_fill += (size_t)got;
+    t->compressed_buf_len += (size_t)got;
     return 1;
 }
 
-static ssize_t streamReaderFillWindow(stream_reader_t *t) {
+static ssize_t streamReaderFillDecompressedBuf(stream_reader_t *t) {
     size_t written = 0;
 
-    t->window_pos = 0;
-    t->window_len = 0;
+    t->decompressed_buf_pos = 0;
+    t->decompressed_buf_len = 0;
 
-    while (written < t->window_size) {
-        if (t->read_buf_fill > 0) {
+    while (written < t->decompressed_buf_size) {
+        if (t->compressed_buf_len > 0) {
             size_t chunk_written = 0;
-            if (streamReaderDrainReadBuf(t, t->window_buf + written,
-                                         t->window_size - written, &chunk_written) != 0) {
+            if (streamReaderDrainCompressedBuf(t, t->decompressed_buf + written,
+                                               t->decompressed_buf_size - written, &chunk_written) != 0) {
                 written += chunk_written;
                 break;
             }
             written += chunk_written;
-            if (written >= t->window_size) break;
+            if (written >= t->decompressed_buf_size) break;
         }
 
-        int read_rc = streamReaderReadMoreCompressed(t);
+        int read_rc = streamReaderRefillCompressedBuf(t);
         if (read_rc < 0) {
             streamReaderSetError(t, STREAM_READER_ERROR_IO);
             if (written == 0) return -1;
@@ -705,24 +705,24 @@ static ssize_t streamReaderFillWindow(stream_reader_t *t) {
         if (read_rc == 0) break;
     }
 
-    t->window_len = written;
+    t->decompressed_buf_len = written;
     return (ssize_t)written;
 }
 
-static inline size_t streamReaderWindowAvail(const stream_reader_t *t) {
-    if (t->window_len <= t->window_pos) return 0;
-    return t->window_len - t->window_pos;
+static inline size_t streamReaderDecompressedBufAvail(const stream_reader_t *t) {
+    if (t->decompressed_buf_len <= t->decompressed_buf_pos) return 0;
+    return t->decompressed_buf_len - t->decompressed_buf_pos;
 }
 
-static size_t streamReaderCopyFromWindow(stream_reader_t *t,
-                                         uint8_t **dst,
-                                         size_t *remaining) {
-    size_t avail = streamReaderWindowAvail(t);
+static size_t streamReaderCopyFromDecompressedBuf(stream_reader_t *t,
+                                                  uint8_t **dst,
+                                                  size_t *remaining) {
+    size_t avail = streamReaderDecompressedBufAvail(t);
     if (avail == 0 || *remaining == 0) return 0;
 
     size_t to_copy = avail < *remaining ? avail : *remaining;
-    memcpy(*dst, t->window_buf + t->window_pos, to_copy);
-    t->window_pos += to_copy;
+    memcpy(*dst, t->decompressed_buf + t->decompressed_buf_pos, to_copy);
+    t->decompressed_buf_pos += to_copy;
     *dst += to_copy;
     *remaining -= to_copy;
     return to_copy;
@@ -732,10 +732,10 @@ static ssize_t streamReaderReadCompressed(stream_reader_t *t, uint8_t *dst, size
     size_t remaining = len;
     size_t total = 0;
 
-    total += streamReaderCopyFromWindow(t, &dst, &remaining);
+    total += streamReaderCopyFromDecompressedBuf(t, &dst, &remaining);
     while (remaining > 0) {
-        if (streamReaderWindowAvail(t) == 0) {
-            ssize_t filled = streamReaderFillWindow(t);
+        if (streamReaderDecompressedBufAvail(t) == 0) {
+            ssize_t filled = streamReaderFillDecompressedBuf(t);
             if (filled < 0) {
                 return streamReaderFailWithError(
                     t, total,
@@ -748,7 +748,7 @@ static ssize_t streamReaderReadCompressed(stream_reader_t *t, uint8_t *dst, size
             if (filled == 0) break;
         }
 
-        total += streamReaderCopyFromWindow(t, &dst, &remaining);
+        total += streamReaderCopyFromDecompressedBuf(t, &dst, &remaining);
         if (t->errored) break;
     }
 
@@ -792,16 +792,16 @@ int stream_reader_finish(stream_reader_t *t) {
 
     /* Any already-buffered decompressed bytes belong to the current frame, so
      * finishing can discard them in place without copying them anywhere. */
-    t->window_pos = t->window_len;
+    t->decompressed_buf_pos = t->decompressed_buf_len;
     while (!t->decompressor.frame_done) {
-        ssize_t filled = streamReaderFillWindow(t);
+        ssize_t filled = streamReaderFillDecompressedBuf(t);
         if (filled < 0) return -1;
         if (filled == 0) {
             if (t->decompressor.frame_done) break;
             streamReaderSetError(t, STREAM_READER_ERROR_CORRUPT);
             return -1;
         }
-        t->window_pos = t->window_len;
+        t->decompressed_buf_pos = t->decompressed_buf_len;
     }
     return 0;
 }
@@ -825,15 +825,15 @@ int stream_reader_get_pending_input(stream_reader_t *t, const uint8_t **buf, siz
     if (!t->probe.compressed) {
         size_t prefix_avail = streamReaderProbeAvail(t);
         if (prefix_avail > 0) {
-            *buf = t->probe.header + t->probe_pos;
+            *buf = t->probe.header + t->probe_replay_pos;
             *len = prefix_avail;
         }
         return 0;
     }
 
-    if (t->read_buf_fill > 0) {
-        *buf = t->read_buf + t->read_buf_pos;
-        *len = t->read_buf_fill;
+    if (t->compressed_buf_len > 0) {
+        *buf = t->compressed_buf + t->compressed_buf_pos;
+        *len = t->compressed_buf_len;
     }
     return 0;
 }

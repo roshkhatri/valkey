@@ -115,7 +115,7 @@ int rioInitWithCompress(compress_rio_t *cr, rio *inner, const stream_writer_conf
     memset(cr, 0, sizeof(*cr));
 
     uint64_t flags = RIO_FLAG_STREAMING_COMPRESSION;
-    if (cfg->codec_checksum) flags |= RIO_FLAG_STREAMING_CODEC_CHECKSUM;
+    if (cfg->codec_checksum_enabled) flags |= RIO_FLAG_STREAMING_CODEC_CHECKSUM;
     flags |= inner->flags & RIO_FLAG_SKIP_RDB_CHECKSUM;
 
     rioInitBase(&cr->base, rioReadUnsupported, compressRioWrite, compressRioTell,

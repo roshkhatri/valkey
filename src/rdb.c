@@ -1604,7 +1604,7 @@ static int rdbSaveInternal(int req, const char *filename, rdbSaveInfo *rsi, int 
             .algo = (compression_algo_t)server.rdb_compression_algo,
             .level = server.rdb_compression_level,
             .stream_kind = STREAM_KIND_RDB,
-            .codec_checksum = server.rdb_checksum != 0,
+            .codec_checksum_enabled = server.rdb_checksum != 0,
         };
         if (rioInitWithCompress(&cr, &rdb, &cfg) != 0) {
             errno = EIO; /* Compressor init failure — set errno for werr log */
@@ -3153,7 +3153,7 @@ decompress_rio_init_result_t rdbInputStreamPrepare(rdbInputStream *input) {
     stream_reader_config_t reader_cfg = {
         .expected_stream_kind = STREAM_KIND_RDB,
         .allow_passthrough = true,
-        .batch_size = 0,
+        .buffer_size = 0,
     };
 
     if (!input || !input->raw_rio) return DECOMPRESS_RIO_INIT_ERROR;

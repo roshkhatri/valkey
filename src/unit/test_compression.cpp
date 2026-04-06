@@ -58,23 +58,23 @@ typedef struct {
 
 static stream_reader_config_t makeReaderConfig(uint8_t expected_stream_kind,
                                                bool allow_passthrough,
-                                               size_t batch_size) {
+                                               size_t buffer_size) {
     stream_reader_config_t cfg = {};
     cfg.expected_stream_kind = expected_stream_kind;
     cfg.allow_passthrough = allow_passthrough;
-    cfg.batch_size = batch_size;
+    cfg.buffer_size = buffer_size;
     return cfg;
 }
 
 static stream_writer_config_t makeWriterConfig(compression_algo_t algo,
                                                int level,
                                                uint8_t stream_kind,
-                                               bool codec_checksum = false) {
+                                               bool codec_checksum_enabled = false) {
     stream_writer_config_t cfg = {};
     cfg.algo = algo;
     cfg.level = level;
     cfg.stream_kind = stream_kind;
-    cfg.codec_checksum = codec_checksum;
+    cfg.codec_checksum_enabled = codec_checksum_enabled;
     return cfg;
 }
 
@@ -721,7 +721,7 @@ TEST(compression, streamReaderValidatesCompressedStreamKinds) {
         uint8_t writer_kind;
         uint8_t expected_kind;
         size_t max_chunk;
-        size_t batch_size;
+        size_t buffer_size;
         bool expect_ok;
     } cases[] = {
         {"incremental RDB stream",
@@ -770,7 +770,7 @@ TEST(compression, streamReaderValidatesCompressedStreamKinds) {
         mr.data = db.data;
         mr.len = sdslen((const char *)db.data);
         mr.max_chunk = cases[i].max_chunk;
-        stream_reader_config_t rcfg = makeReaderConfig(cases[i].expected_kind, true, cases[i].batch_size);
+        stream_reader_config_t rcfg = makeReaderConfig(cases[i].expected_kind, true, cases[i].buffer_size);
         stream_reader_t *r = stream_reader_create(&rcfg, memReaderRead, &mr);
         ASSERT_TRUE(r != NULL) << cases[i].name;
 
