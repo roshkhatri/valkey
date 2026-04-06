@@ -10,16 +10,6 @@
 #include <string.h>
 #include <unistd.h>
 
-/* Flush the wrapped inner rio and map failure to the stream writer's
- * sticky error state. */
-static int compressRioFlushInner(stream_writer_t *t, rio *inner) {
-    if (inner->flush && inner->flush(inner) == 0) {
-        stream_writer_set_error(t);
-        return -1;
-    }
-    return 0;
-}
-
 /* Shared rio callbacks for unsupported/no-op operations. */
 static size_t rioReadUnsupported(rio *r, void *buf, size_t len) {
     (void)r;
@@ -108,8 +98,10 @@ static int compressRioFlush(rio *r) {
 
     if (stream_writer_flush(cr->compressor) != 0) return 0;
 
-    /* Flush inner rio */
-    if (compressRioFlushInner(cr->compressor, cr->inner) != 0) return 0;
+    if (cr->inner->flush && cr->inner->flush(cr->inner) == 0) {
+        stream_writer_set_error(cr->compressor);
+        return 0;
+    }
     return 1;
 }
 
@@ -123,7 +115,7 @@ int rioInitWithCompress(compress_rio_t *cr, rio *inner, const stream_writer_conf
     memset(cr, 0, sizeof(*cr));
 
     uint64_t flags = RIO_FLAG_STREAMING_COMPRESSION;
-    if (cfg->codec_checksum) flags |= RIO_FLAG_STREAMING_CODEC_CHECKSUM;
+    if (cfg->codec_checksum_enabled) flags |= RIO_FLAG_STREAMING_CODEC_CHECKSUM;
     flags |= inner->flags & RIO_FLAG_SKIP_RDB_CHECKSUM;
 
     rioInitBase(&cr->base, rioReadUnsupported, compressRioWrite, compressRioTell,
@@ -159,7 +151,9 @@ int compress_rio_finish(compress_rio_t *cr) {
     /* Flush inner rio to ensure all bytes reach the destination.
      * Propagate flush failure to the compressor error state so
      * callers can detect it. */
-    compressRioFlushInner(cr->compressor, cr->inner);
+    if (cr->inner->flush && cr->inner->flush(cr->inner) == 0) {
+        stream_writer_set_error(cr->compressor);
+    }
     return stream_writer_is_errored(cr->compressor) ? -1 : 0;
 }
 
@@ -178,67 +172,17 @@ void compress_rio_destroy(compress_rio_t *cr) {
  * Thin rio adapter around stream_reader_t.
  * =================================================================== */
 
+/* Read up to `len` bytes from the inner rio (partial reads allowed).
+ * Returns >0 bytes, 0 on EOF, -1 on error. */
 static ssize_t decompressRioReadPartial(void *ctx, void *buf, size_t len) {
     decompress_rio_t *dr = (decompress_rio_t *)ctx;
-    rio *inner = dr->inner;
-    uint8_t inner_type = rioCheckType(inner);
-
-    if (inner_type == RIO_TYPE_FILE) {
-        size_t got = fread(buf, 1, len, inner->io.file.fp);
-        if (got > 0) inner->processed_bytes += got;
-        return (ssize_t)got;
-    }
-    if (inner_type == RIO_TYPE_BUFFER) {
-        size_t avail = sdslen(inner->io.buffer.ptr) - inner->io.buffer.pos;
-        if (avail == 0) return 0;
-        size_t n = avail < len ? avail : len;
-        memcpy(buf, inner->io.buffer.ptr + inner->io.buffer.pos, n);
-        inner->io.buffer.pos += n;
-        inner->processed_bytes += n;
-        return (ssize_t)n;
-    }
-
-    /* conn rios: use the shared rio partial-read helper so we preserve
-     * buffered bytes and read-limit handling without forcing an exact read.
-     * rioRead is all-or-nothing and would block on a live connection
-     * when the compressed stream has ended but the connection stays
-     * open (e.g. diskless replication full sync). */
-    if (inner_type == RIO_TYPE_CONN) {
-        ssize_t nread = rioConnReadPartial(inner, buf, len);
-        if (nread > 0) inner->processed_bytes += (size_t)nread;
-        return nread;
-    }
-
-    /* fd rios are all-or-nothing via rioRead() */
-    if (rioRead(inner, buf, len) != 0) return (ssize_t)len;
-    return rioGetReadError(inner) ? -1 : 0;
-}
-
-static int decompressRioLoadInfo(decompress_rio_t *dr, stream_reader_info_t *info) {
-    stream_reader_info_t local_info;
-
-    if (!dr || !dr->reader) return -1;
-    if (stream_reader_get_info(dr->reader, &local_info) != 0) return -1;
-
-    dr->info_ready = true;
-    if (local_info.compressed) {
-        dr->base.flags |= RIO_FLAG_STREAMING_COMPRESSION;
-        if (local_info.codec_checksum_enabled) {
-            dr->base.flags |= RIO_FLAG_STREAMING_CODEC_CHECKSUM;
-        }
-    }
-    if (info) *info = local_info;
-    return 0;
+    return rioReadPartial(dr->inner, buf, len);
 }
 
 static size_t decompressRioRead(rio *r, void *buf, size_t len) {
     decompress_rio_t *dr = (decompress_rio_t *)r;
     if (dr->base.flags & RIO_FLAG_READ_ERROR) return 0;
     if (!dr->reader) {
-        dr->base.flags |= RIO_FLAG_READ_ERROR;
-        return 0;
-    }
-    if (!dr->info_ready && decompressRioLoadInfo(dr, NULL) != 0) {
         dr->base.flags |= RIO_FLAG_READ_ERROR;
         return 0;
     }
@@ -262,77 +206,76 @@ static size_t decompressRioRead(rio *r, void *buf, size_t len) {
     return len;
 }
 
-/* rio vtable: tell callback — return inner position so loading progress
- * remains based on source (compressed) bytes. */
+/* rio vtable: tell callback — report transport bytes consumed from the wrapped
+ * rio so progress and reuse handoff stay tied to source-stream position. */
 static off_t decompressRioTell(rio *r) {
     decompress_rio_t *dr = (decompress_rio_t *)r;
-    return rioTell(dr->inner);
+    return (off_t)dr->inner->processed_bytes;
 }
 
-static void decompressRioPreservePendingInput(decompress_rio_t *dr) {
+int decompress_rio_detach(decompress_rio_t *dr) {
     const uint8_t *pending = NULL;
     size_t pending_len = 0;
 
-    if (!dr || !dr->reader || !dr->inner) return;
-    if (stream_reader_finish(dr->reader) != 0) return;
-    if (stream_reader_get_pending_input(dr->reader, &pending, &pending_len) != 0) return;
-    if (!pending || pending_len == 0) return;
-
-    rio *inner = dr->inner;
-    switch (rioCheckType(inner)) {
-    case RIO_TYPE_CONN:
-        if ((size_t)inner->io.conn.pos < pending_len || inner->io.conn.read_so_far < pending_len) return;
-        inner->io.conn.pos -= pending_len;
-        inner->io.conn.read_so_far -= pending_len;
-        if (inner->processed_bytes >= pending_len) inner->processed_bytes -= pending_len;
-        break;
-    case RIO_TYPE_BUFFER:
-        if ((size_t)inner->io.buffer.pos < pending_len) return;
-        inner->io.buffer.pos -= pending_len;
-        if (inner->processed_bytes >= pending_len) inner->processed_bytes -= pending_len;
-        break;
-    case RIO_TYPE_FILE:
-        if (fseeko(inner->io.file.fp, -(off_t)pending_len, SEEK_CUR) == -1) return;
-        if (inner->processed_bytes >= pending_len) inner->processed_bytes -= pending_len;
-        break;
-    case RIO_TYPE_FD:
-        if (lseek(inner->io.fd.fd, -(off_t)pending_len, SEEK_CUR) == (off_t)-1) return;
-        if (inner->processed_bytes >= pending_len) inner->processed_bytes -= pending_len;
-        break;
-    default:
-        break;
+    if (!dr || !dr->reader || !dr->inner) return -1;
+    if (dr->detached) return 0;
+    if (stream_reader_detach(dr->reader, &pending, &pending_len) != 0) return -1;
+    if (pending && pending_len > 0 && rioUnread(dr->inner, pending_len) != 0) {
+        return -1;
     }
+    dr->detached = true;
+    return 0;
 }
 
-int decompress_rio_init_with_config(decompress_rio_t *dr, rio *inner, const stream_reader_config_t *cfg) {
-    if (!dr || !inner || !cfg) return -1;
+stream_reader_error_t decompress_rio_get_error(const decompress_rio_t *dr) {
+    if (!dr || !dr->reader) return STREAM_READER_ERROR_IO;
+    return stream_reader_get_error(dr->reader);
+}
+
+/* Initialize a decompression rio and eagerly probe the wrapped stream so the
+ * caller gets a stable classification up front: passthrough, compressed, or
+ * incompatible envelope. */
+decompress_rio_init_result_t rioInitWithDecompress(decompress_rio_t *dr,
+                                                   rio *inner,
+                                                   const stream_reader_config_t *cfg,
+                                                   stream_reader_info_t *info) {
+    stream_reader_info_t local_info = {0};
+
+    if (!dr || !inner || !cfg) return DECOMPRESS_RIO_INIT_ERROR;
 
     memset(dr, 0, sizeof(*dr));
     rioInitBase(&dr->base, decompressRioRead, rioWriteUnsupported, decompressRioTell,
-                rioFlushNoop, RIO_FLAG_STREAMING_DECOMPRESSION, rioCheckType(inner));
-    /* Preserve checksum policy negotiated on the underlying stream so
-     * passthrough full-sync loads behave the same through the wrapper. */
-    dr->base.flags |= inner->flags & RIO_FLAG_SKIP_RDB_CHECKSUM;
+                rioFlushNoop,
+                RIO_FLAG_STREAMING_DECOMPRESSION | (inner->flags & RIO_FLAG_SKIP_RDB_CHECKSUM),
+                rioCheckType(inner));
     dr->inner = inner;
 
     dr->reader = stream_reader_create(cfg, decompressRioReadPartial, dr);
     if (!dr->reader) {
         dr->base.flags |= RIO_FLAG_READ_ERROR;
-        return -1;
+        return DECOMPRESS_RIO_INIT_ERROR;
+    }
+    if (stream_reader_get_info(dr->reader, &local_info) != 0) {
+        stream_reader_error_t error_kind = stream_reader_get_error(dr->reader);
+        decompress_rio_destroy(dr);
+        return error_kind == STREAM_READER_ERROR_INCOMPATIBLE
+                   ? DECOMPRESS_RIO_INIT_INCOMPATIBLE
+                   : DECOMPRESS_RIO_INIT_ERROR;
     }
 
-    return 0;
-}
-
-int decompress_rio_get_info(decompress_rio_t *dr, stream_reader_info_t *info) {
-    if (!dr || !info) return -1;
-    return decompressRioLoadInfo(dr, info);
+    if (local_info.compressed) {
+        dr->base.flags |= RIO_FLAG_STREAMING_COMPRESSION;
+        if (local_info.codec_checksum_enabled) {
+            dr->base.flags |= RIO_FLAG_STREAMING_CODEC_CHECKSUM;
+        }
+    }
+    if (info) *info = local_info;
+    return DECOMPRESS_RIO_INIT_OK;
 }
 
 void decompress_rio_destroy(decompress_rio_t *dr) {
     if (!dr) return;
     if (dr->reader) {
-        decompressRioPreservePendingInput(dr);
         stream_reader_destroy(dr->reader);
         dr->reader = NULL;
     }

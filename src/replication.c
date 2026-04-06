@@ -2486,9 +2486,9 @@ int replicaLoadPrimaryRDBFromSocket(connection *conn, char *buf, char *eofmark, 
     stream_reader_config_t reader_cfg = {
         .expected_stream_kind = STREAM_KIND_RDB,
         .allow_passthrough = true,
-        .batch_size = 0,
+        .buffer_size = 0,
     };
-    if (decompress_rio_init_with_config(&dr, &rdb, &reader_cfg) == 0) {
+    if (rioInitWithDecompress(&dr, &rdb, &reader_cfg, NULL) == DECOMPRESS_RIO_INIT_OK) {
         load_rio = (rio *)&dr;
         dr_initialized = 1;
     } else {
@@ -2520,6 +2520,10 @@ int replicaLoadPrimaryRDBFromSocket(connection *conn, char *buf, char *eofmark, 
         }
     }
 
+    if (!loadingFailed && dr_initialized && decompress_rio_detach(&dr) != 0) {
+        serverLog(LL_WARNING, "Failed to preserve buffered bytes after full sync decompression");
+        loadingFailed = 1;
+    }
     if (dr_initialized) decompress_rio_destroy(&dr);
 
     if (loadingFailed) {
@@ -2811,7 +2815,7 @@ static int replicaReceiveRDBWithEOFToDisk(connection *conn, const char *eofmark,
     stream_reader_config_t reader_cfg = {
         .expected_stream_kind = STREAM_KIND_RDB,
         .allow_passthrough = true,
-        .batch_size = 0,
+        .buffer_size = 0,
     };
     stream_reader_t *reader = stream_reader_create(&reader_cfg, replicaReadEOFSyncPayload, &read_ctx);
     int retval = C_ERR;

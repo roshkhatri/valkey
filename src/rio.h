@@ -33,6 +33,7 @@
 #define VALKEY_RIO_H
 
 #include <stdio.h>
+#include <sys/types.h>
 #include <stdint.h>
 #include "sds.h"
 #include "connection.h"
@@ -209,6 +210,10 @@ struct serverObject;
 int rioWriteBulkObject(rio *r, struct serverObject *obj);
 
 void rioGenericUpdateChecksum(rio *r, const void *buf, size_t len);
+ssize_t rioReadPartial(rio *r, void *buf, size_t len);
+/* Rewind already-read bytes on a backend that still owns the buffered/raw
+ * transport state. This does not rewind checksum state. */
+int rioUnread(rio *r, size_t len);
 void rioSetAutoSync(rio *r, off_t bytes);
 void rioSetReclaimCache(rio *r, int enabled);
 uint8_t rioCheckType(rio *r);

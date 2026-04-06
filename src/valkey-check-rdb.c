@@ -30,7 +30,6 @@
 #include "mt19937-64.h"
 #include "server.h"
 #include "rdb.h"
-#include "compression_rio.h"
 #include "module.h"
 #include "hdr_histogram.h"
 #include "fpconv_dtoa.h"
@@ -94,6 +93,15 @@ struct {
     int stats_num;
     char *stats_output;
 } rdbstate;
+
+static unsigned long long rdbCheckOffset(void) {
+    if (!rdbstate.rio) return 0;
+
+    off_t pos = rioTell(rdbstate.rio);
+    if (pos >= 0) return (unsigned long long)pos;
+
+    return (unsigned long long)rdbstate.rio->processed_bytes;
+}
 
 /* At every loading step try to remember what we were about to do, so that
  * we can log this information when an error is encountered. */
@@ -523,7 +531,7 @@ void rdbCheckError(const char *fmt, ...) {
     va_end(ap);
 
     printf("--- RDB ERROR DETECTED ---\n");
-    printf("[offset %llu] %s\n", (unsigned long long)(rdbstate.rio ? rdbstate.rio->processed_bytes : 0), msg);
+    printf("[offset %llu] %s\n", rdbCheckOffset(), msg);
     printf("[additional info] While doing: %s\n", rdb_check_doing_string[rdbstate.doing]);
     if (rdbstate.key) printf("[additional info] Reading key '%s'\n", (char *)objectGetVal(rdbstate.key));
     if (rdbstate.key_type != -1)
@@ -552,7 +560,7 @@ void rdbCheckInfo(const char *fmt, ...) {
         va_end(ap);
     }
 
-    printf("[offset %llu] %s\n", (unsigned long long)(rdbstate.rio ? rdbstate.rio->processed_bytes : 0), msgbuf);
+    printf("[offset %llu] %s\n", rdbCheckOffset(), msgbuf);
 
     if (msgbuf != msg) sdsfree(msgbuf);
 }
@@ -605,9 +613,7 @@ int redis_check_rdb(char *rdbfilename, FILE *fp) {
     long long expiretime;
     static rio file_rdb;
     rio *rdb = &file_rdb; /* Pointed by global struct riostate. */
-    decompress_rio_t dr;
-    stream_reader_info_t stream_info = {0};
-    int dr_initialized = 0;
+    rdbInputStream input;
     struct stat sb;
 
     now = mstime();
@@ -618,26 +624,19 @@ int redis_check_rdb(char *rdbfilename, FILE *fp) {
 
     startLoadingFile(sb.st_size, rdbfilename, RDBFLAGS_NONE);
     rioInitWithFile(&file_rdb, fp);
+    rdbInputStreamInit(&input, &file_rdb);
 
     /* Support both plain RDB files and VKCS-wrapped streaming-compressed RDBs. */
-    stream_reader_config_t reader_cfg = {
-        .expected_stream_kind = STREAM_KIND_RDB,
-        .allow_passthrough = 1,
-        .batch_size = 0,
-    };
-    if (decompress_rio_init_with_config(&dr, &file_rdb, &reader_cfg) != 0) {
-        rdbCheckError("Failed to initialize RDB stream reader");
+    decompress_rio_init_result_t init_rc = rdbInputStreamPrepare(&input);
+    if (init_rc == DECOMPRESS_RIO_INIT_INCOMPATIBLE) {
+        rdbCheckError("Invalid RDB stream envelope");
         goto err;
     }
-    dr_initialized = 1;
-    rdb = (rio *)&dr;
-    if (decompress_rio_get_info(&dr, &stream_info) != 0) {
+    if (init_rc != DECOMPRESS_RIO_INIT_OK) {
         rdbCheckError("Failed to inspect RDB stream metadata");
         goto err;
     }
-    if (stream_info.compressed && stream_info.codec_checksum_enabled) {
-        rdb->flags |= RIO_FLAG_STREAMING_CODEC_CHECKSUM;
-    }
+    rdb = input.rdb_rio;
 
     rdbstate.rio = rdb;
     rdb->update_cksum = rdbLoadProgressCallback;
@@ -854,7 +853,7 @@ int redis_check_rdb(char *rdbfilename, FILE *fp) {
         }
     }
 
-    if (dr_initialized) decompress_rio_destroy(&dr);
+    rdbInputStreamDestroy(&input);
     rdbstate.rio = &file_rdb;
     if (closefile) fclose(fp);
     stopLoading(1);
@@ -863,11 +862,13 @@ int redis_check_rdb(char *rdbfilename, FILE *fp) {
 eoferr: /* unexpected end of file is handled here with a fatal exit */
     if (rdbstate.error_set) {
         rdbCheckError(rdbstate.error);
+    } else if (rdbRioHasCorruptCompressedInput(rdb)) {
+        rdbCheckError("Corrupt compressed RDB stream");
     } else {
         rdbCheckError("Unexpected EOF reading RDB file");
     }
 err:
-    if (dr_initialized) decompress_rio_destroy(&dr);
+    rdbInputStreamDestroy(&input);
     rdbstate.rio = &file_rdb;
     if (closefile) fclose(fp);
     stopLoading(0);
