@@ -685,14 +685,19 @@ static ssize_t streamReaderFillWindow(stream_reader_t *t) {
             size_t chunk_written = 0;
             if (streamReaderDrainReadBuf(t, t->window_buf + written,
                                          t->window_size - written, &chunk_written) != 0) {
-                return -1;
+                written += chunk_written;
+                break;
             }
             written += chunk_written;
             if (written >= t->window_size) break;
         }
 
         int read_rc = streamReaderReadMoreCompressed(t);
-        if (read_rc < 0) return -1;
+        if (read_rc < 0) {
+            streamReaderSetError(t, STREAM_READER_ERROR_IO);
+            if (written == 0) return -1;
+            break;
+        }
         if (read_rc == 0) break;
     }
 
@@ -740,6 +745,7 @@ static ssize_t streamReaderReadCompressed(stream_reader_t *t, uint8_t *dst, size
         }
 
         total += streamReaderCopyFromWindow(t, &dst, &remaining);
+        if (t->errored) break;
     }
 
     return (ssize_t)total;
@@ -776,17 +782,21 @@ stream_reader_error_t stream_reader_get_error(const stream_reader_t *t) {
 }
 
 int stream_reader_finish(stream_reader_t *t) {
-    uint8_t discard[256];
-
     if (!t) return -1;
     if (stream_reader_probe(t) != 0) return -1;
     if (!t->probe.compressed) return 0;
 
+    /* Any already-buffered decompressed bytes belong to the current frame, so
+     * finishing can discard them in place without copying them anywhere. */
+    t->window_pos = t->window_len;
     while (!t->decompressor.frame_done) {
-        ssize_t nread = streamReaderReadCompressed(t, discard, sizeof(discard));
-        if (nread < 0) return -1;
-        if (t->errored) return -1;
-        if (nread == 0 && !t->decompressor.frame_done) return -1;
+        ssize_t filled = streamReaderFillWindow(t);
+        if (filled < 0) return -1;
+        if (filled == 0) {
+            streamReaderSetError(t, STREAM_READER_ERROR_CORRUPT);
+            return -1;
+        }
+        t->window_pos = t->window_len;
     }
     return 0;
 }
