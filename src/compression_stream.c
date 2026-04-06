@@ -444,15 +444,11 @@ struct stream_reader {
     stream_decompressor_t decompressor;
     bool decompressor_initialized;
 
-    uint8_t *io_buf_slab; /* Combined allocation for compressed input + decompressed output buffers */
-
     uint8_t *compressed_buf; /* Buffered compressed input */
-    size_t compressed_buf_size;
     size_t compressed_buf_pos;
     size_t compressed_buf_len;
 
     uint8_t *decompressed_buf; /* Buffered decompressed output for small caller reads */
-    size_t decompressed_buf_size;
     size_t decompressed_buf_pos;
     size_t decompressed_buf_len;
 };
@@ -478,20 +474,15 @@ static ssize_t streamReaderFailWithError(stream_reader_t *t,
 }
 
 static int streamReaderInitCompressedState(stream_reader_t *t, size_t buffer_size) {
-    if (buffer_size > SIZE_MAX / 2) return -1;
-
     if (streamDecompressorInit(&t->decompressor, t->probe.algo) != 0) {
         return -1;
     }
     t->decompressor_initialized = true;
 
-    t->io_buf_slab = zmalloc(buffer_size * 2);
-    t->compressed_buf = t->io_buf_slab;
-    t->decompressed_buf = t->io_buf_slab + buffer_size;
-    t->compressed_buf_size = buffer_size;
+    t->compressed_buf = zmalloc(buffer_size);
     t->compressed_buf_pos = 0;
     t->compressed_buf_len = 0;
-    t->decompressed_buf_size = buffer_size;
+    t->decompressed_buf = zmalloc(buffer_size);
     t->decompressed_buf_pos = 0;
     t->decompressed_buf_len = 0;
     return 0;
@@ -502,16 +493,16 @@ static void streamReaderResetCompressedState(stream_reader_t *t) {
         streamDecompressorDestroy(&t->decompressor);
         t->decompressor_initialized = false;
     }
-    if (t->io_buf_slab) {
-        zfree(t->io_buf_slab);
-        t->io_buf_slab = NULL;
+    if (t->compressed_buf) {
+        zfree(t->compressed_buf);
+        t->compressed_buf = NULL;
     }
-    t->compressed_buf = NULL;
-    t->decompressed_buf = NULL;
-    t->compressed_buf_size = 0;
     t->compressed_buf_pos = 0;
     t->compressed_buf_len = 0;
-    t->decompressed_buf_size = 0;
+    if (t->decompressed_buf) {
+        zfree(t->decompressed_buf);
+        t->decompressed_buf = NULL;
+    }
     t->decompressed_buf_pos = 0;
     t->decompressed_buf_len = 0;
 }
@@ -641,18 +632,18 @@ static int streamReaderDrainCompressedBuf(stream_reader_t *t,
 }
 
 static size_t streamReaderCompressedBufTailSpace(stream_reader_t *t) {
-    size_t tail_space = t->compressed_buf_size - t->compressed_buf_pos - t->compressed_buf_len;
+    size_t tail_space = t->buffer_size - t->compressed_buf_pos - t->compressed_buf_len;
     if (tail_space > 0) return tail_space;
 
     if (t->compressed_buf_len == 0) {
         t->compressed_buf_pos = 0;
-        return t->compressed_buf_size;
+        return t->buffer_size;
     }
 
     if (t->compressed_buf_pos > 0) {
         memmove(t->compressed_buf, t->compressed_buf + t->compressed_buf_pos, t->compressed_buf_len);
         t->compressed_buf_pos = 0;
-        return t->compressed_buf_size - t->compressed_buf_len;
+        return t->buffer_size - t->compressed_buf_len;
     }
 
     /* The generic stream reader intentionally keeps a fixed-size compressed
@@ -685,16 +676,16 @@ static ssize_t streamReaderFillDecompressedBuf(stream_reader_t *t) {
     t->decompressed_buf_pos = 0;
     t->decompressed_buf_len = 0;
 
-    while (written < t->decompressed_buf_size) {
+    while (written < t->buffer_size) {
         if (t->compressed_buf_len > 0) {
             size_t chunk_written = 0;
             if (streamReaderDrainCompressedBuf(t, t->decompressed_buf + written,
-                                               t->decompressed_buf_size - written, &chunk_written) != 0) {
+                                               t->buffer_size - written, &chunk_written) != 0) {
                 written += chunk_written;
                 break;
             }
             written += chunk_written;
-            if (written >= t->decompressed_buf_size) break;
+            if (written >= t->buffer_size) break;
         }
 
         int read_rc = streamReaderRefillCompressedBuf(t);
