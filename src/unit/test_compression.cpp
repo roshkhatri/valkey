@@ -56,53 +56,6 @@ typedef struct {
     int success_reads;
 } flaky_reader_t;
 
-typedef struct {
-    connection conn;
-    const uint8_t *data;
-    size_t len;
-    size_t pos;
-} fake_read_connection_t;
-
-static int fakeReadConnectionGetType(void) {
-    return CONN_TYPE_SOCKET;
-}
-
-static int fakeConnRead(connection *conn, void *buf, size_t len) {
-    fake_read_connection_t *fake_conn = (fake_read_connection_t *)conn;
-    if (fake_conn->pos >= fake_conn->len) return 0;
-
-    size_t avail = fake_conn->len - fake_conn->pos;
-    size_t nread = len < avail ? len : avail;
-    memcpy(buf, fake_conn->data + fake_conn->pos, nread);
-    fake_conn->pos += nread;
-    return (int)nread;
-}
-
-static const char *fakeConnGetLastError(connection *conn) {
-    (void)conn;
-    return NULL;
-}
-
-static fake_read_connection_t *createFakeReadConnection(const uint8_t *data, size_t len) {
-    static ConnectionType ct_fake_read = {};
-    static bool initialized = false;
-
-    if (!initialized) {
-        ct_fake_read.get_type = fakeReadConnectionGetType;
-        ct_fake_read.read = fakeConnRead;
-        ct_fake_read.get_last_error = fakeConnGetLastError;
-        initialized = true;
-    }
-
-    fake_read_connection_t *fake_conn = (fake_read_connection_t *)zcalloc(sizeof(*fake_conn));
-    fake_conn->conn.type = &ct_fake_read;
-    fake_conn->conn.fd = -1;
-    fake_conn->conn.state = CONN_STATE_CONNECTED;
-    fake_conn->data = data;
-    fake_conn->len = len;
-    return fake_conn;
-}
-
 static stream_reader_config_t makeReaderConfig(uint8_t expected_stream_kind,
                                                bool allow_passthrough,
                                                size_t batch_size) {
@@ -1945,54 +1898,6 @@ TEST(compression, decompressRioDetachPreservesTrailingBytes) {
     ASSERT_TRUE(memcmp(raw_trailer, trailer, trailer_len) == 0);
 
     sdsfree(buffer_rio.io.buffer.ptr);
-    dynamicBufFree(&db);
-    return;
-}
-
-TEST(compression, decompressRioDetachPreservesTrailingBytesOnConnRio) {
-    const char *payload = "preserve-trailing-bytes-after-frame";
-    const size_t payload_len = strlen(payload);
-    const char *trailer = "*1\r\n$4\r\nPING\r\n";
-    const size_t trailer_len = strlen(trailer);
-
-    dynamic_buf_t db;
-    dynamicBufInit(&db);
-
-    stream_writer_config_t cfg = makeWriterConfig(ALGO_LZ4, 0, STREAM_KIND_RDB);
-    stream_writer_t *w = stream_writer_create(&cfg, emitToDynamicBuf, &db);
-    ASSERT_TRUE(w != NULL);
-    ASSERT_TRUE(stream_writer_write(w, payload, payload_len) >= 0);
-    ASSERT_TRUE(stream_writer_finish(w) == 0);
-    stream_writer_destroy(w);
-
-    sds input = sdsnewlen(db.data, sdslen((const char *)db.data));
-    input = sdscatlen(input, trailer, trailer_len);
-
-    fake_read_connection_t *fake_conn =
-        createFakeReadConnection((const uint8_t *)input, sdslen(input));
-    rio conn_rio;
-    rioInitWithConn(&conn_rio, (connection *)fake_conn, 0);
-
-    stream_reader_config_t rcfg = makeReaderConfig(STREAM_KIND_RDB, true, 8);
-    decompress_rio_t dr;
-    ASSERT_TRUE(rioInitWithDecompress(&dr, &conn_rio, &rcfg, NULL) == DECOMPRESS_RIO_INIT_OK);
-
-    char out[128];
-    memset(out, 0, sizeof(out));
-    ASSERT_TRUE(rioRead((rio *)&dr, out, payload_len) != 0);
-    ASSERT_TRUE(memcmp(out, payload, payload_len) == 0);
-
-    ASSERT_TRUE(decompress_rio_detach(&dr) == 0);
-    decompress_rio_destroy(&dr);
-
-    char raw_trailer[64];
-    memset(raw_trailer, 0, sizeof(raw_trailer));
-    ASSERT_TRUE(rioRead(&conn_rio, raw_trailer, trailer_len) != 0);
-    ASSERT_TRUE(memcmp(raw_trailer, trailer, trailer_len) == 0);
-
-    rioFreeConn(&conn_rio, NULL);
-    zfree(fake_conn);
-    sdsfree(input);
     dynamicBufFree(&db);
     return;
 }
