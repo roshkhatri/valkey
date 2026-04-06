@@ -444,7 +444,7 @@ struct stream_reader {
     stream_decompressor_t decompressor;
     bool decompressor_initialized;
 
-    uint8_t *io_buf_slab;    /* Combined allocation for compressed input + decompressed output buffers */
+    uint8_t *io_buf_slab; /* Combined allocation for compressed input + decompressed output buffers */
 
     uint8_t *compressed_buf; /* Buffered compressed input */
     size_t compressed_buf_size;
