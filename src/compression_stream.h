@@ -37,10 +37,10 @@ typedef int (*vkcs_emit_fn)(void *ctx, const uint8_t *data, size_t len);
 
 /* Streaming writer config. */
 typedef struct {
-    compression_algo_t algo;
-    int level;
-    uint8_t stream_kind; /* Concrete on-wire stream kind. */
-    bool codec_checksum; /* Enable codec-native integrity checks when supported. */
+    compression_algo_t algo; /* Compression algorithm for this stream. */
+    int level;               /* Codec-specific compression level; ignored when unsupported. */
+    uint8_t stream_kind;     /* Application-defined stream kind stored in the VKCS envelope. */
+    bool codec_checksum;     /* Enable codec-native integrity checks when supported. */
 } stream_writer_config_t;
 
 /* Streaming reader config.
@@ -50,21 +50,22 @@ typedef struct {
  * - batch_size=0: uses the internal default fixed buffer/window size
  * - batch_size>0: clamped to an internal minimum before allocating buffers */
 typedef struct {
-    uint8_t expected_stream_kind; /* Concrete stream kind to enforce for compressed input. */
-    bool allow_passthrough;       /* true => non-VKCS input is passed through */
-    size_t batch_size;            /* Fixed compressed read buffer and output window size; 0 => internal default */
+    uint8_t expected_stream_kind; /* Required VKCS stream kind when the input is compressed. */
+    bool allow_passthrough;       /* true => non-VKCS input is treated as raw bytes instead of an error. */
+    size_t batch_size;            /* Fixed compressed input buffer and decompressed output window size; 0 => internal default. */
 } stream_reader_config_t;
 
-/* Opaque writer context owned by the streaming writer API. */
+/* Opaque streaming writer context. */
 typedef struct stream_writer stream_writer_t;
-/* Opaque reader context owned by the streaming reader API. */
+/* Opaque streaming reader context. */
 typedef struct stream_reader stream_reader_t;
 
+/* Stream metadata returned after probing. */
 typedef struct {
-    bool compressed;             /* true => stream is VKCS+codec compressed, false => passthrough */
+    bool compressed;             /* true => input was classified as VKCS-compressed, false => passthrough. */
     bool codec_checksum_enabled; /* Parsed VKCS checksum policy. Ignore when compressed is false. */
-    compression_algo_t algo;
-    uint8_t stream_kind; /* Parsed VKCS kind. Ignore when compressed is false. */
+    compression_algo_t algo;     /* Parsed compression algorithm, or ALGO_NONE for passthrough. */
+    uint8_t stream_kind;         /* Parsed VKCS stream kind. Ignore when compressed is false. */
 } stream_reader_info_t;
 
 typedef enum {

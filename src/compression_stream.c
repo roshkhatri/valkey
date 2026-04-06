@@ -18,11 +18,13 @@ typedef enum {
     VKCS_PROBE_ERROR = 3,
 } vkcs_probe_result_t;
 
+/* Probe options. */
 typedef struct {
     bool allow_passthrough;
     uint8_t expected_stream_kind;
 } vkcs_probe_config_t;
 
+/* Probe state. */
 typedef struct {
     uint8_t header[VKCS_ENVELOPE_SIZE];
     size_t header_len;
@@ -239,6 +241,7 @@ static vkcs_probe_result_t vkcsProbeFeed(vkcs_probe_t *probe,
 
 #define STREAM_WRITER_INPUT_CHUNK_SIZE (1024 * 1024)
 
+/* Streaming writer context. */
 struct stream_writer {
     stream_compressor_t compressor;
     uint8_t *out_buf;     /* Reusable output buffer, sized via streamCompressOutputBound */
@@ -426,6 +429,7 @@ void stream_writer_set_error(stream_writer_t *t) {
     t->errored = true;
 }
 
+/* Streaming reader context. */
 struct stream_reader {
     stream_reader_read_fn read_cb; /* Returns >0 bytes, 0 EOF, -1 error */
     void *read_ctx;

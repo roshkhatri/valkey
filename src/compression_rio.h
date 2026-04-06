@@ -10,7 +10,7 @@
 #include "compression_stream.h"
 #include "rio.h"
 
-/* --- Compression rio decorator (RDB save) --- */
+/* Compression rio wrapper. */
 typedef struct {
     rio base; /* Must be first — allows casting to (rio *) */
     rio *inner;
@@ -18,7 +18,7 @@ typedef struct {
     bool finalized;
 } compress_rio_t;
 
-/* --- Decompression rio decorator (RDB load) --- */
+/* Decompression rio wrapper. */
 typedef struct {
     rio base; /* Must be first */
     rio *inner;
