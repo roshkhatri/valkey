@@ -793,6 +793,7 @@ int stream_reader_finish(stream_reader_t *t) {
         ssize_t filled = streamReaderFillWindow(t);
         if (filled < 0) return -1;
         if (filled == 0) {
+            if (t->decompressor.frame_done) break;
             streamReaderSetError(t, STREAM_READER_ERROR_CORRUPT);
             return -1;
         }
