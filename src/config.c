@@ -180,6 +180,7 @@ configEnum rdb_version_check_enum[] = {{"strict", RDB_VERSION_CHECK_STRICT},
 
 configEnum rdb_compression_algo_enum[] = {{"lzf", ALGO_LZF},
                                           {"lz4", ALGO_LZ4},
+                                          {"zstd", ALGO_ZSTD},
                                           {NULL, 0}};
 
 /* Default for rdb-compression-level.
@@ -3280,7 +3281,7 @@ static int validateRdbCompressionSettings(const char **err) {
 static int validateRdbCompressionSettingsFinal(const char **err) {
     if (!compressionAlgoSupportsLevel((compression_algo_t)server.rdb_compression_algo) &&
         server.rdb_compression_level != RDB_COMPRESSION_LEVEL_DEFAULT) {
-        *err = "rdb-compression-level is supported only for compression algorithms that accept a level (currently: lz4)";
+        *err = "rdb-compression-level is supported only for compression algorithms that accept a level (currently: lz4, zstd)";
         return 0;
     }
     return 1;

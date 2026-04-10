@@ -45,7 +45,7 @@ typedef struct {
  *
  * Returns 0 on success, -1 on error (invalid codec or emit_cb failure). */
 static bool vkcsCodecIsSupported(vkcs_codec_t codec) {
-    return codec == VKCS_CODEC_LZ4;
+    return codec == VKCS_CODEC_LZ4 || codec == VKCS_CODEC_ZSTD;
 }
 
 static bool vkcsProbeHasMagicPrefix(const vkcs_probe_t *probe) {
@@ -78,6 +78,9 @@ static int compressionAlgoToVkcsCodec(compression_algo_t algo, vkcs_codec_t *cod
     case ALGO_LZ4:
         *codec = VKCS_CODEC_LZ4;
         return 0;
+    case ALGO_ZSTD:
+        *codec = VKCS_CODEC_ZSTD;
+        return 0;
     default:
         return -1;
     }
@@ -87,6 +90,9 @@ static int vkcsCodecToCompressionAlgo(vkcs_codec_t codec, compression_algo_t *al
     switch (codec) {
     case VKCS_CODEC_LZ4:
         *algo = ALGO_LZ4;
+        return 0;
+    case VKCS_CODEC_ZSTD:
+        *algo = ALGO_ZSTD;
         return 0;
     default:
         return -1;

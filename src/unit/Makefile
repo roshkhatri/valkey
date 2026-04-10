@@ -95,6 +95,7 @@ JEMALLOC_LIB := ../../deps/jemalloc/lib/libjemalloc.a
 HDR_HISTOGRAM_LIB := ../../deps/hdr_histogram/libhdrhistogram.a
 FPCONV_LIB := ../../deps/fpconv/libfpconv.a
 LZ4_LIB := ../../deps/lz4/liblz4.a
+ZSTD_LIB := ../../deps/zstd/libzstd.a
 TLS_LIBS := ../../deps/libvalkey/lib/libvalkey_tls.a -lssl -lcrypto
 GTEST_CFLAGS ?=
 GTEST_LIBS   ?=
@@ -159,7 +160,8 @@ LD_LIBS := $(HIREDIS_LIB) \
 	$(GTEST_LIBS) \
 	$(HDR_HISTOGRAM_LIB) \
 	$(FPCONV_LIB) \
-	$(LZ4_LIB)
+	$(LZ4_LIB) \
+	$(ZSTD_LIB)
 
 # Add libbacktrace support if enabled
 ifeq ($(USE_LIBBACKTRACE),yes)

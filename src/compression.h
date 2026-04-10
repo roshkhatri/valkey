@@ -17,6 +17,7 @@ typedef enum {
     ALGO_NONE = 0x00, /* Disabled */
     ALGO_LZF = 0x01,  /* Per-string LZF (RDB only, existing behavior) */
     ALGO_LZ4 = 0x02,
+    ALGO_ZSTD = 0x03,
 } compression_algo_t;
 
 /* --- Flush modes for streaming compression --- */

@@ -22,6 +22,7 @@
 
 typedef enum {
     VKCS_CODEC_LZ4 = 0x01,
+    VKCS_CODEC_ZSTD = 0x02,
 } vkcs_codec_t;
 
 /* Emit callback used by the VKCS envelope and streaming writer. */

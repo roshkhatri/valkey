@@ -283,6 +283,7 @@ include_directories("${CMAKE_SOURCE_DIR}/deps/linenoise")
 include_directories("${CMAKE_SOURCE_DIR}/deps/hdr_histogram")
 include_directories("${CMAKE_SOURCE_DIR}/deps/fpconv")
 include_directories("${CMAKE_SOURCE_DIR}/deps/lz4")
+include_directories("${CMAKE_SOURCE_DIR}/deps/zstd")
 
 add_subdirectory("${CMAKE_SOURCE_DIR}/deps")
 
