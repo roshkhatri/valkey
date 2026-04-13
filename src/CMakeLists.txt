@@ -12,6 +12,7 @@ list(APPEND SERVER_LIBS "fpconv")
 list(APPEND SERVER_LIBS "hdr_histogram")
 list(APPEND SERVER_LIBS "ffc")
 list(APPEND SERVER_LIBS "lz4")
+list(APPEND SERVER_LIBS "zstd")
 valkey_build_and_install_bin(valkey-server "${VALKEY_SERVER_SRCS}" "${VALKEY_SERVER_LDFLAGS}" "${SERVER_LIBS}"
                              "redis-server")
 add_dependencies(valkey-server generate_commands_def)
