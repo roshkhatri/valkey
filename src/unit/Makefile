@@ -96,7 +96,9 @@ HDR_HISTOGRAM_LIB := ../../deps/hdr_histogram/libhdrhistogram.a
 FPCONV_LIB := ../../deps/fpconv/libfpconv.a
 LZ4_LIB := ../../deps/lz4/liblz4.a
 ZSTD_LIB := ../../deps/zstd/libzstd.a
+TLS_ARCHIVE := ../../deps/libvalkey/lib/libvalkey_tls.a
 TLS_LIBS := ../../deps/libvalkey/lib/libvalkey_tls.a -lssl -lcrypto
+UNIT_LIB_DEPS = $(HIREDIS_LIB) $(JEMALLOC_LIB) $(HDR_HISTOGRAM_LIB) $(FPCONV_LIB) $(LZ4_LIB) $(ZSTD_LIB)
 GTEST_CFLAGS ?=
 GTEST_LIBS   ?=
 ifeq ($(strip $(GTEST_LIBS)),)
@@ -143,8 +145,30 @@ endif
 $(VALKEY_SERVER_LIB): make-prerequisites
 	cd .. && $(MAKE) libvalkey.a
 
+$(HIREDIS_LIB): make-prerequisites
+	cd ../../deps && $(MAKE) libvalkey
+
+$(JEMALLOC_LIB): make-prerequisites
+	cd ../../deps && $(MAKE) jemalloc
+
+$(HDR_HISTOGRAM_LIB): make-prerequisites
+	cd ../../deps && $(MAKE) hdr_histogram
+
+$(FPCONV_LIB): make-prerequisites
+	cd ../../deps && $(MAKE) fpconv
+
+$(LZ4_LIB): make-prerequisites
+	cd ../../deps && $(MAKE) lz4
+
 $(ZSTD_LIB): make-prerequisites
 	cd ../../deps && $(MAKE) zstd
+
+ifeq ($(BUILD_TLS),yes)
+UNIT_LIB_DEPS += $(TLS_ARCHIVE)
+
+$(TLS_ARCHIVE): make-prerequisites
+	cd ../../deps && $(MAKE) libvalkey
+endif
 
 # Ensure parent prerequisites are built
 .PHONY: make-prerequisites
@@ -208,14 +232,14 @@ generated_wrappers.o: generated_wrappers.cpp
 
 # Generate the single test binary in parent directory.
 ifeq ($(uname_S), Darwin)
-valkey-unit-gtests: $(ALL_OBJECTS) generated_wrappers.o $(VALKEY_SERVER_WRAP_LIB) $(ZSTD_LIB) $(FINAL_LIBS)
+valkey-unit-gtests: $(ALL_OBJECTS) generated_wrappers.o $(VALKEY_SERVER_WRAP_LIB) $(UNIT_LIB_DEPS) $(FINAL_LIBS)
 	$(CXX) -g $(LDFLAGS) -fno-lto \
 		-Wl,-flat_namespace -Wl,-undefined,dynamic_lookup \
 		-Wall -Wno-deprecated-declarations \
 		-o $@ $^ $(LD_LIBS) \
 		-lm -pthread -ldl
 else
-valkey-unit-gtests: $(ALL_OBJECTS) generated_wrappers.o $(VALKEY_SERVER_LIB) $(ZSTD_LIB) $(FINAL_LIBS)
+valkey-unit-gtests: $(ALL_OBJECTS) generated_wrappers.o $(VALKEY_SERVER_LIB) $(UNIT_LIB_DEPS) $(FINAL_LIBS)
 	$(CXX) -g $(LDFLAGS) -fno-lto \
 		$(OVERRIDES) \
 		-Wall -Wno-deprecated-declarations \

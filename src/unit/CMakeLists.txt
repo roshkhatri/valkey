@@ -138,6 +138,7 @@ target_link_libraries(
     valkeylib-gtest
     fpconv
     lz4
+    zstd
     lualib
     hdr_histogram
     valkey::valkey

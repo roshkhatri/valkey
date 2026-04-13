@@ -2509,20 +2509,20 @@ int replicaLoadPrimaryRDBFromSocket(connection *conn, char *buf, char *eofmark, 
         serverLog(LL_WARNING, "Failed trying to load the PRIMARY synchronization DB "
                               "from socket, check server logs.");
         loadingFailed = 1;
-    } else if (*usemark) {
-        /* The trailing EOF marker is inside the compressed envelope (when
-         * compression is active) so read it through the same rio used for
-         * the RDB payload.  In passthrough/uncompressed mode load_rio ==
-         * &rdb so this is equivalent to the original path. */
-        if (!rioRead(load_rio, buf, RDB_EOF_MARK_SIZE) || memcmp(buf, eofmark, RDB_EOF_MARK_SIZE) != 0) {
-            serverLog(LL_WARNING, "Replication stream EOF marker is broken");
-            loadingFailed = 1;
-        }
     }
 
     if (!loadingFailed && dr_initialized && decompress_rio_detach(&dr) != 0) {
         serverLog(LL_WARNING, "Failed to preserve buffered bytes after full sync decompression");
         loadingFailed = 1;
+    }
+    if (!loadingFailed && *usemark) {
+        /* The EOF marker stays on the raw transport even when the RDB payload
+         * is compressed. Detach buffered trailing bytes first so rioRead()
+         * sees the exact raw marker that follows the snapshot. */
+        if (!rioRead(&rdb, buf, RDB_EOF_MARK_SIZE) || memcmp(buf, eofmark, RDB_EOF_MARK_SIZE) != 0) {
+            serverLog(LL_WARNING, "Replication stream EOF marker is broken");
+            loadingFailed = 1;
+        }
     }
     if (dr_initialized) decompress_rio_destroy(&dr);
 
@@ -2761,10 +2761,6 @@ int tryReadBulkPayload(connection *conn, char *buf, int usemark, ssize_t *nread_
     return C_OK;
 }
 
-typedef struct {
-    connection *conn;
-} replicaFullSyncReadCtx;
-
 static int replicaWriteRDBChunkToDisk(const char *buf, size_t len, off_t *repl_transfer_last_fsync_off) {
     size_t total_written = 0;
 
@@ -2789,92 +2785,6 @@ static int replicaWriteRDBChunkToDisk(const char *buf, size_t len, off_t *repl_t
 
     return C_OK;
 }
-
-static ssize_t replicaReadEOFSyncPayload(void *ctx, void *buf, size_t len) {
-    replicaFullSyncReadCtx *read_ctx = ctx;
-
-    while (1) {
-        if (server.replica_bio_abort_save) return -1;
-
-        ssize_t nread = connRead(read_ctx->conn, buf, len);
-        if (nread > 0) {
-            server.bio_stat_net_repl_input_bytes += nread;
-            server.repl_transfer_lastio = server.unixtime;
-            return nread;
-        }
-
-        if (connGetState(read_ctx->conn) != CONN_STATE_CONNECTED) return -1;
-    }
-}
-
-static int replicaReceiveRDBWithEOFToDisk(connection *conn, const char *eofmark, off_t *repl_transfer_last_fsync_off) {
-    char decoded[PROTO_IOBUF_LEN];
-    char pending[PROTO_IOBUF_LEN + RDB_EOF_MARK_SIZE];
-    size_t pending_len = 0;
-    replicaFullSyncReadCtx read_ctx = {.conn = conn};
-    stream_reader_config_t reader_cfg = {
-        .expected_stream_kind = STREAM_KIND_RDB,
-        .allow_passthrough = true,
-        .buffer_size = 0,
-    };
-    stream_reader_t *reader = stream_reader_create(&reader_cfg, replicaReadEOFSyncPayload, &read_ctx);
-    int retval = C_ERR;
-
-    if (!reader) {
-        replicaBioSaveServerLog(LL_WARNING, "Failed to initialize EOF full-sync stream reader");
-        return C_ERR;
-    }
-
-    if (stream_reader_probe(reader) != 0) {
-        replicaBioSaveServerLog(LL_WARNING, "Failed to probe EOF full-sync stream");
-        goto cleanup;
-    }
-
-    stream_reader_info_t info;
-    if (stream_reader_get_info(reader, &info) != 0) {
-        replicaBioSaveServerLog(LL_WARNING, "Failed to inspect EOF full-sync stream");
-        goto cleanup;
-    }
-    if (info.compressed) {
-        replicaBioSaveServerLog(LL_NOTICE, "PRIMARY <-> REPLICA sync: decoding compressed EOF stream to disk");
-    }
-
-    while (1) {
-        ssize_t nread = stream_reader_read(reader, decoded, sizeof(decoded));
-        if (nread < 0) {
-            replicaBioSaveServerLog(LL_WARNING, "Error reading EOF full-sync payload");
-            goto cleanup;
-        }
-        if (nread == 0) {
-            replicaBioSaveServerLog(LL_WARNING, "Unexpected EOF reading EOF full-sync payload");
-            goto cleanup;
-        }
-
-        memcpy(pending + pending_len, decoded, nread);
-        pending_len += nread;
-        if (pending_len < RDB_EOF_MARK_SIZE) continue;
-
-        if (memcmp(pending + pending_len - RDB_EOF_MARK_SIZE, eofmark, RDB_EOF_MARK_SIZE) == 0) {
-            if (replicaWriteRDBChunkToDisk(pending, pending_len - RDB_EOF_MARK_SIZE, repl_transfer_last_fsync_off) == C_ERR) {
-                goto cleanup;
-            }
-            retval = C_OK;
-            goto cleanup;
-        }
-
-        size_t flush_len = pending_len - RDB_EOF_MARK_SIZE;
-        if (replicaWriteRDBChunkToDisk(pending, flush_len, repl_transfer_last_fsync_off) == C_ERR) {
-            goto cleanup;
-        }
-        memmove(pending, pending + flush_len, RDB_EOF_MARK_SIZE);
-        pending_len = RDB_EOF_MARK_SIZE;
-    }
-
-cleanup:
-    stream_reader_destroy(reader);
-    return retval;
-}
-
 void replicaReceiveRDBFromPrimaryToDisk(connection *conn, int is_dual_channel) {
     int usemark;
     char lastbytes[RDB_EOF_MARK_SIZE];
@@ -2913,10 +2823,6 @@ void replicaReceiveRDBFromPrimaryToDisk(connection *conn, int is_dual_channel) {
     if (server.bio_repl_transfer_size == 0) {
         /* 0 bytes means we don't know the size of the payload beforehand, we will read until we see EOF */
         replicaBioSaveServerLog(LL_NOTICE, "PRIMARY <-> REPLICA sync: receiving streamed RDB from primary with EOF to disk");
-        if (replicaReceiveRDBWithEOFToDisk(conn, eofmark, &repl_transfer_last_fsync_off) == C_ERR) {
-            error = 1;
-        }
-        goto done;
     } else {
         replicaBioSaveServerLog(LL_NOTICE, "PRIMARY <-> REPLICA sync: receiving %lld bytes from primary to disk", (long long)server.bio_repl_transfer_size);
     }
@@ -2938,6 +2844,20 @@ void replicaReceiveRDBFromPrimaryToDisk(connection *conn, int is_dual_channel) {
             goto done;
         }
 
+        /* When a mark is used, detect EOF on the raw transport so the dump
+         * file stores only the snapshot bytes and excludes the replication
+         * delimiter. */
+        if (usemark) {
+            if (nread >= RDB_EOF_MARK_SIZE) {
+                memcpy(lastbytes, buf + nread - RDB_EOF_MARK_SIZE, RDB_EOF_MARK_SIZE);
+            } else {
+                int rem = RDB_EOF_MARK_SIZE - nread;
+                memmove(lastbytes, lastbytes + nread, rem);
+                memcpy(lastbytes + rem, buf, nread);
+            }
+            eof_reached = (memcmp(lastbytes, eofmark, RDB_EOF_MARK_SIZE) == 0);
+        }
+
         /* Update the last I/O time for the replication transfer (used in
          * order to detect timeouts during replication). */
         server.repl_transfer_lastio = server.unixtime;
@@ -2946,6 +2866,17 @@ void replicaReceiveRDBFromPrimaryToDisk(connection *conn, int is_dual_channel) {
         if (replicaWriteRDBChunkToDisk(buf, nread, &repl_transfer_last_fsync_off) == C_ERR) {
             error = 1;
             goto done;
+        }
+
+        if (usemark && eof_reached) {
+            if (ftruncate(server.repl_transfer_fd, server.bio_repl_transfer_read - RDB_EOF_MARK_SIZE) == -1) {
+                replicaBioSaveServerLog(LL_WARNING,
+                                        "Error truncating the RDB file received from the primary "
+                                        "for SYNC: %s",
+                                        strerror(errno));
+                error = 1;
+                goto done;
+            }
         }
 
         /* Check if the transfer is now complete */

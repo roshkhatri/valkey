@@ -1564,11 +1564,10 @@ int rdbSaveRioWithEOFMark(int req, int rdbver, rio *rdb, int *error, rdbSaveInfo
     if (rioWrite(rdb, "\r\n", 2) == 0) goto werr;
 
     /* When replication compression is enabled and all target replicas support
-     * it, wrap the RDB payload AND trailing EOF marker in a VKCS+LZ4
-     * compressed stream.  The $EOF: prefix stays uncompressed so the replica
-     * can detect the streaming format.  The trailing EOF marker is inside the
-     * compressed envelope so the stream reader's greedy buffering does not
-     * consume it from the wire before the decompressor sees it. */
+     * it, wrap the RDB payload in a VKCS-compressed stream. The transport
+     * framing prefix and trailing EOF marker stay uncompressed so EOF-based
+     * full sync can still delimit the raw snapshot on the wire, while replicas
+     * can persist the compressed snapshot to disk unchanged. */
     if (use_transport_compression && compressionAlgoSupportsStreaming((compression_algo_t)server.repl_compression_algo)) {
         stream_writer_config_t cfg = {
             .algo = (compression_algo_t)server.repl_compression_algo,
@@ -1585,8 +1584,6 @@ int rdbSaveRioWithEOFMark(int req, int rdbver, rio *rdb, int *error, rdbSaveInfo
     }
 
     if (rdbSaveRio(req, rdbver, save_rio, error, RDBFLAGS_REPLICATION, rsi) == C_ERR) goto werr;
-    /* Write trailing EOF marker through the same rio (compressed or plain). */
-    if (rioWrite(save_rio, eofmark, RDB_EOF_MARK_SIZE) == 0) goto werr;
 
     if (cr_initialized) {
         if (compress_rio_finish(&cr) != 0) {
@@ -1598,6 +1595,8 @@ int rdbSaveRioWithEOFMark(int req, int rdbver, rio *rdb, int *error, rdbSaveInfo
         compress_rio_destroy(&cr);
         cr_initialized = 0;
     }
+
+    if (rioWrite(rdb, eofmark, RDB_EOF_MARK_SIZE) == 0) goto werr;
 
     stopSaving(1);
     return C_OK;
