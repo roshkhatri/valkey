@@ -2086,7 +2086,7 @@ TEST(compression, zstdStreamCompressDecompressRoundTrip) {
     stream_compressor_t sc;
     ASSERT_TRUE(streamCompressorInit(&sc, ALGO_ZSTD, 0) == 0);
 
-    size_t bound = streamCompressOutputBound(&sc, input_len);
+    size_t bound = streamCompressOutputBound(&sc, input_len, FLUSH_END);
     ASSERT_TRUE(bound > 0);
 
     uint8_t *compressed = (uint8_t *)zmalloc(bound);

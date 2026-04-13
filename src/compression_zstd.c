@@ -46,12 +46,14 @@ void compressionZstdDecompressorDestroy(stream_decompressor_t *sd) {
     sd->ctx = NULL;
 }
 
-size_t compressionZstdOutputBound(size_t input_len) {
+size_t compressionZstdOutputBound(size_t input_len, bool frame_started, compress_flush_mode_t flush_mode) {
     /* ZSTD_compressBound gives worst-case compressed size for a single
      * contiguous input. ZSTD_CStreamOutSize() is the recommended output
      * buffer size for streaming and accounts for internal buffering.
      * Take the maximum so that both data writes and flush/end calls
      * (which may need to drain internally buffered data) have enough space. */
+    (void)frame_started;
+    (void)flush_mode;
     size_t data_bound = ZSTD_compressBound(input_len);
     size_t stream_bound = ZSTD_CStreamOutSize();
     return (data_bound > stream_bound ? data_bound : stream_bound) + 22;

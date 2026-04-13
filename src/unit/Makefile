@@ -143,6 +143,9 @@ endif
 $(VALKEY_SERVER_LIB): make-prerequisites
 	cd .. && $(MAKE) libvalkey.a
 
+$(ZSTD_LIB): make-prerequisites
+	cd ../../deps && $(MAKE) zstd
+
 # Ensure parent prerequisites are built
 .PHONY: make-prerequisites
 make-prerequisites:
@@ -205,14 +208,14 @@ generated_wrappers.o: generated_wrappers.cpp
 
 # Generate the single test binary in parent directory.
 ifeq ($(uname_S), Darwin)
-valkey-unit-gtests: $(ALL_OBJECTS) generated_wrappers.o $(VALKEY_SERVER_WRAP_LIB) $(FINAL_LIBS)
+valkey-unit-gtests: $(ALL_OBJECTS) generated_wrappers.o $(VALKEY_SERVER_WRAP_LIB) $(ZSTD_LIB) $(FINAL_LIBS)
 	$(CXX) -g $(LDFLAGS) -fno-lto \
 		-Wl,-flat_namespace -Wl,-undefined,dynamic_lookup \
 		-Wall -Wno-deprecated-declarations \
 		-o $@ $^ $(LD_LIBS) \
 		-lm -pthread -ldl
 else
-valkey-unit-gtests: $(ALL_OBJECTS) generated_wrappers.o $(VALKEY_SERVER_LIB) $(FINAL_LIBS)
+valkey-unit-gtests: $(ALL_OBJECTS) generated_wrappers.o $(VALKEY_SERVER_LIB) $(ZSTD_LIB) $(FINAL_LIBS)
 	$(CXX) -g $(LDFLAGS) -fno-lto \
 		$(OVERRIDES) \
 		-Wall -Wno-deprecated-declarations \
