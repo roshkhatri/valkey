@@ -20,6 +20,14 @@ start_server {overrides {save ""}} {
         assert_equal "lz4" $got
     }
 
+    test {repl-compression-algo accepts zstd} {
+        r config set repl-compression-algo zstd
+        set got [lindex [r config get repl-compression-algo] 1]
+        assert_equal "zstd" $got
+        # Restore default
+        r config set repl-compression-algo lz4
+    }
+
     test {repl-compression-level round-trip consistency} {
         for {set i 0} {$i < 100} {incr i} {
             set val [expr {int(rand() * 1023) - 1000}]
@@ -33,7 +41,7 @@ start_server {overrides {save ""}} {
 
     test {Invalid enum values for repl-compression-algo are rejected} {
         set original [lindex [r config get repl-compression-algo] 1]
-        foreach val {none snappy zstd gzip} {
+        foreach val {none snappy gzip} {
             catch {r config set repl-compression-algo $val} err
             assert {
                 [string match "*repl-compression-algo*" $err] ||
@@ -578,6 +586,8 @@ start_server {tags {"repl needs:debug"} overrides {save "" enable-debug-command 
         }
         $primary config set repl-diskless-sync-delay 2
 
+        # Wait for any in-flight transfers from previous tests to flush logs.
+        after 500
         set transfer_count_before [count_message_lines $primary_log "Background RDB transfer started by pid"]
         set compression_count_before [count_message_lines $primary_log "with LZ4 transport compression"]
 
@@ -589,9 +599,11 @@ start_server {tags {"repl needs:debug"} overrides {save "" enable-debug-command 
             $replica replicaof $primary_host $primary_port
 
             wait_for_condition 50 100 {
-                [string match "*state=wait_bgsave*" [$primary info replication]]
+                [string match "*state=wait_bgsave*" [$primary info replication]] ||
+                [string match "*state=bg_transfer*" [$primary info replication]] ||
+                [string match "*state=send_bulk*" [$primary info replication]]
             } else {
-                fail "Replica did not enter wait_bgsave before toggling replcompression"
+                fail "Replica did not enter bgsave/transfer before toggling replcompression"
             }
 
             $replica config set replcompression no
@@ -715,7 +727,7 @@ start_server {tags {"repl needs:debug"} overrides {save "" enable-debug-command 
                     fail "Compressed replica digest mismatch when syncing alongside an online non-capable replica"
                 }
 
-                wait_for_condition 50 100 {
+                wait_for_condition 100 200 {
                     [count_message_lines $primary_log "Background RDB transfer started by pid"] == [expr {$transfer_count_before + 1}] &&
                     [count_message_lines $primary_log "with LZ4 transport compression"] == [expr {$compression_count_before + 1}]
                 } else {

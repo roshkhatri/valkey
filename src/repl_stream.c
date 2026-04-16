@@ -95,9 +95,16 @@ static int replStreamDecoderProbe(repl_stream_decoder_t *decoder,
             if (read_vkcs_envelope(decoder->header, VKCS_ENVELOPE_SIZE,
                                    &codec, &stream_kind,
                                    &codec_checksum_enabled) != 0 ||
-                codec != VKCS_CODEC_LZ4 ||
-                stream_kind != STREAM_KIND_REPL ||
-                replStreamDecoderSetCompressed(decoder, ALGO_LZ4) != C_OK) {
+                stream_kind != STREAM_KIND_REPL) {
+                return C_ERR;
+            }
+            compression_algo_t algo;
+            switch (codec) {
+            case VKCS_CODEC_LZ4: algo = ALGO_LZ4; break;
+            case VKCS_CODEC_ZSTD: algo = ALGO_ZSTD; break;
+            default: return C_ERR;
+            }
+            if (replStreamDecoderSetCompressed(decoder, algo) != C_OK) {
                 return C_ERR;
             }
             (void)codec_checksum_enabled;

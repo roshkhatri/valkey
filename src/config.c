@@ -188,6 +188,7 @@ configEnum rdb_compression_algo_enum[] = {{"lzf", ALGO_LZF},
 #define RDB_COMPRESSION_LEVEL_DEFAULT 0
 
 configEnum repl_compression_algo_enum[] = {{"lz4", ALGO_LZ4},
+                                           {"zstd", ALGO_ZSTD},
                                            {NULL, 0}};
 
 #define REPL_COMPRESSION_LEVEL_DEFAULT (-5)
@@ -3304,6 +3305,10 @@ static int validateReplCompressionLevel(const char **err) {
     switch (server.repl_compression_algo) {
     case ALGO_LZ4:
         min = -1000;
+        max = 22;
+        break;
+    case ALGO_ZSTD:
+        min = -131072;
         max = 22;
         break;
     default:
