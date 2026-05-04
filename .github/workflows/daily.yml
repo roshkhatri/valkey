@@ -103,6 +103,10 @@ jobs:
         with:
           repository: ${{ inputs.use_repo || github.event.inputs.use_repo || github.repository }}
           ref: ${{ inputs.use_git_ref || github.event.inputs.use_git_ref || github.ref }}
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential autoconf automake pkg-config libssl-dev tcl tcl-dev python3
       - name: Install libbacktrace
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -186,6 +190,10 @@ jobs:
         with:
           repository: ${{ inputs.use_repo || github.event.inputs.use_repo || github.repository }}
           ref: ${{ inputs.use_git_ref || github.event.inputs.use_git_ref || github.ref }}
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential autoconf automake pkg-config libssl-dev tcl tcl-dev python3
       - name: Install libbacktrace
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -339,6 +347,10 @@ jobs:
         with:
           repository: ${{ inputs.use_repo || github.event.inputs.use_repo || github.repository }}
           ref: ${{ inputs.use_git_ref || github.event.inputs.use_git_ref || github.ref }}
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential autoconf automake pkg-config libssl-dev tcl tcl-dev python3
       - name: Install libbacktrace
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -386,6 +398,10 @@ jobs:
         with:
           repository: ${{ inputs.use_repo || github.event.inputs.use_repo || github.repository }}
           ref: ${{ inputs.use_git_ref || github.event.inputs.use_git_ref || github.ref }}
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential autoconf automake pkg-config libssl-dev tcl tcl-dev python3
       - name: Install libbacktrace
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -433,6 +449,10 @@ jobs:
         with:
           repository: ${{ inputs.use_repo || github.event.inputs.use_repo || github.repository }}
           ref: ${{ inputs.use_git_ref || github.event.inputs.use_git_ref || github.ref }}
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential autoconf automake pkg-config libssl-dev tcl tcl-dev python3 gcc-multilib g++-multilib libc6-dev-i386
       - name: Install libbacktrace
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -513,6 +533,10 @@ jobs:
         with:
           repository: ${{ inputs.use_repo || github.event.inputs.use_repo || github.repository }}
           ref: ${{ inputs.use_git_ref || github.event.inputs.use_git_ref || github.ref }}
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential autoconf automake pkg-config libssl-dev tcl tcl-dev python3
       - name: Install libbacktrace
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -565,6 +589,10 @@ jobs:
         with:
           repository: ${{ inputs.use_repo || github.event.inputs.use_repo || github.repository }}
           ref: ${{ inputs.use_git_ref || github.event.inputs.use_git_ref || github.ref }}
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential autoconf automake pkg-config libssl-dev tcl tcl-dev python3
       - name: Install libbacktrace
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -617,6 +645,10 @@ jobs:
         with:
           repository: ${{ inputs.use_repo || github.event.inputs.use_repo || github.repository }}
           ref: ${{ inputs.use_git_ref || github.event.inputs.use_git_ref || github.ref }}
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential autoconf automake pkg-config libssl-dev tcl tcl-dev python3
       - name: Install libbacktrace
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -658,6 +690,10 @@ jobs:
         with:
           repository: ${{ inputs.use_repo || github.event.inputs.use_repo || github.repository }}
           ref: ${{ inputs.use_git_ref || github.event.inputs.use_git_ref || github.ref }}
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential autoconf automake pkg-config libssl-dev tcl tcl-dev python3
       - name: Install libbacktrace
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -702,6 +738,10 @@ jobs:
         with:
           repository: ${{ inputs.use_repo || github.event.inputs.use_repo || github.repository }}
           ref: ${{ inputs.use_git_ref || github.event.inputs.use_git_ref || github.ref }}
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential autoconf automake pkg-config libssl-dev tcl tcl-dev python3
       - name: Install libbacktrace
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -786,6 +826,10 @@ jobs:
         with:
           repository: ${{ inputs.use_repo || github.event.inputs.use_repo || github.repository }}
           ref: ${{ inputs.use_git_ref || github.event.inputs.use_git_ref || github.ref }}
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential autoconf automake pkg-config libssl-dev tcl tcl-dev python3 valgrind
       - name: Install libbacktrace
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -824,6 +868,10 @@ jobs:
         with:
           repository: ${{ inputs.use_repo || github.event.inputs.use_repo || github.repository }}
           ref: ${{ inputs.use_git_ref || github.event.inputs.use_git_ref || github.ref }}
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential autoconf automake pkg-config libssl-dev tcl tcl-dev python3 valgrind
       - name: Install libbacktrace
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -874,6 +922,10 @@ jobs:
         with:
           repository: ${{ inputs.use_repo || github.event.inputs.use_repo || github.repository }}
           ref: ${{ inputs.use_git_ref || github.event.inputs.use_git_ref || github.ref }}
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential autoconf automake pkg-config libssl-dev tcl tcl-dev python3 valgrind
       - name: Install libbacktrace
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -912,6 +964,10 @@ jobs:
         with:
           repository: ${{ inputs.use_repo || github.event.inputs.use_repo || github.repository }}
           ref: ${{ inputs.use_git_ref || github.event.inputs.use_git_ref || github.ref }}
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential autoconf automake pkg-config libssl-dev tcl tcl-dev python3 valgrind
       - name: Install libbacktrace
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -973,6 +1029,10 @@ jobs:
         with:
           repository: ${{ inputs.use_repo || github.event.inputs.use_repo || github.repository }}
           ref: ${{ inputs.use_git_ref || github.event.inputs.use_git_ref || github.ref }}
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential autoconf automake pkg-config libssl-dev tcl tcl-dev python3 clang
       - name: Install libbacktrace
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -1044,6 +1104,10 @@ jobs:
         with:
           repository: ${{ inputs.use_repo || github.event.inputs.use_repo || github.repository }}
           ref: ${{ inputs.use_git_ref || github.event.inputs.use_git_ref || github.ref }}
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential autoconf automake pkg-config libssl-dev tcl tcl-dev python3 clang libgtest-dev libgmock-dev
       - name: Install gtest
         run: sudo apt-get install pkg-config libgtest-dev libgmock-dev
       - name: make
@@ -1118,6 +1182,10 @@ jobs:
         with:
           repository: ${{ inputs.use_repo || github.event.inputs.use_repo || github.repository }}
           ref: ${{ inputs.use_git_ref || github.event.inputs.use_git_ref || github.ref }}
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential autoconf automake pkg-config libssl-dev tcl tcl-dev python3 clang
       - name: Install libbacktrace
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -1189,6 +1257,10 @@ jobs:
         with:
           repository: ${{ inputs.use_repo || github.event.inputs.use_repo || github.repository }}
           ref: ${{ inputs.use_git_ref || github.event.inputs.use_git_ref || github.ref }}
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential autoconf automake pkg-config libssl-dev tcl tcl-dev python3 clang libgtest-dev libgmock-dev
       - name: Install gtest
         run: sudo apt-get install pkg-config libgtest-dev libgmock-dev
       - name: make
@@ -1259,6 +1331,10 @@ jobs:
         with:
           repository: ${{ inputs.use_repo || github.event.inputs.use_repo || github.repository }}
           ref: ${{ inputs.use_git_ref || github.event.inputs.use_git_ref || github.ref }}
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential autoconf automake pkg-config libssl-dev tcl tcl-dev python3
       - name: Install libbacktrace
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -1318,6 +1394,10 @@ jobs:
         with:
           repository: ${{ inputs.use_repo || github.event.inputs.use_repo || github.repository }}
           ref: ${{ inputs.use_git_ref || github.event.inputs.use_git_ref || github.ref }}
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential autoconf automake pkg-config libssl-dev tcl tcl-dev python3 liblttng-ust-dev
       - name: Install libbacktrace
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -1745,6 +1825,10 @@ jobs:
         with:
           repository: ${{ inputs.use_repo || github.event.inputs.use_repo || github.repository }}
           ref: ${{ inputs.use_git_ref || github.event.inputs.use_git_ref || github.ref }}
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential autoconf automake pkg-config libssl-dev tcl tcl-dev python3
       - name: test
         uses: cross-platform-actions/action@39a2a80642eca0947594ad03e4355dc3d28c617a # v0.32.0
         with:
@@ -1883,6 +1967,10 @@ jobs:
         with:
           repository: ${{ inputs.use_repo || github.event.inputs.use_repo || github.repository }}
           ref: ${{ inputs.use_git_ref || github.event.inputs.use_git_ref || github.ref }}
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential autoconf automake pkg-config libssl-dev tcl tcl-dev python3
       - name: Install libbacktrace
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
