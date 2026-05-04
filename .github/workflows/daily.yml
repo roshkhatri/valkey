@@ -259,7 +259,7 @@ jobs:
             make all-with-unit-tests SERVER_CFLAGS='-Werror'
             ./src/unit/valkey-unit-gtests
   test-ubuntu-jemalloc-fortify:
-    runs-on: valkey-x64
+    runs-on: valkey-x64-container
     if: |
       (github.event_name == 'workflow_call' || github.event_name == 'workflow_dispatch' ||
         (github.event_name == 'schedule' && github.repository == 'valkey-io/valkey') ||
@@ -270,7 +270,7 @@ jobs:
             (github.event.pull_request.base.ref == 'unstable' && github.event.label.name == 'run-extra-tests'))
         )) &&
       !contains(github.event.inputs.skipjobs, 'fortify')
-    container: ubuntu:plucky
+    container: 653928081447.dkr.ecr.us-east-1.amazonaws.com/valkey-ci/ubuntu:plucky
     timeout-minutes: 1440
     steps:
       - name: prep
@@ -1437,20 +1437,20 @@ jobs:
       matrix:
         include:
           - name: test-almalinux8-jemalloc
-            container: almalinux:8
+            container: 653928081447.dkr.ecr.us-east-1.amazonaws.com/valkey-ci/almalinux:8
             install_epel: true
           - name: test-almalinux9-jemalloc
-            container: almalinux:9
+            container: 653928081447.dkr.ecr.us-east-1.amazonaws.com/valkey-ci/almalinux:9
             install_epel: true
           - name: test-centosstream9-jemalloc
-            container: quay.io/centos/centos:stream9
+            container: 653928081447.dkr.ecr.us-east-1.amazonaws.com/valkey-ci/centos:stream9
             install_epel: true
           - name: test-fedoralatest-jemalloc
-            container: fedora:latest
+            container: 653928081447.dkr.ecr.us-east-1.amazonaws.com/valkey-ci/fedora:latest
           - name: test-fedorarawhide-jemalloc
-            container: fedora:rawhide
+            container: 653928081447.dkr.ecr.us-east-1.amazonaws.com/valkey-ci/fedora:rawhide
     name: ${{ matrix.name }}
-    runs-on: valkey-x64
+    runs-on: valkey-x64-container
     container: ${{ matrix.container }}
     timeout-minutes: 1440
     steps:
@@ -1509,20 +1509,20 @@ jobs:
       matrix:
         include:
           - name: test-almalinux8-tls-module
-            container: almalinux:8
+            container: 653928081447.dkr.ecr.us-east-1.amazonaws.com/valkey-ci/almalinux:8
             install_epel: true
           - name: test-almalinux9-tls-module
-            container: almalinux:9
+            container: 653928081447.dkr.ecr.us-east-1.amazonaws.com/valkey-ci/almalinux:9
             install_epel: true
           - name: test-centosstream9-tls-module
-            container: quay.io/centos/centos:stream9
+            container: 653928081447.dkr.ecr.us-east-1.amazonaws.com/valkey-ci/centos:stream9
             install_epel: true
           - name: test-fedoralatest-tls-module
-            container: fedora:latest
+            container: 653928081447.dkr.ecr.us-east-1.amazonaws.com/valkey-ci/fedora:latest
           - name: test-fedorarawhide-tls-module
-            container: fedora:rawhide
+            container: 653928081447.dkr.ecr.us-east-1.amazonaws.com/valkey-ci/fedora:rawhide
     name: ${{ matrix.name }}
-    runs-on: valkey-x64
+    runs-on: valkey-x64-container
     container: ${{ matrix.container }}
     timeout-minutes: 1440
     steps:
@@ -1581,20 +1581,20 @@ jobs:
       matrix:
         include:
           - name: test-almalinux8-tls-module-no-tls
-            container: almalinux:8
+            container: 653928081447.dkr.ecr.us-east-1.amazonaws.com/valkey-ci/almalinux:8
             install_epel: true
           - name: test-almalinux9-tls-module-no-tls
-            container: almalinux:9
+            container: 653928081447.dkr.ecr.us-east-1.amazonaws.com/valkey-ci/almalinux:9
             install_epel: true
           - name: test-centosstream9-tls-module-no-tls
-            container: quay.io/centos/centos:stream9
+            container: 653928081447.dkr.ecr.us-east-1.amazonaws.com/valkey-ci/centos:stream9
             install_epel: true
           - name: test-fedoralatest-tls-module-no-tls
-            container: fedora:latest
+            container: 653928081447.dkr.ecr.us-east-1.amazonaws.com/valkey-ci/fedora:latest
           - name: test-fedorarawhide-tls-module-no-tls
-            container: fedora:rawhide
+            container: 653928081447.dkr.ecr.us-east-1.amazonaws.com/valkey-ci/fedora:rawhide
     name: ${{ matrix.name }}
-    runs-on: valkey-x64
+    runs-on: valkey-x64-container
     container: ${{ matrix.container }}
     timeout-minutes: 1440
     steps:
@@ -1841,7 +1841,7 @@ jobs:
             gmake
             ./runtest --single unit/keyspace --single unit/auth --single unit/networking --single unit/protocol
   test-alpine-jemalloc:
-    runs-on: valkey-x64
+    runs-on: valkey-x64-container
     if: |
       (github.event_name == 'workflow_call' || github.event_name == 'workflow_dispatch' ||
         (github.event_name == 'schedule' && github.repository == 'valkey-io/valkey') ||
@@ -1852,7 +1852,7 @@ jobs:
             (github.event.pull_request.base.ref == 'unstable' && github.event.label.name == 'run-extra-tests'))
         )) &&
       !contains(github.event.inputs.skipjobs, 'alpine')
-    container: alpine:latest
+    container: 653928081447.dkr.ecr.us-east-1.amazonaws.com/valkey-ci/alpine:latest
     steps:
       - name: prep
         if: github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_call'
@@ -1891,7 +1891,7 @@ jobs:
         if: true && !contains(github.event.inputs.skiptests, 'sentinel')
         run: ./runtest-sentinel ${{github.event.inputs.cluster_test_args}}
   test-alpine-libc-malloc:
-    runs-on: valkey-x64
+    runs-on: valkey-x64-container
     if: |
       (github.event_name == 'workflow_call' || github.event_name == 'workflow_dispatch' ||
         (github.event_name == 'schedule' && github.repository == 'valkey-io/valkey') ||
@@ -1902,7 +1902,7 @@ jobs:
             (github.event.pull_request.base.ref == 'unstable' && github.event.label.name == 'run-extra-tests'))
         )) &&
       !contains(github.event.inputs.skipjobs, 'alpine')
-    container: alpine:latest
+    container: 653928081447.dkr.ecr.us-east-1.amazonaws.com/valkey-ci/alpine:latest
     steps:
       - name: prep
         if: github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_call'
