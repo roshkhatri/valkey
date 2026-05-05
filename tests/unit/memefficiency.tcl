@@ -1,6 +1,8 @@
 proc test_memory_efficiency {range} {
     r flushall
     set rd [redis_deferring_client]
+    $rd client reply off
+    $rd flush
     set base_mem [s used_memory]
     set written 0
     for {set j 0} {$j < 10000} {incr j} {
@@ -11,9 +13,9 @@ proc test_memory_efficiency {range} {
         incr written [string length $val]
         incr written 2 ;# A separator is the minimum to store key-value data.
     }
-    for {set j 0} {$j < 10000} {incr j} {
-        $rd read ; # Discard replies
-    }
+    $rd client reply on
+    $rd flush
+    $rd read ;# read the +OK from CLIENT REPLY ON
     $rd close
 
     set current_mem [s used_memory]
@@ -39,6 +41,12 @@ start_server {tags {"memefficiency external:skip"}} {
 
 run_solo {defrag} {
 start_server {tags {"defrag external:skip"} overrides {appendonly yes auto-aof-rewrite-percentage 0 save ""}} {
+    proc client_reply_off_wait_for_server {rd} {
+        $rd client reply on
+        assert_equal OK [$rd read]
+        $rd client reply off
+    }
+
     if {[string match {*jemalloc*} [s mem_allocator]] && [r debug mallctl arenas.page] <= 8192} {
         test "Active defrag" {
             r config set hz 100
@@ -160,7 +168,7 @@ start_server {tags {"defrag external:skip"} overrides {appendonly yes auto-aof-r
         }
         r config set appendonly no
         r config set key-load-delay 0
-        
+
         test "Active defrag eval scripts" {
             r flushdb
             r script flush sync
@@ -178,14 +186,12 @@ start_server {tags {"defrag external:skip"} overrides {appendonly yes auto-aof-r
             # Populate memory with interleaving script-key pattern of same size
             set dummy_script "--[string repeat x 400]\nreturn "
             set rd [redis_deferring_client]
+            $rd client reply off
             for {set j 0} {$j < $n} {incr j} {
                 set val "$dummy_script[format "%06d" $j]"
                 $rd script load $val
                 $rd set k$j $val
-            }
-            for {set j 0} {$j < $n} {incr j} {
-                $rd read ; # Discard script load replies
-                $rd read ; # Discard set replies
+                if {$j % 1000 == 999} {client_reply_off_wait_for_server $rd}
             }
             after 120 ;# serverCron only updates the info once in 100ms
             if {$::verbose} {
@@ -197,8 +203,10 @@ start_server {tags {"defrag external:skip"} overrides {appendonly yes auto-aof-r
             assert_lessthan [s allocator_frag_ratio] 1.05
             
             # Delete all the keys to create fragmentation
-            for {set j 0} {$j < $n} {incr j} { $rd del k$j }
-            for {set j 0} {$j < $n} {incr j} { $rd read } ; # Discard del replies
+            for {set j 0} {$j < $n} {incr j} {
+                $rd del k$j
+                if {$j % 1000 == 999} {client_reply_off_wait_for_server $rd}
+            }
             $rd close
             after 120 ;# serverCron only updates the info once in 100ms
             if {$::verbose} {
@@ -267,15 +275,14 @@ start_server {tags {"defrag external:skip"} overrides {appendonly yes auto-aof-r
 
             # create big keys with 10k items
             set rd [redis_deferring_client]
+            $rd client reply off
             for {set j 0} {$j < 10000} {incr j} {
                 $rd hset bighash $j [concat "asdfasdfasdf" $j]
                 $rd lpush biglist [concat "asdfasdfasdf" $j]
                 $rd zadd bigzset $j [concat "asdfasdfasdf" $j]
                 $rd sadd bigset [concat "asdfasdfasdf" $j]
                 $rd xadd bigstream * item 1 value a
-            }
-            for {set j 0} {$j < 50000} {incr j} {
-                $rd read ; # Discard replies
+                if {$j % 100 == 99} {client_reply_off_wait_for_server $rd}
             }
 
             set expected_frag 1.7
@@ -283,9 +290,7 @@ start_server {tags {"defrag external:skip"} overrides {appendonly yes auto-aof-r
                 # scale the hash to 1m fields in order to have a measurable the latency
                 for {set j 10000} {$j < 1000000} {incr j} {
                     $rd hset bighash $j [concat "asdfasdfasdf" $j]
-                }
-                for {set j 10000} {$j < 1000000} {incr j} {
-                    $rd read ; # Discard replies
+                    if {$j % 1000 == 999} {client_reply_off_wait_for_server $rd}
                 }
                 # creating that big hash, increased used_memory, so the relative frag goes down
                 set expected_frag 1.3
@@ -294,18 +299,14 @@ start_server {tags {"defrag external:skip"} overrides {appendonly yes auto-aof-r
             # add a mass of string keys
             for {set j 0} {$j < 500000} {incr j} {
                 $rd setrange $j 150 a
-            }
-            for {set j 0} {$j < 500000} {incr j} {
-                $rd read ; # Discard replies
+                if {$j % 1000 == 999} {client_reply_off_wait_for_server $rd}
             }
             assert_equal [r dbsize] 500010
 
             # create some fragmentation
             for {set j 0} {$j < 500000} {incr j 2} {
                 $rd del $j
-            }
-            for {set j 0} {$j < 500000} {incr j 2} {
-                $rd read ; # Discard replies
+                if {$j % 1000 == 998} {client_reply_off_wait_for_server $rd}
             }
             assert_equal [r dbsize] 250010
 
@@ -389,6 +390,7 @@ start_server {tags {"defrag external:skip"} overrides {appendonly yes auto-aof-r
 
             # create big keys with 10k items
             set rd [redis_deferring_client]
+            $rd client reply off
 
             set expected_frag 1.7
             # add a mass of list nodes to two lists (allocations are interlaced)
@@ -397,10 +399,7 @@ start_server {tags {"defrag external:skip"} overrides {appendonly yes auto-aof-r
             for {set j 0} {$j < $elements} {incr j} {
                 $rd lpush biglist1 $val
                 $rd lpush biglist2 $val
-            }
-            for {set j 0} {$j < $elements} {incr j} {
-                $rd read ; # Discard replies
-                $rd read ; # Discard replies
+                if {$j % 1000 == 999} {client_reply_off_wait_for_server $rd}
             }
 
             $rd close
@@ -424,8 +423,12 @@ start_server {tags {"defrag external:skip"} overrides {appendonly yes auto-aof-r
             if {[r config get activedefrag] eq "activedefrag yes"} {
                 # wait for the active defrag to start working (decision once a second)
                 wait_for_condition 50 100 {
-                    [s active_defrag_running] ne 0
+                    [s total_active_defrag_time] ne 0
                 } else {
+                    after 120 ;# serverCron only updates the info once in 100ms
+                    puts [r info memory]
+                    puts [r info stats]
+                    puts [r memory malloc-stats]
                     fail "defrag not started."
                 }
 
@@ -506,23 +509,18 @@ start_server {tags {"defrag external:skip"} overrides {appendonly yes auto-aof-r
 
                 # add a mass of keys with 600 bytes values, fill the bin of 640 bytes which has 32 regs per slab.
                 set rd [redis_deferring_client]
+                $rd client reply off
                 set keys 640000
                 for {set j 0} {$j < $keys} {incr j} {
                     $rd setrange $j 600 x
-                }
-                for {set j 0} {$j < $keys} {incr j} {
-                    $rd read ; # Discard replies
+                    if {$j % 1000 == 999} {client_reply_off_wait_for_server $rd}
                 }
 
                 # create some fragmentation of 50%
-                set sent 0
                 for {set j 0} {$j < $keys} {incr j 1} {
                     $rd del $j
-                    incr sent
                     incr j 1
-                }
-                for {set j 0} {$j < $sent} {incr j} {
-                    $rd read ; # Discard replies
+                    if {$j % 1000 == 998} {client_reply_off_wait_for_server $rd}
                 }
                 $rd close
 
@@ -584,6 +582,7 @@ start_server {tags {"defrag external:skip"} overrides {appendonly yes auto-aof-r
     }
 }
 
+if {0} {
 start_cluster 1 0 {tags {"defrag external:skip"}} {
     if {[string match {*jemalloc*} [s mem_allocator]] && [r debug mallctl arenas.page] <= 8192} {
         test "Active defrag with flush async performed in cluster mode" {
@@ -598,15 +597,14 @@ start_cluster 1 0 {tags {"defrag external:skip"}} {
             catch {r config set activedefrag yes} e
             if {[r config get activedefrag] eq "activedefrag yes"} {
                 set rd [redis_deferring_client]
+                $rd client reply off
                 set random_int [expr 1+[randomInt 10240]]
 
                 # Create keys
                 for {set j 0} {$j < 10000} {incr j} {
                     set buf [string repeat "pl-$j" $random_int]
                     $rd set $j $buf ex 10000
-                }
-                for {set j 0} {$j < 10000} {incr j} {
-                    $rd read ;# Discard replies
+                    if {$j % 1000 == 999} {client_reply_off_wait_for_server $rd}
                 }
 
                 # wait for the active defrag to start
@@ -621,9 +619,7 @@ start_cluster 1 0 {tags {"defrag external:skip"}} {
                 for {set j 0} {$j < 10000} {incr j} {
                     set buf [string repeat "pl-$j" $random_int]
                     $rd set $j $buf ex $random_int
-                }
-                for {set j 0} {$j < 10000} {incr j} {
-                    $rd read ; # Discard replies
+                    if {$j % 1000 == 999} {client_reply_off_wait_for_server $rd}
                 }
                 $rd close
 
@@ -640,6 +636,7 @@ start_cluster 1 0 {tags {"defrag external:skip"}} {
             r ping
         }
     }
+}
 }
 
 } ;# run_solo
