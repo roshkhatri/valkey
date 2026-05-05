@@ -1803,7 +1803,7 @@ jobs:
       - name: make
         run: make SERVER_CFLAGS='-Werror' USE_LIBBACKTRACE=yes
   test-freebsd:
-    runs-on: valkey-x64
+    runs-on: ubuntu-latest
     if: |
       (github.event_name == 'workflow_call' || github.event_name == 'workflow_dispatch' ||
         (github.event_name == 'schedule' && github.repository == 'valkey-io/valkey') ||
