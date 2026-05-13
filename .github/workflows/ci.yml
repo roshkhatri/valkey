@@ -220,7 +220,19 @@ jobs:
         run: sudo apt-get install -y tcl8.6 tclx
       - name: replication tests with streaming compression enabled
         run: |
-          ./runtest --verbose --dump-logs --tags "repl -slow" \
+          ./runtest --verbose --dump-logs \
+            --single integration/replication \
+            --single integration/replication-2 \
+            --single integration/replication-3 \
+            --single integration/replication-4 \
+            --single integration/replication-psync \
+            --single integration/replication-buffer \
+            --single integration/replication-aof-sync \
+            --single integration/dual-channel-replication \
+            --single integration/block-repl \
+            --single integration/repl-compression \
+            --single integration/skip-rdb-checksum \
+            --tags -slow \
             --config replcompression yes \
             --config repl-compression-algo lz4
 
