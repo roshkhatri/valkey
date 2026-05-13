@@ -197,6 +197,33 @@ jobs:
       - name: test-tls-builtin
         run: ./runtest --verbose --single unit/tls --dump-logs --tls
 
+  test-replication-compression:
+    # Re-runs all replication-tagged tests with replcompression=yes applied
+    # globally via ::global_overrides. Exercises the streaming-compression
+    # transport across the full replication test surface (full sync, psync,
+    # dual-channel, buffer management, AOF-sync, cross-version, etc.) to
+    # catch regressions that only surface under compressed replication.
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install libbacktrace
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: ianlancetaylor/libbacktrace
+          ref: b9e40069c0b47a722286b94eb5231f7f05c08713
+          path: libbacktrace
+      - run: cd libbacktrace && ./configure && make && sudo make install
+      - name: Checkout Valkey
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: make
+        run: make -j4 SERVER_CFLAGS='-Werror' USE_LIBBACKTRACE=yes
+      - name: install test dependencies
+        run: sudo apt-get install -y tcl8.6 tclx
+      - name: replication tests with streaming compression enabled
+        run: |
+          ./runtest --verbose --dump-logs --tags "repl -slow" \
+            --config replcompression yes \
+            --config repl-compression-algo lz4
+
   build-debian-old:
     runs-on: ubuntu-latest
     container: debian:bullseye
