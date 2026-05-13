@@ -1791,3 +1791,492 @@ TEST_F(CompressionTest, streamWriterRepetitivePayloadRoundTrip) {
     streamWriterDestroy(t);
     dynamicBufFree(&db);
 }
+
+/* ===================================================================
+ * Push-mode streamReader tests
+ * =================================================================== */
+
+class streamReaderPush : public ::testing::Test {};
+
+/* Helper: produce VKCS-compressed bytes from a plaintext payload using streamWriter. */
+static sds pushTestCompress(const void *payload, size_t payload_len) {
+    DynamicBuf db;
+    dynamicBufInit(&db);
+    streamWriterConfig wcfg = makeWriterConfig(ALGO_LZ4, 0, STREAM_KIND_RDB);
+    streamWriter *w = streamWriterCreate(&wcfg, emitToDynamicBuf, &db);
+    streamWriterWrite(w, payload, payload_len);
+    streamWriterFinish(w);
+    streamWriterDestroy(w);
+    sds result = sdsnewlen(db.data, sdslen((const char *)db.data));
+    dynamicBufFree(&db);
+    return result;
+}
+
+/* Helper: make a push-mode reader config with given cap. */
+static streamReaderConfig makePushConfig(bool allow_passthrough, size_t push_feed_cap) {
+    streamReaderConfig cfg = makeReaderConfig(STREAM_KIND_RDB, allow_passthrough, 0);
+    cfg.push_feed_cap = push_feed_cap;
+    return cfg;
+}
+
+/* 1. createPushRejectsZeroCap */
+TEST_F(streamReaderPush, createPushRejectsZeroCap) {
+    streamReaderConfig cfg = makePushConfig(true, 0);
+    streamReader *r = streamReaderCreatePush(&cfg);
+    ASSERT_EQ(r, nullptr);
+}
+
+/* 2. createPushWithValidCapSucceeds */
+TEST_F(streamReaderPush, createPushWithValidCapSucceeds) {
+    streamReaderConfig cfg = makePushConfig(true, 4096);
+    streamReader *r = streamReaderCreatePush(&cfg);
+    ASSERT_NE(r, nullptr);
+    ASSERT_EQ(streamReaderGetError(r), STREAM_READER_ERROR_NONE);
+    ASSERT_TRUE(streamReaderNeedsInput(r));
+    streamReaderDestroy(r);
+}
+
+/* 3. destroyNullIsSafe */
+TEST_F(streamReaderPush, destroyNullIsSafe) {
+    streamReaderDestroy(nullptr); /* must not crash */
+}
+
+/* 4. pushPassthroughSingleChunk */
+TEST_F(streamReaderPush, pushPassthroughSingleChunk) {
+    const char *payload = "plain payload bytes";
+    size_t len = strlen(payload);
+
+    streamReaderConfig cfg = makePushConfig(true, 4096);
+    streamReader *r = streamReaderCreatePush(&cfg);
+    ASSERT_NE(r, nullptr);
+
+    ASSERT_EQ(streamReaderFeed(r, payload, len), 0);
+    streamReaderFeedEnd(r);
+
+    char out[64] = {0};
+    size_t total = 0;
+    ssize_t n;
+    while ((n = streamReaderRead(r, out + total, sizeof(out) - total)) > 0) {
+        total += (size_t)n;
+    }
+    ASSERT_EQ(n, 0);
+    ASSERT_EQ(total, len);
+    ASSERT_EQ(memcmp(out, payload, len), 0);
+
+    streamReaderDestroy(r);
+}
+
+/* 5. pushPassthroughAcrossFeeds */
+TEST_F(streamReaderPush, pushPassthroughAcrossFeeds) {
+    const char *payload = "plain data";
+    size_t len = strlen(payload);
+
+    streamReaderConfig cfg = makePushConfig(true, 4096);
+    streamReader *r = streamReaderCreatePush(&cfg);
+    ASSERT_NE(r, nullptr);
+
+    char out[64] = {0};
+    size_t total = 0;
+    for (size_t i = 0; i < len; i++) {
+        ASSERT_EQ(streamReaderFeed(r, payload + i, 1), 0);
+        ssize_t n = streamReaderRead(r, out + total, sizeof(out) - total);
+        if (n > 0) total += (size_t)n;
+    }
+    streamReaderFeedEnd(r);
+
+    ssize_t n;
+    while ((n = streamReaderRead(r, out + total, sizeof(out) - total)) > 0) {
+        total += (size_t)n;
+    }
+    ASSERT_EQ(n, 0);
+    ASSERT_EQ(total, len);
+    ASSERT_EQ(memcmp(out, payload, len), 0);
+
+    streamReaderDestroy(r);
+}
+
+/* 6. pushPassthroughDisallowedFails */
+TEST_F(streamReaderPush, pushPassthroughDisallowedFails) {
+    const char *payload = "not VKCS data";
+    size_t len = strlen(payload);
+
+    streamReaderConfig cfg = makePushConfig(false, 4096);
+    streamReader *r = streamReaderCreatePush(&cfg);
+    ASSERT_NE(r, nullptr);
+
+    ASSERT_EQ(streamReaderFeed(r, payload, len), 0);
+    streamReaderFeedEnd(r);
+
+    char out[64];
+    ASSERT_EQ(streamReaderRead(r, out, sizeof(out)), -1);
+    ASSERT_EQ(streamReaderGetError(r), STREAM_READER_ERROR_INCOMPATIBLE);
+
+    streamReaderDestroy(r);
+}
+
+/* 7. pushCompressedRoundtripSingleChunk */
+TEST_F(streamReaderPush, pushCompressedRoundtripSingleChunk) {
+    /* Generate ~4KB plaintext */
+    char payload[4096];
+    for (size_t i = 0; i < sizeof(payload); i++) payload[i] = (char)('A' + (i % 26));
+
+    sds compressed = pushTestCompress(payload, sizeof(payload));
+    size_t clen = sdslen(compressed);
+
+    streamReaderConfig cfg = makePushConfig(true, clen + 1024);
+    streamReader *r = streamReaderCreatePush(&cfg);
+    ASSERT_NE(r, nullptr);
+
+    ASSERT_EQ(streamReaderFeed(r, compressed, clen), 0);
+    streamReaderFeedEnd(r);
+
+    char out[4096] = {0};
+    size_t total = 0;
+    ssize_t n;
+    while ((n = streamReaderRead(r, out + total, sizeof(out) - total)) > 0) {
+        total += (size_t)n;
+    }
+    ASSERT_EQ(n, 0);
+    ASSERT_EQ(total, sizeof(payload));
+    ASSERT_EQ(memcmp(out, payload, sizeof(payload)), 0);
+
+    streamReaderDestroy(r);
+    sdsfree(compressed);
+}
+
+/* 8. pushCompressedRoundtripChunked */
+TEST_F(streamReaderPush, pushCompressedRoundtripChunked) {
+    char payload[4096];
+    for (size_t i = 0; i < sizeof(payload); i++) payload[i] = (char)('A' + (i % 26));
+
+    sds compressed = pushTestCompress(payload, sizeof(payload));
+    size_t clen = sdslen(compressed);
+
+    streamReaderConfig cfg = makePushConfig(true, clen + 1024);
+    streamReader *r = streamReaderCreatePush(&cfg);
+    ASSERT_NE(r, nullptr);
+
+    /* Feed compressed bytes one at a time, interleaving reads after each feed.
+     * With the bug fixes, Read returns 0 when more input is needed. */
+    char out[4096] = {0};
+    size_t total = 0;
+    for (size_t i = 0; i < clen; i++) {
+        ASSERT_EQ(streamReaderFeed(r, compressed + i, 1), 0);
+        ssize_t n;
+        while ((n = streamReaderRead(r, out + total, sizeof(out) - total)) > 0) {
+            total += (size_t)n;
+        }
+        ASSERT_GE(n, 0); /* 0 means need more input, never error */
+    }
+    streamReaderFeedEnd(r);
+
+    /* Drain any remaining output after FeedEnd */
+    ssize_t n;
+    while ((n = streamReaderRead(r, out + total, sizeof(out) - total)) > 0) {
+        total += (size_t)n;
+    }
+    ASSERT_EQ(n, 0);
+    ASSERT_EQ(total, sizeof(payload));
+    ASSERT_EQ(memcmp(out, payload, sizeof(payload)), 0);
+
+    streamReaderDestroy(r);
+    sdsfree(compressed);
+}
+
+/* 9. pushCompressedProbeAcrossFeeds */
+TEST_F(streamReaderPush, pushCompressedProbeAcrossFeeds) {
+    char payload[128];
+    for (size_t i = 0; i < sizeof(payload); i++) payload[i] = (char)('a' + (i % 26));
+
+    sds compressed = pushTestCompress(payload, sizeof(payload));
+    size_t clen = sdslen(compressed);
+    ASSERT_GE(clen, (size_t)VKCS_ENVELOPE_SIZE);
+
+    streamReaderConfig cfg = makePushConfig(true, clen + 1024);
+    streamReader *r = streamReaderCreatePush(&cfg);
+    ASSERT_NE(r, nullptr);
+
+    char out[128] = {0};
+    ssize_t n;
+
+    /* Feed first 4 bytes of envelope — probe not ready yet */
+    ASSERT_EQ(streamReaderFeed(r, compressed, 4), 0);
+    n = streamReaderRead(r, out, sizeof(out));
+    ASSERT_EQ(n, 0); /* need more input — probe incomplete */
+
+    /* Feed remaining 4 envelope bytes — probe ready but no compressed data yet */
+    ASSERT_EQ(streamReaderFeed(r, compressed + 4, 4), 0);
+    n = streamReaderRead(r, out, sizeof(out));
+    ASSERT_EQ(n, 0); /* need more input — no compressed payload fed */
+
+    /* Feed compressed data */
+    ASSERT_EQ(streamReaderFeed(r, compressed + VKCS_ENVELOPE_SIZE, clen - VKCS_ENVELOPE_SIZE), 0);
+    streamReaderFeedEnd(r);
+
+    /* Drain all decompressed output */
+    size_t total = 0;
+    while ((n = streamReaderRead(r, out + total, sizeof(out) - total)) > 0) {
+        total += (size_t)n;
+    }
+    ASSERT_EQ(n, 0);
+    ASSERT_EQ(total, sizeof(payload));
+    ASSERT_EQ(memcmp(out, payload, sizeof(payload)), 0);
+
+    streamReaderDestroy(r);
+    sdsfree(compressed);
+}
+
+/* 10. pushCompressedFrameDoneWithTrailingBytes */
+TEST_F(streamReaderPush, pushCompressedFrameDoneWithTrailingBytes) {
+    const char *payload = "frame-done-test";
+    size_t plen = strlen(payload);
+
+    sds compressed = pushTestCompress(payload, plen);
+    size_t clen = sdslen(compressed);
+
+    /* Append trailing garbage */
+    sds with_trailing = sdscatlen(compressed, "GARBAGE", 7);
+    size_t total_len = sdslen(with_trailing);
+
+    streamReaderConfig cfg = makePushConfig(true, total_len + 1024);
+    streamReader *r = streamReaderCreatePush(&cfg);
+    ASSERT_NE(r, nullptr);
+
+    ASSERT_EQ(streamReaderFeed(r, with_trailing, total_len), 0);
+    streamReaderFeedEnd(r);
+
+    char out[128] = {0};
+    size_t total = 0;
+    ssize_t n;
+    while ((n = streamReaderRead(r, out + total, sizeof(out) - total)) > 0) {
+        total += (size_t)n;
+    }
+    /* Frame completes cleanly; trailing bytes detected via validateEnd */
+    ASSERT_EQ(total, plen);
+    ASSERT_EQ(memcmp(out, payload, plen), 0);
+    ASSERT_EQ(streamReaderValidateEnd(r), -1);
+    ASSERT_EQ(streamReaderGetError(r), STREAM_READER_ERROR_CORRUPT);
+
+    streamReaderDestroy(r);
+    sdsfree(with_trailing);
+}
+
+/* 11. pushNeedsInputTransitions */
+TEST_F(streamReaderPush, pushNeedsInputTransitions) {
+    const char *payload = "transitions";
+    size_t plen = strlen(payload);
+
+    streamReaderConfig cfg = makePushConfig(true, 4096);
+    streamReader *r = streamReaderCreatePush(&cfg);
+    ASSERT_NE(r, nullptr);
+
+    /* After CreatePush → true */
+    ASSERT_TRUE(streamReaderNeedsInput(r));
+
+    /* After Feed(some bytes) → false (has pending data) */
+    ASSERT_EQ(streamReaderFeed(r, payload, plen), 0);
+    ASSERT_FALSE(streamReaderNeedsInput(r));
+
+    /* After full drain (Read until 0) with no FeedEnd → true */
+    char out[64];
+    ssize_t n;
+    while ((n = streamReaderRead(r, out, sizeof(out))) > 0) {
+    }
+    ASSERT_EQ(n, 0);
+    ASSERT_TRUE(streamReaderNeedsInput(r));
+
+    /* After FeedEnd → false */
+    streamReaderFeedEnd(r);
+    ASSERT_FALSE(streamReaderNeedsInput(r));
+
+    streamReaderDestroy(r);
+
+    /* After error → false */
+    streamReaderConfig cfg2 = makePushConfig(false, 4096);
+    streamReader *r2 = streamReaderCreatePush(&cfg2);
+    ASSERT_NE(r2, nullptr);
+    ASSERT_EQ(streamReaderFeed(r2, "not VKCS!", 9), 0);
+    streamReaderFeedEnd(r2);
+    streamReaderRead(r2, out, sizeof(out)); /* trigger error */
+    ASSERT_FALSE(streamReaderNeedsInput(r2));
+
+    streamReaderDestroy(r2);
+}
+
+/* 12. pushFeedCapRejectsOverflow */
+TEST_F(streamReaderPush, pushFeedCapRejectsOverflow) {
+    streamReaderConfig cfg = makePushConfig(true, 1024);
+    streamReader *r = streamReaderCreatePush(&cfg);
+    ASSERT_NE(r, nullptr);
+
+    char buf[1000];
+    memset(buf, 'A', sizeof(buf));
+    ASSERT_EQ(streamReaderFeed(r, buf, 1000), 0);
+
+    char buf2[100];
+    memset(buf2, 'B', sizeof(buf2));
+    ASSERT_EQ(streamReaderFeed(r, buf2, 100), -1);
+
+    /* Sticky: subsequent Feed and Read return -1 */
+    ASSERT_EQ(streamReaderFeed(r, buf2, 1), -1);
+    char out[64];
+    ASSERT_EQ(streamReaderRead(r, out, sizeof(out)), -1);
+
+    streamReaderDestroy(r);
+}
+
+/* 13. pushFeedAfterEndFails */
+TEST_F(streamReaderPush, pushFeedAfterEndFails) {
+    const char *payload = "feed-end-test";
+    size_t plen = strlen(payload);
+
+    streamReaderConfig cfg = makePushConfig(true, 4096);
+    streamReader *r = streamReaderCreatePush(&cfg);
+    ASSERT_NE(r, nullptr);
+
+    ASSERT_EQ(streamReaderFeed(r, payload, plen), 0);
+    streamReaderFeedEnd(r);
+
+    /* Feed after FeedEnd returns -1 */
+    ASSERT_EQ(streamReaderFeed(r, "x", 1), -1);
+
+    /* FeedEnd is idempotent */
+    streamReaderFeedEnd(r);
+
+    streamReaderDestroy(r);
+}
+
+/* 14. pushReadAfterEndReturnsZero */
+TEST_F(streamReaderPush, pushReadAfterEndReturnsZero) {
+    const char *payload = "small passthrough";
+    size_t plen = strlen(payload);
+
+    streamReaderConfig cfg = makePushConfig(true, 4096);
+    streamReader *r = streamReaderCreatePush(&cfg);
+    ASSERT_NE(r, nullptr);
+
+    ASSERT_EQ(streamReaderFeed(r, payload, plen), 0);
+    streamReaderFeedEnd(r);
+
+    char out[64] = {0};
+    size_t total = 0;
+    ssize_t n;
+    while ((n = streamReaderRead(r, out + total, sizeof(out) - total)) > 0) {
+        total += (size_t)n;
+    }
+    ASSERT_EQ(n, 0);
+    ASSERT_EQ(total, plen);
+    ASSERT_EQ(memcmp(out, payload, plen), 0);
+
+    /* Subsequent Read calls keep returning 0 */
+    ASSERT_EQ(streamReaderRead(r, out, sizeof(out)), 0);
+    ASSERT_EQ(streamReaderRead(r, out, sizeof(out)), 0);
+
+    streamReaderDestroy(r);
+}
+
+/* 15. feedOnPullModeReaderFails */
+TEST_F(streamReaderPush, feedOnPullModeReaderFails) {
+    const char *payload = "pull mode data";
+    size_t plen = strlen(payload);
+
+    MemReader mr = {};
+    mr.data = (const uint8_t *)payload;
+    mr.len = plen;
+    streamReaderConfig cfg = makeReaderConfig(STREAM_KIND_RDB, true, 0);
+    streamReader *r = streamReaderCreate(&cfg, memReaderRead, &mr);
+    ASSERT_NE(r, nullptr);
+
+    /* Feed on pull-mode reader returns -1 */
+    ASSERT_EQ(streamReaderFeed(r, "x", 1), -1);
+
+    /* Pull-mode Read still works */
+    char out[64] = {0};
+    ssize_t n = streamReaderRead(r, out, plen);
+    ASSERT_EQ(n, (ssize_t)plen);
+    ASSERT_EQ(memcmp(out, payload, plen), 0);
+
+    streamReaderDestroy(r);
+}
+
+/* 16. pullModeUnchanged — confirm pull-mode roundtrip still works */
+TEST_F(streamReaderPush, pullModeUnchanged) {
+    const char *payload = "pull mode roundtrip insurance";
+    size_t plen = strlen(payload);
+
+    DynamicBuf db;
+    dynamicBufInit(&db);
+    streamWriterConfig wcfg = makeWriterConfig(ALGO_LZ4, 0, STREAM_KIND_RDB);
+    streamWriter *w = streamWriterCreate(&wcfg, emitToDynamicBuf, &db);
+    ASSERT_NE(w, nullptr);
+    ASSERT_GE(streamWriterWrite(w, payload, plen), 0);
+    ASSERT_EQ(streamWriterFinish(w), 0);
+    streamWriterDestroy(w);
+
+    MemReader mr = {};
+    mr.data = db.data;
+    mr.len = sdslen((const char *)db.data);
+    streamReaderConfig rcfg = makeReaderConfig(STREAM_KIND_RDB, false, 0);
+    streamReader *r = streamReaderCreate(&rcfg, memReaderRead, &mr);
+    ASSERT_NE(r, nullptr);
+
+    char out[128] = {0};
+    ASSERT_EQ(streamReaderRead(r, out, plen), (ssize_t)plen);
+    ASSERT_EQ(memcmp(out, payload, plen), 0);
+    ASSERT_EQ(streamReaderRead(r, out, sizeof(out)), 0);
+
+    streamReaderDestroy(r);
+    dynamicBufFree(&db);
+}
+
+/* 17. pushPassthroughReplaysPartialProbe */
+TEST_F(streamReaderPush, pushPassthroughReplaysPartialProbe) {
+    /* Feed 3 bytes (not enough for VKCS probe to decide), then 1 more byte
+     * completing the 4-byte check. All 4 bytes should be readable. */
+    const uint8_t data[] = {'N', 'O', 'P', 'E'};
+
+    streamReaderConfig cfg = makePushConfig(true, 4096);
+    streamReader *r = streamReaderCreatePush(&cfg);
+    ASSERT_NE(r, nullptr);
+
+    /* Feed 3 bytes — probe can't decide yet */
+    ASSERT_EQ(streamReaderFeed(r, data, 3), 0);
+    char out[16] = {0};
+    ssize_t n = streamReaderRead(r, out, sizeof(out));
+    /* May return 0 (needs more for probe) or drain partial — either is valid */
+    size_t total = (n > 0) ? (size_t)n : 0;
+
+    /* Feed 1 more byte completing 4-byte check → passthrough decided */
+    ASSERT_EQ(streamReaderFeed(r, data + 3, 1), 0);
+    streamReaderFeedEnd(r);
+
+    while ((n = streamReaderRead(r, out + total, sizeof(out) - total)) > 0) {
+        total += (size_t)n;
+    }
+    ASSERT_EQ(n, 0);
+    ASSERT_EQ(total, sizeof(data));
+    ASSERT_EQ(memcmp(out, data, sizeof(data)), 0);
+
+    streamReaderDestroy(r);
+}
+
+/* 18. pushErrorIsSticky */
+TEST_F(streamReaderPush, pushErrorIsSticky) {
+    /* Induce a real sticky error via feed cap overflow */
+    streamReaderConfig cfg = makePushConfig(true, 8);
+    streamReader *r = streamReaderCreatePush(&cfg);
+    ASSERT_NE(r, nullptr);
+
+    char buf[16];
+    memset(buf, 'X', sizeof(buf));
+    /* Overflow the cap → sets sticky IO error */
+    ASSERT_EQ(streamReaderFeed(r, buf, 16), -1);
+
+    /* Verify sticky behavior */
+    ASSERT_EQ(streamReaderFeed(r, "z", 1), -1);
+    char out[16];
+    ASSERT_EQ(streamReaderRead(r, out, sizeof(out)), -1);
+    ASSERT_FALSE(streamReaderNeedsInput(r));
+
+    streamReaderDestroy(r);
+}

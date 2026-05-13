@@ -5,6 +5,7 @@
  */
 
 #include "compression_stream.h"
+#include "sds.h"
 #include "zmalloc.h"
 #include <limits.h>
 #include <string.h>
@@ -98,11 +99,11 @@ static int writeVkcsEnvelope(vkcsEmitFn emit_cb,
 
 /* Rejects unknown flag bits so a future format extension fails loud rather
  * than silently corrupting load. */
-static int readVkcsEnvelope(const uint8_t *buf,
-                            size_t len,
-                            vkcsCodec *codec,
-                            uint8_t *stream_kind,
-                            bool *codec_checksum_enabled) {
+int readVkcsEnvelope(const uint8_t *buf,
+                     size_t len,
+                     vkcsCodec *codec,
+                     uint8_t *stream_kind,
+                     bool *codec_checksum_enabled) {
     if (!buf || len < VKCS_ENVELOPE_SIZE) return -1;
 
     if (memcmp(buf, "VKCS", VKCS_MAGIC_SIZE) != 0) return -1;
@@ -379,6 +380,8 @@ void streamWriterSetError(streamWriter *t) {
 
 /* ===== Streaming reader ===== */
 
+#define STREAM_READER_READ_WOULD_BLOCK ((ssize_t) - 2)
+
 struct streamReader {
     streamReaderReadFn read_cb;
     void *read_ctx;
@@ -400,6 +403,12 @@ struct streamReader {
     uint8_t *decompressed_buf;
     size_t decompressed_buf_pos;
     size_t decompressed_buf_len;
+
+    /* Push-mode fields */
+    bool push_mode;
+    sds feed_queue;  /* sds buffer used only in push mode; NULL otherwise */
+    bool feed_eof;   /* set by streamReaderFeedEnd */
+    size_t feed_cap; /* cached from cfg->push_feed_cap */
 };
 
 static void streamReaderSetError(streamReader *t, streamReaderError error_kind) {
@@ -479,6 +488,7 @@ int streamReaderProbe(streamReader *t) {
         ssize_t got = t->read_cb(t->read_ctx, buf, need);
         size_t consumed = 0;
 
+        if (got == STREAM_READER_READ_WOULD_BLOCK) return 0; /* push-mode: more input will arrive later */
         if (got < 0 || (size_t)got > need) {
             streamReaderSetError(t, STREAM_READER_ERROR_IO);
             return -1;
@@ -530,6 +540,7 @@ static ssize_t streamReaderReadPassthrough(streamReader *t, uint8_t *dst, size_t
     if (len == 0) return (ssize_t)total;
 
     ssize_t got = t->read_cb(t->read_ctx, dst, len);
+    if (got == STREAM_READER_READ_WOULD_BLOCK) return (ssize_t)total; /* return partial, no error */
     if (got < 0 || (size_t)got > len) return streamReaderFail(t, total);
     return (ssize_t)(total + (size_t)got);
 }
@@ -598,6 +609,7 @@ static int streamReaderRefillCompressedBuf(streamReader *t) {
     ssize_t got = t->read_cb(t->read_ctx,
                              t->compressed_buf + t->compressed_buf_pos + t->compressed_buf_len,
                              read_size);
+    if (got == STREAM_READER_READ_WOULD_BLOCK) return 0; /* push-mode: no more for now, not an error */
     if (got < 0 || (size_t)got > read_size) return -1;
     if (got == 0) return 0;
     t->compressed_buf_len += (size_t)got;
@@ -669,6 +681,13 @@ static ssize_t streamReaderReadCompressed(streamReader *t, uint8_t *dst, size_t 
                                                               : t->error_kind);
             }
             if (filled == 0 && !t->decompressor.frame_done) {
+                /* In push mode, an empty fill with the feed queue empty and no
+                 * FeedEnd means "need more input," not corruption. Pull-mode
+                 * callers get CORRUPT as before — their read_cb already
+                 * signaled EOF via a 0 return. */
+                if (t->push_mode && !t->feed_eof && sdslen(t->feed_queue) == 0) {
+                    break;
+                }
                 return streamReaderFailWithError(t, total, STREAM_READER_ERROR_CORRUPT);
             }
             if (filled == 0) break;
@@ -687,6 +706,11 @@ ssize_t streamReaderRead(streamReader *t, void *buf, size_t len) {
     if (len > (size_t)SSIZE_MAX) return -1;
 
     if (!t->probe.ready && streamReaderProbe(t) != 0) return -1;
+
+    /* In push mode, streamReaderProbe can return 0 even when the envelope
+     * hasn't fully arrived yet. Returning 0 here signals "need more input"
+     * instead of leaking partial probe bytes to the passthrough path. */
+    if (!t->probe.ready) return 0;
 
     if (!t->probe.compressed) {
         return streamReaderReadPassthrough(t, (uint8_t *)buf, len);
@@ -746,8 +770,64 @@ int streamReaderValidateEnd(streamReader *t) {
     return 0;
 }
 
+/* --- Push-mode (feed) API --- */
+
+static ssize_t streamReaderPushReadCb(void *ctx, void *buf, size_t len) {
+    streamReader *t = ctx;
+    size_t avail = sdslen(t->feed_queue);
+    if (avail == 0) {
+        return t->feed_eof ? 0 : STREAM_READER_READ_WOULD_BLOCK;
+    }
+    size_t take = len < avail ? len : avail;
+    memcpy(buf, t->feed_queue, take);
+    sdsrange(t->feed_queue, (ssize_t)take, -1);
+    return (ssize_t)take;
+}
+
+streamReader *streamReaderCreatePush(const streamReaderConfig *cfg) {
+    if (!cfg || cfg->push_feed_cap == 0) return NULL;
+    streamReader *t = streamReaderCreate(cfg, streamReaderPushReadCb, NULL);
+    if (!t) return NULL;
+    t->read_ctx = t;
+    t->push_mode = true;
+    t->feed_queue = sdsempty();
+    t->feed_cap = cfg->push_feed_cap;
+    return t;
+}
+
+int streamReaderFeed(streamReader *t, const void *src, size_t len) {
+    if (!t || !t->push_mode) return -1;
+    if (t->errored) return -1;
+    if (len == 0) return 0;
+    if (!src) return -1;
+    if (t->feed_eof) return -1;
+    if (sdslen(t->feed_queue) + len > t->feed_cap) {
+        streamReaderSetError(t, STREAM_READER_ERROR_IO);
+        return -1;
+    }
+    t->feed_queue = sdscatlen(t->feed_queue, src, len);
+    return 0;
+}
+
+void streamReaderFeedEnd(streamReader *t) {
+    if (!t) return;
+    t->feed_eof = true;
+}
+
+bool streamReaderNeedsInput(const streamReader *t) {
+    if (!t || !t->push_mode || t->errored || t->feed_eof) return false;
+    if (sdslen(t->feed_queue) > 0) return false;
+    if (t->compressed_buf_len > 0) return false;
+    if (t->decompressed_buf && t->decompressed_buf_pos < t->decompressed_buf_len) return false;
+    return true;
+}
+
 void streamReaderDestroy(streamReader *t) {
     if (!t) return;
     streamReaderResetCompressedState(t);
+    if (t->feed_queue) {
+        sdsfree(t->feed_queue);
+        t->feed_queue = NULL;
+    }
     zfree(t);
 }

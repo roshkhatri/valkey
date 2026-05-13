@@ -24,6 +24,7 @@
 #define VKCS_VERSION 1
 #define VKCS_FLAG_CODEC_CHECKSUM (1 << 0)
 #define STREAM_KIND_RDB 0x00
+#define STREAM_KIND_REPL 0x01
 
 typedef enum {
     VKCS_CODEC_LZ4 = 0x01,
@@ -49,7 +50,10 @@ typedef struct {
 typedef struct {
     uint8_t expected_stream_kind;
     bool allow_passthrough;
-    size_t buffer_size; /* 0 selects STREAM_READER_BUFFER_SIZE_DEFAULT. */
+    size_t buffer_size;   /* 0 selects STREAM_READER_BUFFER_SIZE_DEFAULT. */
+    size_t push_feed_cap; /* Push-mode only: maximum bytes buffered in the feed queue.
+                           * Must be > 0 for push-mode readers; the constructor rejects 0.
+                           * Ignored in pull mode. */
 } streamReaderConfig;
 
 typedef struct streamWriter streamWriter;
@@ -97,11 +101,46 @@ streamReader *streamReaderCreate(const streamReaderConfig *cfg,
  * source can block (file rios are fine; non-blocking sources are not). */
 int streamReaderProbe(streamReader *t);
 
-/* Full or fail: returns len on success, 0 on EOF, -1 on error. */
+/* Read up to len bytes into buf.
+ * len must fit in ssize_t; larger requests return -1 without consuming input.
+ * Returns:
+ * - >0: bytes produced (decompressed or passthrough)
+ * -  0: pull mode: EOF. push mode: either "need more feed" or "EOF after
+ *       FeedEnd + full drain" — use streamReaderNeedsInput() to distinguish.
+ * - -1: error */
 ssize_t streamReaderRead(streamReader *t, void *buf, size_t len);
 int streamReaderGetInfo(streamReader *t, streamReaderInfo *info);
 streamReaderError streamReaderGetError(const streamReader *t);
 int streamReaderValidateEnd(streamReader *t);
 void streamReaderDestroy(streamReader *t);
+
+/* Parse a VKCS envelope header. Returns 0 on success, -1 on error. */
+int readVkcsEnvelope(const uint8_t *buf, size_t len, vkcsCodec *codec, uint8_t *stream_kind, bool *codec_checksum_enabled);
+
+/* --- Push-mode (feed) API --- */
+
+/* Create a push-mode reader. The caller drives input via streamReaderFeed;
+ * no read callback is invoked. Returns NULL on invalid config (e.g.
+ * push_feed_cap == 0) or allocation failure. */
+streamReader *streamReaderCreatePush(const streamReaderConfig *cfg);
+
+/* Feed compressed (or passthrough) bytes into a push-mode reader.
+ * Returns 0 on success; -1 on error (sticky).
+ * Errors:
+ *   - reader is not in push mode
+ *   - reader has latched an error
+ *   - called after streamReaderFeedEnd with len > 0
+ *   - internal feed queue would exceed cfg->push_feed_cap */
+int streamReaderFeed(streamReader *t, const void *src, size_t len);
+
+/* Signal end of input for a push-mode reader. After this call, streamReaderRead
+ * will drain any remaining buffered output and then return 0 (EOF).
+ * Safe to call multiple times. */
+void streamReaderFeedEnd(streamReader *t);
+
+/* Returns true if a push-mode reader has no buffered input available and more
+ * input is needed before it can produce more output. Use this to distinguish
+ * "need more feed" from "truly EOF" when streamReaderRead returns 0. */
+bool streamReaderNeedsInput(const streamReader *t);
 
 #endif /* COMPRESSION_STREAM_H */

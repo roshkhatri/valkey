@@ -47,6 +47,7 @@
 #include "threads_mngr.h"
 #include "fmtargs.h"
 #include "io_threads.h"
+#include "compression.h"
 #include "tls.h"
 #include "sds.h"
 #include "module.h"
@@ -6592,6 +6593,10 @@ sds genValkeyInfoString(dict *section_dict, int all_sections, int everything) {
                     "slave_priority:%d\r\n", server.replica_priority,
                     "slave_read_only:%d\r\n", server.repl_replica_ro,
                     "replica_announced:%d\r\n", server.replica_announced));
+            if (server.repl_decompression_errors > 0) {
+                info = sdscatprintf(info, "repl_decompression_errors:%zu\r\n",
+                                    server.repl_decompression_errors);
+            }
         }
 
         info = sdscatprintf(info, "connected_slaves:%lu\r\n", listLength(server.replicas));
@@ -6624,12 +6629,35 @@ sds genValkeyInfoString(dict *section_dict, int all_sections, int everything) {
 
                 info = sdscatprintf(info,
                                     "slave%d:ip=%s,port=%d,state=%s,"
-                                    "offset=%lld,lag=%ld,type=%s\r\n",
+                                    "offset=%lld,lag=%ld,type=%s",
                                     replica_id, replica_ip, replica->repl_data->replica_listening_port, state,
                                     replica->repl_data->repl_ack_off, lag,
                                     replica->flag.repl_rdb_channel                                ? "rdb-channel"
                                     : replica->repl_data->repl_state == REPLICA_STATE_BG_RDB_LOAD ? "main-channel"
                                                                                                   : "replica");
+                if (replica->repl_data->repl_compressor) {
+                    info = sdscatprintf(info,
+                                        ",compression=%s"
+                                        ",compressed_bytes=%zu"
+                                        ",uncompressed_bytes=%zu"
+                                        ",compression_ratio=%.2f"
+                                        ",compression_errors=%zu"
+                                        ",compression_cpu_usec=%lld"
+                                        ",compression_phase0_retries=%zu"
+                                        ",affinity_misses=%zu",
+                                        compressionAlgoName(REPL_COMPRESSION_ALGO),
+                                        replica->repl_data->repl_compressed_bytes_total,
+                                        replica->repl_data->repl_uncompressed_bytes_total,
+                                        replica->repl_data->repl_compressed_bytes_total > 0
+                                            ? (double)replica->repl_data->repl_uncompressed_bytes_total /
+                                                  (double)replica->repl_data->repl_compressed_bytes_total
+                                            : 0.0,
+                                        replica->repl_data->repl_compression_errors,
+                                        replica->repl_data->repl_compression_cpu_usec,
+                                        replica->repl_data->repl_compression_phase0_retries,
+                                        replica->repl_data->repl_compression_affinity_misses);
+                }
+                info = sdscat(info, "\r\n");
                 replica_id++;
             }
         }

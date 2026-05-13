@@ -36,6 +36,7 @@
 #include "rio.h"
 #include "commands.h"
 #include "allocator_defrag.h"
+#include "compression.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -457,11 +458,9 @@ typedef enum {
 #define REPLICA_CAPA_SKIP_RDB_CHECKSUM_STR "skip-rdb-checksum" /* Supports skipping RDB checksum for sync requests. */
 #define REPLICA_CAPA_COMPRESSION_STR "compression"             /* Supports replication compression. */
 
-/* Hardcoded replication compression parameters, used by the future compressed
+/* Hardcoded replication compression parameters, used by the compressed
  * transport path. The algorithm is fixed to LZ4 and the level is fixed to LZ4
- * HC level 5 (higher compression, moderate CPU). These will become
- * configurable (repl-compression-algo, repl-compression-level) in a later
- * release. */
+ * HC level 5 (higher compression, moderate CPU). */
 #define REPL_COMPRESSION_ALGO ALGO_LZ4
 #define REPL_COMPRESSION_LEVEL 5
 
@@ -1232,6 +1231,9 @@ typedef struct ClientPubSubData {
                                       context of client side caching. */
 } ClientPubSubData;
 
+typedef struct streamWriter streamWriter;
+typedef struct streamReader streamReader;
+
 typedef struct ClientReplicationData {
     int repl_state;                      /* Replication state if this is a replica. */
     int repl_start_cmd_stream_on_ack;    /* Install replica write handler on first ACK. */
@@ -1263,6 +1265,20 @@ typedef struct ClientReplicationData {
     size_t ref_block_pos;                /* Access position of referenced buffer block,
                                            i.e. the next offset to send. */
     sds replica_nodeid;                  /* Node id in cluster mode. */
+    /* Incremental replication compression state (primary-side, per-replica) */
+    streamWriter *repl_compressor; /* Per-replica replication compressor. */
+    sds compressed_buf;            /* Pending compressed bytes for this replica. */
+    size_t compressed_buf_pos;     /* Next byte to write from compressed_buf. */
+    size_t compressed_raw_bytes;   /* Raw bytes represented by compressed_buf. */
+    int affinity_tid;              /* Sticky IO thread ID, -1 if unset. */
+    int compression_error;         /* Async compression error flag. */
+    /* Compression metrics (primary side, per-replica) */
+    size_t repl_compressed_bytes_total;      /* Total compressed bytes sent */
+    size_t repl_uncompressed_bytes_total;    /* Total raw bytes before compression */
+    size_t repl_compression_errors;          /* Compression failure count */
+    long long repl_compression_cpu_usec;     /* Cumulative CPU time in compression (microseconds) */
+    size_t repl_compression_phase0_retries;  /* Times Phase 0 drained unsent data (backpressure indicator) */
+    size_t repl_compression_affinity_misses; /* Times affinity fell back to shared inbox */
 } ClientReplicationData;
 
 typedef struct ClientModuleData {
@@ -2205,6 +2221,9 @@ struct valkeyServer {
                                            * when it receives an error on the replication stream */
     int repl_ignore_disk_write_error;     /* Configures whether replicas panic when unable to
                                            * persist writes to AOF. */
+    streamReader *repl_stream_decoder;    /* Replica-side compressed replication decoder (push-mode). */
+    sds repl_stream_decode_buf;           /* Scratch buffer for decoded replication bytes. */
+    size_t repl_decompression_errors;     /* Decompression failures (replica side). */
 
     /* The following two fields is where we store primary PSYNC replid/offset
      * while the PSYNC is in progress. At the end we'll copy the fields into
@@ -3014,6 +3033,13 @@ int getClientTypeByName(char *name);
 char *getClientTypeName(int client_class);
 void flushReplicasOutputBuffers(void);
 void disconnectReplicas(void);
+void disconnectCompressedReplicas(void);
+int replInitCompression(client *c, compressionAlgo algo, int level);
+void replDestroyCompression(client *c);
+int replDecompressQueryBuf(client *c, size_t new_data_start);
+int replInitDecompression(void);
+void replDestroyDecompression(void);
+void replRefreshDecompression(void);
 void evictClients(void);
 int listenToPort(connListener *fds);
 void pauseActions(pause_purpose purpose, mstime_t end, uint32_t actions);
