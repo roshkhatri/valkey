@@ -2032,7 +2032,6 @@ TEST_F(streamReaderPush, pushCompressedFrameDoneWithTrailingBytes) {
     size_t plen = strlen(payload);
 
     sds compressed = pushTestCompress(payload, plen);
-    size_t compressed_len = sdslen(compressed);
 
     /* Append trailing garbage */
     sds with_trailing = sdscatlen(compressed, "GARBAGE", 7);
