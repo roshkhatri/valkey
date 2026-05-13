@@ -233,8 +233,7 @@ jobs:
             --single integration/repl-compression \
             --single integration/skip-rdb-checksum \
             --tags -slow \
-            --config replcompression yes \
-            --config repl-compression-algo lz4
+            --config replcompression yes
 
   build-debian-old:
     runs-on: ubuntu-latest
