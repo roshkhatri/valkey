@@ -1921,13 +1921,13 @@ TEST_F(streamReaderPush, pushCompressedRoundtripSingleChunk) {
     for (size_t i = 0; i < sizeof(payload); i++) payload[i] = (char)('A' + (i % 26));
 
     sds compressed = pushTestCompress(payload, sizeof(payload));
-    size_t clen = sdslen(compressed);
+    size_t compressed_len = sdslen(compressed);
 
-    streamReaderConfig cfg = makePushConfig(true, clen + 1024);
+    streamReaderConfig cfg = makePushConfig(true, compressed_len + 1024);
     streamReader *r = streamReaderCreatePush(&cfg);
     ASSERT_NE(r, nullptr);
 
-    ASSERT_EQ(streamReaderFeed(r, compressed, clen), 0);
+    ASSERT_EQ(streamReaderFeed(r, compressed, compressed_len), 0);
     streamReaderFeedEnd(r);
 
     char out[4096] = {0};
@@ -1950,9 +1950,9 @@ TEST_F(streamReaderPush, pushCompressedRoundtripChunked) {
     for (size_t i = 0; i < sizeof(payload); i++) payload[i] = (char)('A' + (i % 26));
 
     sds compressed = pushTestCompress(payload, sizeof(payload));
-    size_t clen = sdslen(compressed);
+    size_t compressed_len = sdslen(compressed);
 
-    streamReaderConfig cfg = makePushConfig(true, clen + 1024);
+    streamReaderConfig cfg = makePushConfig(true, compressed_len + 1024);
     streamReader *r = streamReaderCreatePush(&cfg);
     ASSERT_NE(r, nullptr);
 
@@ -1960,7 +1960,7 @@ TEST_F(streamReaderPush, pushCompressedRoundtripChunked) {
      * With the bug fixes, Read returns 0 when more input is needed. */
     char out[4096] = {0};
     size_t total = 0;
-    for (size_t i = 0; i < clen; i++) {
+    for (size_t i = 0; i < compressed_len; i++) {
         ASSERT_EQ(streamReaderFeed(r, compressed + i, 1), 0);
         ssize_t n;
         while ((n = streamReaderRead(r, out + total, sizeof(out) - total)) > 0) {
@@ -1989,10 +1989,10 @@ TEST_F(streamReaderPush, pushCompressedProbeAcrossFeeds) {
     for (size_t i = 0; i < sizeof(payload); i++) payload[i] = (char)('a' + (i % 26));
 
     sds compressed = pushTestCompress(payload, sizeof(payload));
-    size_t clen = sdslen(compressed);
-    ASSERT_GE(clen, (size_t)VKCS_ENVELOPE_SIZE);
+    size_t compressed_len = sdslen(compressed);
+    ASSERT_GE(compressed_len, (size_t)VKCS_ENVELOPE_SIZE);
 
-    streamReaderConfig cfg = makePushConfig(true, clen + 1024);
+    streamReaderConfig cfg = makePushConfig(true, compressed_len + 1024);
     streamReader *r = streamReaderCreatePush(&cfg);
     ASSERT_NE(r, nullptr);
 
@@ -2010,7 +2010,7 @@ TEST_F(streamReaderPush, pushCompressedProbeAcrossFeeds) {
     ASSERT_EQ(n, 0); /* need more input — no compressed payload fed */
 
     /* Feed compressed data */
-    ASSERT_EQ(streamReaderFeed(r, compressed + VKCS_ENVELOPE_SIZE, clen - VKCS_ENVELOPE_SIZE), 0);
+    ASSERT_EQ(streamReaderFeed(r, compressed + VKCS_ENVELOPE_SIZE, compressed_len - VKCS_ENVELOPE_SIZE), 0);
     streamReaderFeedEnd(r);
 
     /* Drain all decompressed output */
@@ -2032,7 +2032,7 @@ TEST_F(streamReaderPush, pushCompressedFrameDoneWithTrailingBytes) {
     size_t plen = strlen(payload);
 
     sds compressed = pushTestCompress(payload, plen);
-    size_t clen = sdslen(compressed);
+    size_t compressed_len = sdslen(compressed);
 
     /* Append trailing garbage */
     sds with_trailing = sdscatlen(compressed, "GARBAGE", 7);
