@@ -6594,8 +6594,8 @@ sds genValkeyInfoString(dict *section_dict, int all_sections, int everything) {
                     "slave_read_only:%d\r\n", server.repl_replica_ro,
                     "replica_announced:%d\r\n", server.replica_announced));
             if (server.repl_decompression_errors > 0) {
-                info = sdscatprintf(info, "repl_decompression_errors:%zu\r\n",
-                                    server.repl_decompression_errors);
+                info = sdscatfmt(info, "repl_decompression_errors:%U\r\n",
+                                 (unsigned long long)server.repl_decompression_errors);
             }
         }
 
