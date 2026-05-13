@@ -143,4 +143,10 @@ void streamReaderFeedEnd(streamReader *t);
  * "need more feed" from "truly EOF" when streamReaderRead returns 0. */
 bool streamReaderNeedsInput(const streamReader *t);
 
+/* Returns true if the decompressor has reached the end of its frame.
+ * For one-shot streams (RDB) this is the normal terminal state.
+ * For long-lived streams (replication), frame completion mid-stream
+ * indicates protocol corruption and the caller should disconnect. */
+bool streamReaderFrameDone(const streamReader *t);
+
 #endif /* COMPRESSION_STREAM_H */

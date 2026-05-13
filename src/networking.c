@@ -4550,7 +4550,17 @@ int replDecompressQueryBuf(client *c, size_t new_data_start) {
             server.repl_decompression_errors++;
             return C_ERR;
         }
-        if (got == 0) break; /* WOULD_BLOCK or frame-done — both OK here */
+        if (got == 0) {
+            /* Long-lived replication stream must never hit a compressed frame
+             * end. If it does, the stream is corrupt or the primary sent an
+             * unexpected terminator — disconnect the link. */
+            if (streamReaderFrameDone(server.repl_stream_decoder)) {
+                serverLog(LL_WARNING, "Primary closed compressed replication frame unexpectedly");
+                server.repl_decompression_errors++;
+                return C_ERR;
+            }
+            break; /* WOULD_BLOCK — need more bytes, resume next read tick */
+        }
         if (sdslen(server.repl_stream_decode_buf) + (size_t)got > REPL_STREAM_DECODER_OUTPUT_MAX) {
             server.repl_decompression_errors++;
             return C_ERR;

@@ -406,9 +406,10 @@ struct streamReader {
 
     /* Push-mode fields */
     bool push_mode;
-    sds feed_queue;  /* sds buffer used only in push mode; NULL otherwise */
-    bool feed_eof;   /* set by streamReaderFeedEnd */
-    size_t feed_cap; /* cached from cfg->push_feed_cap */
+    sds feed_queue;   /* sds buffer used only in push mode; NULL otherwise */
+    size_t feed_head; /* consumed-up-to cursor in feed_queue */
+    bool feed_eof;    /* set by streamReaderFeedEnd */
+    size_t feed_cap;  /* cached from cfg->push_feed_cap */
 };
 
 static void streamReaderSetError(streamReader *t, streamReaderError error_kind) {
@@ -685,7 +686,7 @@ static ssize_t streamReaderReadCompressed(streamReader *t, uint8_t *dst, size_t 
                  * FeedEnd means "need more input," not corruption. Pull-mode
                  * callers get CORRUPT as before — their read_cb already
                  * signaled EOF via a 0 return. */
-                if (t->push_mode && !t->feed_eof && sdslen(t->feed_queue) == 0) {
+                if (t->push_mode && !t->feed_eof && sdslen(t->feed_queue) == t->feed_head) {
                     break;
                 }
                 return streamReaderFailWithError(t, total, STREAM_READER_ERROR_CORRUPT);
@@ -774,13 +775,16 @@ int streamReaderValidateEnd(streamReader *t) {
 
 static ssize_t streamReaderPushReadCb(void *ctx, void *buf, size_t len) {
     streamReader *t = ctx;
-    size_t avail = sdslen(t->feed_queue);
-    if (avail == 0) {
-        return t->feed_eof ? 0 : STREAM_READER_READ_WOULD_BLOCK;
-    }
+    size_t avail = sdslen(t->feed_queue) - t->feed_head;
+    if (avail == 0) return t->feed_eof ? 0 : STREAM_READER_READ_WOULD_BLOCK;
     size_t take = len < avail ? len : avail;
-    memcpy(buf, t->feed_queue, take);
-    sdsrange(t->feed_queue, (ssize_t)take, -1);
+    memcpy(buf, t->feed_queue + t->feed_head, take);
+    t->feed_head += take;
+    /* Compact only when head has drifted past half the buffer. */
+    if (t->feed_head > sdslen(t->feed_queue) / 2) {
+        sdsrange(t->feed_queue, (ssize_t)t->feed_head, -1);
+        t->feed_head = 0;
+    }
     return (ssize_t)take;
 }
 
@@ -801,7 +805,8 @@ int streamReaderFeed(streamReader *t, const void *src, size_t len) {
     if (len == 0) return 0;
     if (!src) return -1;
     if (t->feed_eof) return -1;
-    if (sdslen(t->feed_queue) + len > t->feed_cap) {
+    size_t effective_len = sdslen(t->feed_queue) - t->feed_head;
+    if (effective_len + len > t->feed_cap) {
         streamReaderSetError(t, STREAM_READER_ERROR_IO);
         return -1;
     }
@@ -816,10 +821,16 @@ void streamReaderFeedEnd(streamReader *t) {
 
 bool streamReaderNeedsInput(const streamReader *t) {
     if (!t || !t->push_mode || t->errored || t->feed_eof) return false;
-    if (sdslen(t->feed_queue) > 0) return false;
+    if (sdslen(t->feed_queue) > t->feed_head) return false;
     if (t->compressed_buf_len > 0) return false;
     if (t->decompressed_buf && t->decompressed_buf_pos < t->decompressed_buf_len) return false;
     return true;
+}
+
+bool streamReaderFrameDone(const streamReader *t) {
+    if (!t) return false;
+    if (!t->decompressor_initialized) return false;
+    return t->decompressor.frame_done;
 }
 
 void streamReaderDestroy(streamReader *t) {

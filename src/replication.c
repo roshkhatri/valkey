@@ -4642,6 +4642,7 @@ void replicationUnsetPrimary(void) {
      * the replicas will be able to partially resync with us, so it will be
      * a very fast reconnection. */
     disconnectReplicas();
+    replDestroyDecompression();
     server.repl_state = REPL_STATE_NONE;
 
     /* We need to make sure the new primary will start the replication stream
@@ -4684,6 +4685,7 @@ void replicationHandlePrimaryDisconnection(void) {
     server.primary = NULL;
     server.repl_state = REPL_STATE_CONNECT;
     server.repl_down_since = server.unixtime;
+    replDestroyDecompression();
     /* We lost connection with our primary, don't disconnect replicas yet,
      * maybe we'll be able to PSYNC with our primary later. We'll disconnect
      * the replicas only if we'll have to do a full resync with our primary. */
