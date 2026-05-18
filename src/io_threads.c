@@ -694,7 +694,7 @@ int tryOffloadFreeObjToIOThreads(robj *obj) {
     void *job = tagJob(sdsAllocPtr(objectGetVal(obj)), JOB_REQ_FREE_OBJ);
     if (unlikely(spmcEnqueue(&io_shared_inbox, job) == false)) return C_ERR;
     objectSetVal(obj, NULL);
-    decrRefCount(obj);
+    robjPoolPush(obj);
     io_jobs_submitted++;
     server.stat_io_freed_objects++;
     return C_OK;
