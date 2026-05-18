@@ -9,7 +9,7 @@
 #include "queues.h"
 #include "zmalloc.h"
 
-void mpscInit(mpscQueue *q, size_t queue_size) {
+inline void mpscInit(mpscQueue *q, size_t queue_size) {
     /* Queue size must be a power of 2 (the masking logic relies on it) */
     assert((queue_size & (queue_size - 1)) == 0);
     q->buffer = (_Atomic(void *) *)zmalloc(sizeof(_Atomic(void *)) * queue_size);
@@ -24,7 +24,7 @@ void mpscInit(mpscQueue *q, size_t queue_size) {
     }
 }
 
-void mpscFree(mpscQueue *q) {
+inline void mpscFree(mpscQueue *q) {
     if (q->buffer) {
         zfree(q->buffer);
         q->buffer = NULL;
@@ -35,7 +35,7 @@ void mpscFree(mpscQueue *q) {
     q->tail_cache = 0;
 }
 
-bool mpscEnqueue(mpscQueue *q, void *data, mpscTicket *ticket) {
+inline bool mpscEnqueue(mpscQueue *q, void *data, mpscTicket *ticket) {
     size_t tail;
     assert(data);
 
@@ -68,7 +68,7 @@ bool mpscEnqueue(mpscQueue *q, void *data, mpscTicket *ticket) {
     return true;
 }
 
-size_t mpscDequeueBatch(mpscQueue *q, void **jobs_out, size_t max_jobs) {
+inline size_t mpscDequeueBatch(mpscQueue *q, void **jobs_out, size_t max_jobs) {
     size_t popped_count = 0;
     size_t head = atomic_load_explicit(&q->head, memory_order_relaxed);
     size_t tail = q->tail_cache;
@@ -121,7 +121,7 @@ inline void spmcInit(spmcQueue *q, size_t queue_size) {
     }
 }
 
-void spmcFree(spmcQueue *q) {
+inline void spmcFree(spmcQueue *q) {
     if (q->buffer) {
         zfree(q->buffer);
         q->buffer = NULL;
@@ -131,7 +131,7 @@ void spmcFree(spmcQueue *q) {
     q->head_cache = 0;
 }
 
-bool spmcIsEmpty(spmcQueue *q) {
+inline bool spmcIsEmpty(spmcQueue *q) {
     /* Fast path: Check against cached consumer position */
     if (q->tail == q->head_cache) {
         return true;
@@ -144,12 +144,12 @@ bool spmcIsEmpty(spmcQueue *q) {
     return q->tail == curr_head;
 }
 
-size_t spmcSize(spmcQueue *q) {
+inline size_t spmcSize(spmcQueue *q) {
     size_t head = atomic_load_explicit(&q->head, memory_order_relaxed);
     return (q->tail >= head) ? (q->tail - head) : 0;
 }
 
-bool spmcEnqueue(spmcQueue *q, void *data) {
+inline bool spmcEnqueue(spmcQueue *q, void *data) {
     spmcCell *cell = &q->buffer[q->tail & (q->queue_size - 1)];
     size_t seq = atomic_load_explicit(&cell->sequence, memory_order_acquire);
 
@@ -169,7 +169,7 @@ bool spmcEnqueue(spmcQueue *q, void *data) {
     return true;
 }
 
-void *spmcDequeue(spmcQueue *q) {
+inline void *spmcDequeue(spmcQueue *q) {
     size_t head = atomic_load_explicit(&q->head, memory_order_relaxed);
     spmcCell *cell;
     void *data;
@@ -205,7 +205,7 @@ void *spmcDequeue(spmcQueue *q) {
  * SPSC QUEUE (Single-Producer Single-Consumer)
  * ========================================================================== */
 
-void spscInit(spscQueue *q, size_t queue_size) {
+inline void spscInit(spscQueue *q, size_t queue_size) {
     /* Queue size must be a power of 2 (the masking logic relies on it) */
     assert((queue_size & (queue_size - 1)) == 0);
     q->buffer = (void **)zmalloc(sizeof(void *) * queue_size);
@@ -217,7 +217,7 @@ void spscInit(spscQueue *q, size_t queue_size) {
     q->tail_local = 0;
 }
 
-void spscFree(spscQueue *q) {
+inline void spscFree(spscQueue *q) {
     if (q->buffer) {
         zfree(q->buffer);
         q->buffer = NULL;
@@ -229,7 +229,7 @@ void spscFree(spscQueue *q) {
     q->tail_local = 0;
 }
 
-bool spscIsFull(spscQueue *q) {
+inline bool spscIsFull(spscQueue *q) {
     const size_t curr_tail = q->tail_local;
 
     if (curr_tail - q->head_cache >= q->queue_size) {
@@ -246,7 +246,7 @@ bool spscIsFull(spscQueue *q) {
     return false;
 }
 
-void spscEnqueue(spscQueue *q, void *data, bool commit) {
+inline void spscEnqueue(spscQueue *q, void *data, bool commit) {
     q->buffer[q->tail_local & (q->queue_size - 1)] = data;
     q->tail_local++;
 
@@ -255,13 +255,13 @@ void spscEnqueue(spscQueue *q, void *data, bool commit) {
     }
 }
 
-void spscCommit(spscQueue *q) {
+inline void spscCommit(spscQueue *q) {
     size_t tail = atomic_load_explicit(&q->tail, memory_order_relaxed);
     if (q->tail_local == tail) return;
     atomic_store_explicit(&q->tail, q->tail_local, memory_order_release);
 }
 
-size_t spscDequeueBatch(spscQueue *q, void **jobs_out, size_t num_jobs) {
+inline size_t spscDequeueBatch(spscQueue *q, void **jobs_out, size_t num_jobs) {
     size_t curr_head = atomic_load_explicit(&q->head, memory_order_relaxed);
     size_t curr_tail_cache = q->tail_cache;
 
@@ -281,7 +281,7 @@ size_t spscDequeueBatch(spscQueue *q, void **jobs_out, size_t num_jobs) {
     return count;
 }
 
-bool spscIsEmpty(spscQueue *q) {
+inline bool spscIsEmpty(spscQueue *q) {
     /* Fast path */
     if (q->tail_local == q->head_cache) {
         return true;

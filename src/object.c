@@ -31,7 +31,6 @@
 #include "hashtable.h"
 #include "server.h"
 #include "serverassert.h"
-#include "io_threads.h"
 #include "functions.h"
 #include "intset.h" /* Compact integer set structure */
 #include "util.h"
@@ -49,36 +48,6 @@
 /* For objects with large embedded keys, we reserve space for an expire field,
  * so if expire is set later, we don't need to reallocate the object. */
 #define KEY_SIZE_TO_INCLUDE_EXPIRE_THRESHOLD 128
-
-/* Per-main-thread robj free-list to avoid zfree on the hot path. */
-#define ROBJ_FREELIST_MAX 32
-static int robj_freelist_len = 0;
-static void *robj_freelist[ROBJ_FREELIST_MAX];
-static size_t robj_freelist_size[ROBJ_FREELIST_MAX];
-
-void robjPoolPush(robj *obj) {
-    if (robj_freelist_len < ROBJ_FREELIST_MAX) {
-        robj_freelist_size[robj_freelist_len] = zmalloc_usable_size(obj);
-        robj_freelist[robj_freelist_len] = obj;
-        robj_freelist_len++;
-    } else {
-        zfree(obj);
-    }
-}
-
-static robj *robjPoolPop(size_t min_size, size_t *bufsize) {
-    for (int i = robj_freelist_len - 1; i >= 0; i--) {
-        if (robj_freelist_size[i] >= min_size) {
-            *bufsize = robj_freelist_size[i];
-            robj *obj = robj_freelist[i];
-            robj_freelist[i] = robj_freelist[robj_freelist_len - 1];
-            robj_freelist_size[i] = robj_freelist_size[robj_freelist_len - 1];
-            robj_freelist_len--;
-            return obj;
-        }
-    }
-    return NULL;
-}
 
 /* ===================== Creation and parsing of objects ==================== */
 
@@ -103,8 +72,7 @@ static robj *createUnembeddedObjectWithKeyAndExpire(int type, void *val, const_s
     }
     /* Allocate and set the declared fields. */
     size_t bufsize = 0;
-    robj *o = (inMainThread() ? robjPoolPop(min_size, &bufsize) : NULL);
-    if (!o) o = zmalloc_usable(min_size, &bufsize);
+    robj *o = zmalloc_usable(min_size, &bufsize);
     o->type = type;
     o->encoding = OBJ_ENCODING_RAW;
     o->refcount = 1;
