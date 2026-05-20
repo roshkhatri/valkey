@@ -6,6 +6,7 @@
 
 #include "compression.h"
 #include "compression_lz4.h"
+#include "compression_zstd.h"
 #include <limits.h>
 #include <string.h>
 
@@ -39,6 +40,16 @@ static const compressionCodecImpl compressionLz4CodecImpl = {
     .decompress_feed = compressionLz4DecompressFeed,
 };
 
+static const compressionCodecImpl compressionZstdCodecImpl = {
+    .compressor_init = compressionZstdCompressorInit,
+    .compressor_destroy = compressionZstdCompressorDestroy,
+    .decompressor_init = compressionZstdDecompressorInit,
+    .decompressor_destroy = compressionZstdDecompressorDestroy,
+    .compress_output_bound = compressionZstdOutputBound,
+    .compress_feed = compressionZstdCompressFeed,
+    .decompress_feed = compressionZstdDecompressFeed,
+};
+
 typedef struct {
     const char *name;
     const compressionCodecImpl *impl;
@@ -48,6 +59,7 @@ static const compressionAlgoEntry compressionAlgoTable[] = {
     [ALGO_NONE] = {"none", NULL},
     [ALGO_LZF] = {"lzf", NULL},
     [ALGO_LZ4] = {"lz4", &compressionLz4CodecImpl},
+    [ALGO_ZSTD] = {"zstd", &compressionZstdCodecImpl},
 };
 
 static const compressionAlgoEntry *compressionAlgoEntryForAlgo(compressionAlgo algo) {

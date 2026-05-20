@@ -35,7 +35,7 @@ typedef struct {
 } vkcsProbe;
 
 static bool vkcsCodecIsSupported(vkcsCodec codec) {
-    return codec == VKCS_CODEC_LZ4;
+    return codec == VKCS_CODEC_LZ4 || codec == VKCS_CODEC_ZSTD;
 }
 
 static bool vkcsProbeHasMagicPrefix(const vkcsProbe *probe) {
@@ -66,6 +66,7 @@ static void vkcsProbeSetCompressed(vkcsProbe *probe,
 static int compressionAlgoToVkcsCodec(compressionAlgo algo, vkcsCodec *codec) {
     switch (algo) {
     case ALGO_LZ4: *codec = VKCS_CODEC_LZ4; return 0;
+    case ALGO_ZSTD: *codec = VKCS_CODEC_ZSTD; return 0;
     default: return -1;
     }
 }
@@ -73,6 +74,7 @@ static int compressionAlgoToVkcsCodec(compressionAlgo algo, vkcsCodec *codec) {
 static int vkcsCodecToCompressionAlgo(vkcsCodec codec, compressionAlgo *algo) {
     switch (codec) {
     case VKCS_CODEC_LZ4: *algo = ALGO_LZ4; return 0;
+    case VKCS_CODEC_ZSTD: *algo = ALGO_ZSTD; return 0;
     default: return -1;
     }
 }

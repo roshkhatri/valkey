@@ -68,6 +68,25 @@ tags {"check-rdb network external:skip logreqres:skip"} {
             r config set rdb-compression-algo lzf
         }
 
+        test "test valkey-check-rdb validates ZSTD-compressed RDB frame" {
+            r flushall
+            r config set rdbcompression yes
+            r config set rdb-compression-algo zstd
+            r set zstd:key [string repeat "payload " 200]
+            r save
+
+            set dump_rdb [file join [lindex [r config get dir] 1] dump.rdb]
+            catch {
+                exec $::VALKEY_CHECK_RDB_BIN $dump_rdb
+            } result
+            assert_match {*RDB looks OK!*} $result
+            assert_match {*Skipping logical RDB checksum for streaming-compressed input.*} $result
+            assert_no_match {*Checksum OK*} $result
+
+            # Keep subsequent tests on default path unless they explicitly change it.
+            r config set rdb-compression-algo lzf
+        }
+
         test "test valkey-check-rdb stats with empty RDB" {
             r flushall
             r save

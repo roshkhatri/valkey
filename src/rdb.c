@@ -1601,7 +1601,7 @@ static int rdbSaveInternal(int req, const char *filename, rdbSaveInfo *rsi, int 
     if (use_streaming_compression) {
         streamWriterConfig cfg = {
             .algo = (compressionAlgo)server.rdb_compression_algo,
-            .level = 0,
+            .level = 0, /* Codec default; ZSTD maps 0 to ZSTD_CLEVEL_DEFAULT. */
             .stream_kind = STREAM_KIND_RDB,
             .codec_checksum_enabled = server.rdb_checksum != 0,
         };

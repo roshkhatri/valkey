@@ -58,6 +58,30 @@ start_server {overrides {save "" enable-debug-command local}} {
         assert_rdb_test_dataset r $prefix
     }
 
+    test {RDB save and load round-trip with ZSTD compression} {
+        set prefix "zstd-round-trip"
+        r config set rdbcompression yes
+        r config set rdb-compression-algo zstd
+        write_rdb_test_dataset r $prefix
+        assert_rdb_test_dataset r $prefix
+        set digest [debug_digest]
+
+        assert_equal "OK" [r save]
+        set header [read_dump_rdb_header_bytes r]
+        assert_equal "VKCS" [string range $header 0 3]
+        binary scan [string index $header 5] cu codec
+        assert_equal 2 $codec
+        binary scan [string index $header 6] cu flags
+        assert {$flags == 1}
+        r config rewrite
+        restart_server 0 true false
+
+        assert_equal "zstd" [lindex [r config get rdb-compression-algo] 1]
+        set newdigest [debug_digest]
+        assert {$digest eq $newdigest}
+        assert_rdb_test_dataset r $prefix
+    }
+
     test {Empty LZ4-compressed RDB saves and loads correctly} {
         r config set rdbcompression yes
         r config set rdb-compression-algo lz4
@@ -211,7 +235,7 @@ start_server {overrides {save "" enable-debug-command local}} {
     }
 
     test {Invalid compression algo config is rejected} {
-        assert_error "*argument(s) must be one of the following: lzf, lz4*" {
+        assert_error "*argument(s) must be one of the following: lzf, lz4, zstd*" {
             r config set rdb-compression-algo snappy
         }
     }
@@ -289,6 +313,34 @@ start_server {overrides {save "" enable-debug-command local}} {
         fconfigure $fd -translation binary
         seek $fd -8 end
         puts -nonewline $fd "foobar00"
+        close $fd
+
+        catch {r debug reload nosave} err
+        assert_match "*Error*" $err
+    }
+
+    test {ZSTD compressed RDB detects tail corruption when codec checksums are enabled} {
+        r config set rdbcompression yes
+        r config set rdb-compression-algo zstd
+        assert_equal "yes" [lindex [r config get rdbchecksum] 1]
+        r flushall
+        for {set i 0} {$i < 100} {incr i} {
+            r set "zstd-footer:$i" [string repeat "payload$i " 100]
+        }
+
+        r save
+        set rdbfile [file join [lindex [r config get dir] 1] dump.rdb]
+        set header [read_dump_rdb_header_bytes r]
+        assert_equal "VKCS" [string range $header 0 3]
+        binary scan [string index $header 5] cu codec
+        assert_equal 2 $codec
+        binary scan [string index $header 6] cu flags
+        assert {$flags == 1}
+
+        set fd [open $rdbfile r+]
+        fconfigure $fd -translation binary
+        seek $fd -4 end
+        puts -nonewline $fd "bad!"
         close $fd
 
         catch {r debug reload nosave} err

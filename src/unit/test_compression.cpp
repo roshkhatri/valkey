@@ -14,6 +14,8 @@
 
 extern "C" {
 #include "../../deps/lz4/lz4frame.h"
+#define ZSTD_STATIC_LINKING_ONLY
+#include "../../deps/zstd/zstd.h"
 #include "compression.h"
 #include "compression_rio.h"
 #include "compression_stream.h"
@@ -112,6 +114,15 @@ static bool lz4FrameUsesLinkedBlocks(const uint8_t *data, size_t len) {
     return has_linked_blocks;
 }
 
+static bool zstdFrameHasContentChecksum(const uint8_t *data, size_t len) {
+    ZSTD_FrameHeader frame_header = {};
+    size_t ret = ZSTD_getFrameHeader(&frame_header, data, len);
+    EXPECT_FALSE(ZSTD_isError(ret));
+    EXPECT_EQ(ret, 0u);
+    if (ZSTD_isError(ret) || ret != 0) return false;
+    return frame_header.checksumFlag != 0;
+}
+
 static ssize_t memReaderRead(void *ctx, void *buf, size_t len) {
     MemReader *r = (MemReader *)ctx;
     if (!r || !buf) return -1;
@@ -186,6 +197,15 @@ TEST_F(CompressionTest, streamCompressorInitDestroy) {
     ASSERT_EQ(sc.ctx, nullptr) << "ctx should be nullptr after destroy";
     ASSERT_EQ(sc.algo, ALGO_NONE) << "algo should be NONE after destroy";
 
+    streamCompressor sc_zstd;
+    ASSERT_EQ(streamCompressorInit(&sc_zstd, ALGO_ZSTD, 3), 0) << "ZSTD init should succeed";
+    ASSERT_EQ(sc_zstd.algo, ALGO_ZSTD) << "algo should be ZSTD";
+    ASSERT_EQ(sc_zstd.stream_started, false) << "stream_started should be false";
+    ASSERT_NE(sc_zstd.ctx, nullptr) << "ctx should be non-nullptr";
+    streamCompressorDestroy(&sc_zstd);
+    ASSERT_EQ(sc_zstd.ctx, nullptr) << "ctx should be nullptr after destroy";
+    ASSERT_EQ(sc_zstd.algo, ALGO_NONE) << "algo should be NONE after destroy";
+
     /* ALGO_NONE should fail */
     streamCompressor sc3;
     ASSERT_EQ(streamCompressorInit(&sc3, ALGO_NONE, 0), -1) << "NONE init should fail";
@@ -203,6 +223,14 @@ TEST_F(CompressionTest, streamDecompressorInitDestroy) {
     streamDecompressorDestroy(&sd);
     ASSERT_EQ(sd.ctx, nullptr) << "ctx should be nullptr after destroy";
     ASSERT_EQ(sd.algo, ALGO_NONE) << "algo should be NONE after destroy";
+
+    streamDecompressor sd_zstd;
+    ASSERT_EQ(streamDecompressorInit(&sd_zstd, ALGO_ZSTD), 0) << "ZSTD decomp init should succeed";
+    ASSERT_EQ(sd_zstd.algo, ALGO_ZSTD) << "algo should be ZSTD";
+    ASSERT_NE(sd_zstd.ctx, nullptr) << "ctx should be non-nullptr";
+    streamDecompressorDestroy(&sd_zstd);
+    ASSERT_EQ(sd_zstd.ctx, nullptr) << "ctx should be nullptr after destroy";
+    ASSERT_EQ(sd_zstd.algo, ALGO_NONE) << "algo should be NONE after destroy";
 }
 
 /* --- Test: LZ4 compress → decompress round-trip --- */
@@ -239,6 +267,44 @@ TEST_F(CompressionTest, streamCompressDecompressRoundTrip) {
     ASSERT_EQ((size_t)decompressed_len, input_len) << "decompressed length should match input";
     ASSERT_EQ(memcmp(decompressed, input, input_len), 0) << "decompressed content should match input";
     ASSERT_EQ(input_consumed, (size_t)compressed_len) << "all compressed input should be consumed";
+
+    streamDecompressorDestroy(&sd);
+    zfree(compressed);
+}
+
+TEST_F(CompressionTest, zstdStreamCompressDecompressRoundTrip) {
+    const char *input = "Hello, Valkey Zstandard compression. This is a streaming test payload.";
+    size_t input_len = strlen(input);
+
+    streamCompressor sc;
+    ASSERT_EQ(streamCompressorInit(&sc, ALGO_ZSTD, 3), 0);
+    ASSERT_EQ(sc.algo, ALGO_ZSTD);
+    ASSERT_NE(sc.ctx, nullptr);
+
+    size_t bound = streamCompressOutputBound(&sc, input_len);
+    ASSERT_GT(bound, 0u);
+    uint8_t *compressed = (uint8_t *)zmalloc(bound);
+    ASSERT_NE(compressed, nullptr);
+
+    ssize_t compressed_len = streamCompressFeed(&sc, compressed, bound,
+                                                (const uint8_t *)input, input_len,
+                                                FLUSH_END);
+    ASSERT_GT(compressed_len, 0);
+    ASSERT_FALSE(sc.stream_started);
+    streamCompressorDestroy(&sc);
+
+    streamDecompressor sd;
+    ASSERT_EQ(streamDecompressorInit(&sd, ALGO_ZSTD), 0);
+
+    uint8_t decompressed[256];
+    size_t input_consumed = 0;
+    ssize_t decompressed_len = streamDecompressFeed(&sd, decompressed, sizeof(decompressed),
+                                                    compressed, (size_t)compressed_len,
+                                                    &input_consumed);
+    ASSERT_EQ(decompressed_len, (ssize_t)input_len);
+    ASSERT_EQ(memcmp(decompressed, input, input_len), 0);
+    ASSERT_EQ(input_consumed, (size_t)compressed_len);
+    ASSERT_TRUE(sd.frame_done);
 
     streamDecompressorDestroy(&sd);
     zfree(compressed);
@@ -721,6 +787,13 @@ TEST_F(CompressionTest, streamWriterCreateDestroy) {
     ASSERT_EQ(streamWriterIsErrored(t), 0) << "should not be errored";
 
     streamWriterDestroy(t);
+
+    streamWriterConfig zstd_cfg = makeWriterConfig(ALGO_ZSTD, 3, STREAM_KIND_RDB);
+    streamWriter *zstd_t = streamWriterCreate(&zstd_cfg, emitToDynamicBuf, &db);
+    ASSERT_NE(zstd_t, nullptr) << "create should succeed for ZSTD";
+    ASSERT_EQ(streamWriterIsErrored(zstd_t), 0) << "should not be errored";
+    streamWriterDestroy(zstd_t);
+
     dynamicBufFree(&db);
 
     /* nullptr config should fail */
@@ -804,6 +877,189 @@ TEST_F(CompressionTest, streamWriterRoundTrip) {
     ASSERT_EQ(memcmp(decompressed, test_data, data_len), 0) << "decompressed data should match original";
 
     streamDecompressorDestroy(&sd);
+    streamWriterDestroy(t);
+    dynamicBufFree(&db);
+}
+
+TEST_F(CompressionTest, zstdStreamWriterRoundTrip) {
+    DynamicBuf db;
+    dynamicBufInit(&db);
+
+    streamWriterConfig cfg = makeWriterConfig(ALGO_ZSTD, 3, STREAM_KIND_RDB, true);
+    streamWriter *t = streamWriterCreate(&cfg, emitToDynamicBuf, &db);
+    ASSERT_NE(t, nullptr);
+
+    const char *chunks[] = {
+        "first zstd chunk ",
+        "second zstd chunk ",
+        "third zstd chunk",
+    };
+    size_t expected_len = 0;
+    for (size_t i = 0; i < sizeof(chunks) / sizeof(chunks[0]); i++) {
+        ASSERT_GE(streamWriterWrite(t, chunks[i], strlen(chunks[i])), 0);
+        expected_len += strlen(chunks[i]);
+        if (i == 0) {
+            ASSERT_EQ(streamWriterFlush(t), 0);
+        }
+    }
+    ASSERT_EQ(streamWriterFinish(t), 0);
+
+    ASSERT_GT(sdslen((const char *)db.data), (size_t)VKCS_ENVELOPE_SIZE);
+    ASSERT_EQ(db.data[0], VKCS_MAGIC_0);
+    ASSERT_EQ(db.data[1], VKCS_MAGIC_1);
+    ASSERT_EQ(db.data[2], VKCS_MAGIC_2);
+    ASSERT_EQ(db.data[3], VKCS_MAGIC_3);
+    ASSERT_EQ(db.data[4], VKCS_VERSION);
+    ASSERT_EQ(db.data[5], VKCS_CODEC_ZSTD);
+    ASSERT_EQ(db.data[6], (uint8_t)VKCS_FLAG_CODEC_CHECKSUM);
+    ASSERT_EQ(db.data[7], STREAM_KIND_RDB);
+
+    MemReader mr = {};
+    mr.data = db.data;
+    mr.len = sdslen((const char *)db.data);
+    mr.max_chunk = 19;
+    streamReaderConfig rcfg = makeReaderConfig(STREAM_KIND_RDB, false, 32 * 1024);
+    streamReader *r = streamReaderCreate(&rcfg, memReaderRead, &mr);
+    ASSERT_NE(r, nullptr);
+
+    streamReaderInfo info;
+    ASSERT_EQ(streamReaderGetInfo(r, &info), 0);
+    ASSERT_TRUE(info.compressed);
+    ASSERT_EQ(info.algo, ALGO_ZSTD);
+    ASSERT_EQ(info.stream_kind, STREAM_KIND_RDB);
+    ASSERT_TRUE(info.codec_checksum_enabled);
+
+    char out[128] = {0};
+    ASSERT_EQ(streamReaderRead(r, out, expected_len), (ssize_t)expected_len);
+    ASSERT_EQ(memcmp(out, "first zstd chunk second zstd chunk third zstd chunk",
+                     expected_len),
+              0);
+    ASSERT_EQ(streamReaderValidateEnd(r), 0);
+
+    streamReaderDestroy(r);
+    streamWriterDestroy(t);
+    dynamicBufFree(&db);
+}
+
+TEST_F(CompressionTest, zstdStreamWriterLargePayload) {
+    const size_t payload_len = (1024 * 1024) + 4096;
+    uint8_t *payload = (uint8_t *)zmalloc(payload_len);
+    ASSERT_NE(payload, nullptr);
+    for (size_t i = 0; i < payload_len; i++) {
+        payload[i] = (uint8_t)((i * 17 + 11) % 251);
+    }
+
+    DynamicBuf db;
+    dynamicBufInit(&db);
+
+    streamWriterConfig cfg = makeWriterConfig(ALGO_ZSTD, 3, STREAM_KIND_RDB);
+    streamWriter *t = streamWriterCreate(&cfg, emitToDynamicBuf, &db);
+    ASSERT_NE(t, nullptr);
+    ASSERT_GE(streamWriterWrite(t, payload, payload_len), 0);
+    ASSERT_EQ(streamWriterFinish(t), 0);
+    streamWriterDestroy(t);
+
+    MemReader mr = {};
+    mr.data = db.data;
+    mr.len = sdslen((const char *)db.data);
+    mr.max_chunk = 4096;
+    streamReaderConfig rcfg = makeReaderConfig(STREAM_KIND_RDB, false, 64 * 1024);
+    streamReader *r = streamReaderCreate(&rcfg, memReaderRead, &mr);
+    ASSERT_NE(r, nullptr);
+
+    uint8_t *out = (uint8_t *)zmalloc(payload_len);
+    ASSERT_NE(out, nullptr);
+    size_t total = 0;
+    while (total < payload_len) {
+        ssize_t nread = streamReaderRead(r, out + total, payload_len - total);
+        ASSERT_GT(nread, 0) << "streamReaderRead should keep making progress";
+        total += (size_t)nread;
+    }
+    ASSERT_EQ(memcmp(out, payload, payload_len), 0);
+    ASSERT_EQ(streamReaderRead(r, out, 1), 0) << "reader should stop at frame end";
+
+    zfree(out);
+    zfree(payload);
+    streamReaderDestroy(r);
+    dynamicBufFree(&db);
+}
+
+TEST_F(CompressionTest, zstdStreamWriterCodecChecksumToggle) {
+    const char *payload = "zstd checksum toggle payload";
+
+    for (bool codec_checksum : {false, true}) {
+        DynamicBuf db;
+        dynamicBufInit(&db);
+
+        streamWriterConfig cfg = makeWriterConfig(ALGO_ZSTD, 3, STREAM_KIND_RDB,
+                                                  codec_checksum);
+        streamWriter *t = streamWriterCreate(&cfg, emitToDynamicBuf, &db);
+        ASSERT_NE(t, nullptr);
+        ASSERT_GE(streamWriterWrite(t, payload, strlen(payload)), 0);
+        ASSERT_EQ(streamWriterFinish(t), 0);
+
+        ASSERT_GT(sdslen((const char *)db.data), (size_t)VKCS_ENVELOPE_SIZE);
+        uint8_t flags = db.data[6];
+        ASSERT_EQ((flags & VKCS_FLAG_CODEC_CHECKSUM) != 0, codec_checksum)
+            << "VKCS envelope checksum flag should match configured setting";
+        ASSERT_EQ(zstdFrameHasContentChecksum(db.data + VKCS_ENVELOPE_SIZE,
+                                              sdslen((const char *)db.data) - VKCS_ENVELOPE_SIZE),
+                  codec_checksum)
+            << "ZSTD content checksum should reflect configured codec checksum setting";
+
+        MemReader mr = {};
+        mr.data = db.data;
+        mr.len = sdslen((const char *)db.data);
+        streamReaderConfig rcfg = makeReaderConfig(STREAM_KIND_RDB, false, 0);
+        streamReader *r = streamReaderCreate(&rcfg, memReaderRead, &mr);
+        ASSERT_NE(r, nullptr);
+
+        streamReaderInfo info;
+        ASSERT_EQ(streamReaderGetInfo(r, &info), 0);
+        ASSERT_EQ(info.algo, ALGO_ZSTD);
+        ASSERT_EQ(info.codec_checksum_enabled, codec_checksum);
+
+        char out[128] = {0};
+        ASSERT_EQ(streamReaderRead(r, out, strlen(payload)), (ssize_t)strlen(payload));
+        ASSERT_EQ(memcmp(out, payload, strlen(payload)), 0);
+        ASSERT_EQ(streamReaderValidateEnd(r), 0);
+
+        streamReaderDestroy(r);
+        streamWriterDestroy(t);
+        dynamicBufFree(&db);
+    }
+}
+
+TEST_F(CompressionTest, zstdStreamWriterFlushBehavior) {
+    DynamicBuf db;
+    dynamicBufInit(&db);
+
+    streamWriterConfig cfg = makeWriterConfig(ALGO_ZSTD, 3, STREAM_KIND_RDB);
+    streamWriter *t = streamWriterCreate(&cfg, emitToDynamicBuf, &db);
+    ASSERT_NE(t, nullptr);
+
+    ASSERT_EQ(streamWriterFlush(t), 0) << "flush before write should be no-op success";
+    ASSERT_EQ(sdslen((const char *)db.data), 0u) << "flush before write should not emit bytes";
+
+    ASSERT_GE(streamWriterWrite(t, "first chunk", 11), 0);
+    ASSERT_EQ(streamWriterFlush(t), 0);
+    ASSERT_GE(streamWriterWrite(t, "second chunk", 12), 0);
+    ASSERT_EQ(streamWriterFinish(t), 0);
+
+    MemReader mr = {};
+    mr.data = db.data;
+    mr.len = sdslen((const char *)db.data);
+    mr.max_chunk = 5;
+    streamReaderConfig rcfg = makeReaderConfig(STREAM_KIND_RDB, false, 0);
+    streamReader *r = streamReaderCreate(&rcfg, memReaderRead, &mr);
+    ASSERT_NE(r, nullptr);
+
+    char out[64] = {0};
+    ASSERT_EQ(streamReaderRead(r, out, 23), 23);
+    ASSERT_EQ(memcmp(out, "first chunksecond chunk", 23), 0);
+    ASSERT_EQ(streamReaderValidateEnd(r), 0);
+
+    streamReaderDestroy(r);
     streamWriterDestroy(t);
     dynamicBufFree(&db);
 }

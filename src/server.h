@@ -2081,7 +2081,7 @@ struct valkeyServer {
     char *rdb_filename;                   /* Name of RDB file */
     int rdb_compression;                  /* Use compression in RDB? */
     int rdb_compression_algo;             /* RDB compression algorithm (compressionAlgo):
-                                           * ALGO_LZF (default), ALGO_LZ4 */
+                                           * ALGO_LZF (default), ALGO_LZ4, ALGO_ZSTD */
     int repl_compression;                 /* Use compression for replication? 0=no (default) */
     int repl_compression_thread_affinity; /* Pin compressed replicas to one IO thread. 1=yes (default) */
     int rdb_checksum;                     /* Use RDB checksum? */

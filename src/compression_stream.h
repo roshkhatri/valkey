@@ -28,6 +28,7 @@
 
 typedef enum {
     VKCS_CODEC_LZ4 = 0x01,
+    VKCS_CODEC_ZSTD = 0x02,
 } vkcsCodec;
 
 typedef int (*vkcsEmitFn)(void *ctx, const uint8_t *data, size_t len);

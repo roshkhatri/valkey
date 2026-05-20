@@ -95,6 +95,7 @@ JEMALLOC_LIB := ../../deps/jemalloc/lib/libjemalloc.a
 HDR_HISTOGRAM_LIB := ../../deps/hdr_histogram/libhdrhistogram.a
 FPCONV_LIB := ../../deps/fpconv/libfpconv.a
 LZ4_LIB := ../../deps/lz4/liblz4.a
+ZSTD_LIB := ../../deps/zstd/libzstd.a
 TLS_LIBS := ../../deps/libvalkey/lib/libvalkey_tls.a -lssl -lcrypto
 GTEST_CFLAGS ?=
 GTEST_LIBS   ?=
@@ -156,7 +157,8 @@ LD_LIBS := $(HIREDIS_LIB) \
 	$(GTEST_LIBS) \
 	$(HDR_HISTOGRAM_LIB) \
 	$(FPCONV_LIB) \
-	$(LZ4_LIB)
+	$(LZ4_LIB) \
+	$(ZSTD_LIB)
 
 # Add libbacktrace support if enabled
 ifeq ($(USE_LIBBACKTRACE),yes)
@@ -176,7 +178,7 @@ endif
 # Compile C++ test files, recompile if generated_wrappers or compiler flags change
 %.o: %.cpp generated_wrappers.cpp .flags
 	$(CXX) -MD -MP -std=c++17 -faligned-new -Wno-write-strings -fpermissive $(GCC_FLAGS) $(OPT) $(DEBUG) $(TEST_CFLAGS) -Wall -Wno-deprecated-declarations -c \
-	-isystem .. -I ../../deps/lua/src/ -I ../../deps/hdr_histogram/ -I ../../deps/fpconv/ $(JEMALLOC_CFLAGS) \
+	-isystem .. -I ../../deps/lua/src/ -I ../../deps/hdr_histogram/ -I ../../deps/fpconv/ -I ../../deps/zstd/ $(JEMALLOC_CFLAGS) \
 	$(GTEST_CFLAGS) $<
 
 $(ALL_OBJECTS): generated_wrappers.o

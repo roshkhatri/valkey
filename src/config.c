@@ -185,6 +185,7 @@ configEnum rdb_version_check_enum[] = {{"strict", RDB_VERSION_CHECK_STRICT},
 
 configEnum rdb_compression_algo_enum[] = {{"lzf", ALGO_LZF},
                                           {"lz4", ALGO_LZ4},
+                                          {"zstd", ALGO_ZSTD},
                                           {NULL, 0}};
 
 /* Output buffer limits presets. */
