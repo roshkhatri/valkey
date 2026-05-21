@@ -947,18 +947,7 @@ static int repl_affinity_next_tid = 1;
  * This ensures all writes for a given replica go to the same IO thread,
  * avoiding contention on the compression context. */
 void replAssignAffinityTid(client *c) {
-    if (server.active_io_threads_num <= 1) {
-        c->repl_data->affinity_tid = -1;
-        return;
-    }
-    if (repl_affinity_next_tid <= 0 || repl_affinity_next_tid >= server.active_io_threads_num) {
-        repl_affinity_next_tid = 1;
-    }
-    c->repl_data->affinity_tid = repl_affinity_next_tid;
-    repl_affinity_next_tid++;
-    if (repl_affinity_next_tid >= server.active_io_threads_num) {
-        repl_affinity_next_tid = 1;
-    }
+    c->repl_data->affinity_tid = -1;
 }
 
 /* Wrapper for gtest to reset the round-robin counter to its initial state. */
