@@ -583,7 +583,7 @@ int trySendWriteToIOThreads(client *c) {
 
     /* Route compressed replicas to their affinity thread's private inbox for cache locality.
      * Re-assign affinity_tid if the thread count changed (scale-up/down). */
-    if (is_replica && c->repl_data->repl_compressor) {
+    if (is_replica && c->repl_data->repl_compressor && server.repl_compression_thread_affinity) {
         if (c->repl_data->affinity_tid <= 0 ||
             c->repl_data->affinity_tid >= server.active_io_threads_num) {
             replAssignAffinityTid(c);
@@ -947,7 +947,25 @@ static int repl_affinity_next_tid = 1;
  * This ensures all writes for a given replica go to the same IO thread,
  * avoiding contention on the compression context. */
 void replAssignAffinityTid(client *c) {
-    c->repl_data->affinity_tid = -1;
+    if (!server.repl_compression_thread_affinity || server.io_threads_num <= 1) {
+        c->repl_data->affinity_tid = -1;
+        return;
+    }
+    /* Use active_io_threads_num for the range so we only assign to threads
+     * that are currently awake. If active==1 (all sleeping), set tid=-1;
+     * the routing path will re-call us on the next write after threads scale up. */
+    if (server.active_io_threads_num <= 1) {
+        c->repl_data->affinity_tid = -1;
+        return;
+    }
+    if (repl_affinity_next_tid <= 0 || repl_affinity_next_tid >= server.active_io_threads_num) {
+        repl_affinity_next_tid = 1;
+    }
+    c->repl_data->affinity_tid = repl_affinity_next_tid;
+    repl_affinity_next_tid++;
+    if (repl_affinity_next_tid >= server.active_io_threads_num) {
+        repl_affinity_next_tid = 1;
+    }
 }
 
 /* Wrapper for gtest to reset the round-robin counter to its initial state. */

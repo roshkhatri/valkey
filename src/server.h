@@ -462,7 +462,7 @@ typedef enum {
  * transport path. The algorithm is fixed to LZ4 and the level is fixed to LZ4
  * HC level 5 (higher compression, moderate CPU). */
 #define REPL_COMPRESSION_ALGO ALGO_LZ4
-#define REPL_COMPRESSION_LEVEL 5
+#define REPL_COMPRESSION_LEVEL 0
 
 /* Replica requirements */
 #define REPLICA_REQ_NONE 0
@@ -2082,6 +2082,7 @@ struct valkeyServer {
     int rdb_compression_algo;             /* RDB compression algorithm (compressionAlgo):
                                            * ALGO_LZF (default), ALGO_LZ4 */
     int repl_compression;                 /* Use compression for replication? 0=no (default) */
+    int repl_compression_thread_affinity; /* Pin compressed replicas to one IO thread. 1=yes (default) */
     int rdb_checksum;                     /* Use RDB checksum? */
     int rdb_del_sync_files;               /* Remove RDB files used only for SYNC if
                                              the instance does not use persistence. */
