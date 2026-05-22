@@ -219,6 +219,7 @@ void IOThreadsAfterSleep(int numevents) {
         last_scale_time = now;
         server.active_io_threads_num = target;
         serverLog(LL_DEBUG, "IO threads increased from %zu to %zu", active, target);
+        replBalanceAffinity();
     }
     /* Scale Down*/
     else if (target < active) {
@@ -586,6 +587,16 @@ int trySendWriteToIOThreads(client *c) {
     c->io_write_state = CLIENT_PENDING_IO;
     void *job = tagJob(c, JOB_REQ_WRITE_CLIENT);
 
+    /* Route compressed replicas to their owner thread's private inbox for cache locality. */
+    if (is_replica && c->repl_data->repl_compressor && server.repl_compression_thread_affinity) {
+        int tid = c->repl_data->affinity_tid;
+        if (tid > 0 && tid < server.active_io_threads_num && !spscIsFull(&io_private_inbox[tid])) {
+            spscEnqueue(&io_private_inbox[tid], job, false);
+            goto enqueued;
+        }
+        /* No owner / sleeping / saturated — fall through to shared inbox. */
+    }
+
     if (unlikely(spmcEnqueue(&io_shared_inbox, job) == false)) {
         c->io_write_state = CLIENT_IDLE;
         connSetPostponeUpdateState(c->conn, 0);
@@ -604,6 +615,7 @@ int trySendWriteToIOThreads(client *c) {
         }
     }
 
+enqueued:
     if (c->flag.pending_write) {
         listUnlinkNode(server.clients_pending_write, &c->clients_pending_write_node);
         c->flag.pending_write = 0;

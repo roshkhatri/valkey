@@ -2526,6 +2526,7 @@ int replInitCompression(client *c, compressionAlgo algo, int level) {
     c->repl_data->compressed_raw_bytes = 0;
     c->repl_data->compression_error = 0;
     c->repl_data->last_processed_tid = -1;
+    c->repl_data->affinity_tid = -1;
     c->repl_data->repl_compression_thread_switches = 0;
 
     return C_OK;
@@ -2557,7 +2558,11 @@ void replDestroyCompression(client *c) {
     c->repl_data->repl_compression_cpu_usec = 0;
     c->repl_data->repl_compression_phase0_retries = 0;
     c->repl_data->last_processed_tid = -1;
+    c->repl_data->affinity_tid = -1;
     c->repl_data->repl_compression_thread_switches = 0;
+
+    /* Freed slot may unblock redistribution among remaining replicas. */
+    replBalanceAffinity();
 }
 
 #define REPL_COMPRESSION_BATCH_LIMIT (1024 * 1024) /* 1 MB per dispatch cycle */
@@ -2575,6 +2580,11 @@ static void writeToReplicaCompressed(client *c) {
         c->repl_data->repl_compression_thread_switches++;
     }
     c->repl_data->last_processed_tid = my_tid;
+
+    /* Establish ownership lazily — first IO thread to process becomes the owner. */
+    if (server.repl_compression_thread_affinity && c->repl_data->affinity_tid <= 0) {
+        c->repl_data->affinity_tid = my_tid;
+    }
 
     /* Phase 0: If there's unsent compressed data from a previous partial write,
      * send that first before compressing new data. */

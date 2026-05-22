@@ -111,6 +111,51 @@ void disconnectCompressedReplicas(void) {
     }
 }
 
+/* Rebalance compressed replica owner threads when distribution becomes skewed.
+ * Counts owners per active IO thread; if max - min > 1, evicts replicas from
+ * over-loaded threads (sets affinity_tid = -1 so they re-establish on idler
+ * threads via shared-inbox dispatch on their next write). */
+void replBalanceAffinity(void) {
+    if (!server.repl_compression_thread_affinity) return;
+    int active = server.active_io_threads_num;
+    if (active <= 2) return; /* nothing to balance with 0 or 1 IO thread */
+
+    int counts[IO_THREADS_MAX_NUM] = {0};
+    listIter li;
+    listNode *ln;
+    listRewind(server.replicas, &li);
+    while ((ln = listNext(&li))) {
+        client *r = listNodeValue(ln);
+        if (!r->repl_data || !r->repl_data->repl_compressor) continue;
+        int tid = r->repl_data->affinity_tid;
+        if (tid > 0 && tid < active) counts[tid]++;
+    }
+
+    int max_c = 0, min_c = INT_MAX;
+    for (int i = 1; i < active; i++) {
+        if (counts[i] > max_c) max_c = counts[i];
+        if (counts[i] < min_c) min_c = counts[i];
+    }
+    if (max_c - min_c <= 1) return; /* balanced enough */
+
+    /* Evict from over-loaded threads */
+    listRewind(server.replicas, &li);
+    while ((ln = listNext(&li))) {
+        client *r = listNodeValue(ln);
+        if (!r->repl_data || !r->repl_data->repl_compressor) continue;
+        int tid = r->repl_data->affinity_tid;
+        if (tid > 0 && tid < active && counts[tid] == max_c) {
+            r->repl_data->affinity_tid = -1;
+            counts[tid]--;
+            /* recompute max */
+            max_c = 0;
+            for (int i = 1; i < active; i++)
+                if (counts[i] > max_c) max_c = counts[i];
+            if (max_c - min_c <= 1) break;
+        }
+    }
+}
+
 static int shouldEnableReplicaCompression(client *c) {
     if (!server.repl_compression || !c || !c->repl_data) return 0;
     return (c->repl_data->replica_capa & REPLICA_CAPA_COMPRESSION) != 0;

@@ -513,4 +513,205 @@ start_server {tags {"repl"} overrides {save ""}} {
     } ;# end repl-compression-suite
 }
 
+# ============================================================
+# Thread Affinity Tests
+# ============================================================
+
+# Test 1: Affinity config CRUD
+start_server {overrides {save ""}} {
+
+    test {repl-compression-thread-affinity defaults to yes} {
+        assert_equal "yes" [lindex [r config get repl-compression-thread-affinity] 1]
+    }
+
+    test {repl-compression-thread-affinity is runtime-modifiable} {
+        r config set repl-compression-thread-affinity no
+        assert_equal "no" [lindex [r config get repl-compression-thread-affinity] 1]
+        r config set repl-compression-thread-affinity yes
+        assert_equal "yes" [lindex [r config get repl-compression-thread-affinity] 1]
+    }
+}
+
+# Test 1 continued: Toggling affinity off does not break replication
+start_server {tags {"repl"} overrides {save "" io-threads 4 io-threads-always-active yes replcompression yes repl-compression-thread-affinity yes}} {
+    set primary [srv 0 client]
+    set primary_host [srv 0 host]
+    set primary_port [srv 0 port]
+
+    test {Toggling affinity off does not break replication} {
+        start_server {overrides {save "" replcompression yes repl-diskless-load swapdb}} {
+            set replica [srv 0 client]
+            $replica replicaof $primary_host $primary_port
+            wait_for_sync $replica
+
+            # Generate traffic with affinity on
+            for {set i 0} {$i < 100} {incr i} {
+                $primary set "affinity_on:$i" [string repeat "v" 50]
+            }
+            wait_for_condition 50 100 {
+                [$replica get "affinity_on:99"] eq [string repeat "v" 50]
+            } else {
+                fail "Replica did not catch up with affinity on"
+            }
+
+            # Toggle affinity off
+            $primary config set repl-compression-thread-affinity no
+
+            # Generate more traffic with affinity off
+            for {set i 0} {$i < 100} {incr i} {
+                $primary set "affinity_off:$i" [string repeat "w" 50]
+            }
+            wait_for_condition 50 100 {
+                [$replica get "affinity_off:99"] eq [string repeat "w" 50]
+            } else {
+                fail "Replica did not catch up with affinity off"
+            }
+
+            # Verify data integrity via digest
+            assert_equal [$primary debug digest] [$replica debug digest]
+
+            $replica replicaof no one
+        }
+        $primary config set repl-compression-thread-affinity yes
+    }
+}
+
+
+
+# Test 4: Multiple replicas distribute across threads and stay in sync
+start_server {tags {"repl"} overrides {save "" io-threads 4 io-threads-always-active yes replcompression yes repl-compression-thread-affinity yes}} {
+    set primary [srv 0 client]
+    set primary_host [srv 0 host]
+    set primary_port [srv 0 port]
+
+    test {Multiple replicas with affinity all stay in sync under load} {
+        start_server {overrides {save "" replcompression yes repl-diskless-load swapdb}} {
+            set replica1 [srv 0 client]
+            $replica1 replicaof $primary_host $primary_port
+            wait_for_sync $replica1
+
+            start_server {overrides {save "" replcompression yes repl-diskless-load swapdb}} {
+                set replica2 [srv 0 client]
+                $replica2 replicaof $primary_host $primary_port
+                wait_for_sync $replica2
+
+                start_server {overrides {save "" replcompression yes repl-diskless-load swapdb}} {
+                    set replica3 [srv 0 client]
+                    $replica3 replicaof $primary_host $primary_port
+                    wait_for_sync $replica3
+
+                    # Wait for all replicas to have compression active
+                    wait_for_condition 50 200 {
+                        [regexp -all "compression=lz4" [$primary info replication]] >= 3
+                    } else {
+                        fail "Not all replicas have compression active"
+                    }
+
+                    # Generate sustained load
+                    for {set i 0} {$i < 500} {incr i} {
+                        $primary set "multi_repl:$i" [string repeat "x" 100]
+                    }
+
+                    # Wait for all replicas to catch up
+                    wait_for_condition 100 200 {
+                        [$replica1 dbsize] == [$primary dbsize] &&
+                        [$replica2 dbsize] == [$primary dbsize] &&
+                        [$replica3 dbsize] == [$primary dbsize]
+                    } else {
+                        fail "Not all replicas caught up: r1=[$replica1 dbsize] r2=[$replica2 dbsize] r3=[$replica3 dbsize] primary=[$primary dbsize]"
+                    }
+
+                    # Verify data integrity
+                    set primary_digest [$primary debug digest]
+                    assert_equal $primary_digest [$replica1 debug digest]
+                    assert_equal $primary_digest [$replica2 debug digest]
+                    assert_equal $primary_digest [$replica3 debug digest]
+
+                    $replica3 replicaof no one
+                }
+                $replica2 replicaof no one
+            }
+            $replica1 replicaof no one
+        }
+    }
+}
+
+# Test 5: Affinity survives replica disconnect/reconnect
+start_server {tags {"repl"} overrides {save "" io-threads 4 io-threads-always-active yes replcompression yes repl-compression-thread-affinity yes}} {
+    set primary [srv 0 client]
+    set primary_host [srv 0 host]
+    set primary_port [srv 0 port]
+
+    test {Affinity survives replica disconnect and reconnect} {
+        start_server {overrides {save "" replcompression yes repl-diskless-load swapdb}} {
+            set replica1 [srv 0 client]
+            $replica1 replicaof $primary_host $primary_port
+            wait_for_sync $replica1
+
+            start_server {overrides {save "" replcompression yes repl-diskless-load swapdb}} {
+                set replica2 [srv 0 client]
+                $replica2 replicaof $primary_host $primary_port
+                wait_for_sync $replica2
+
+                # Drive traffic, verify both in sync
+                for {set i 0} {$i < 200} {incr i} {
+                    $primary set "pre_disconnect:$i" [string repeat "x" 50]
+                }
+
+                wait_for_condition 50 200 {
+                    [$replica1 dbsize] == [$primary dbsize] &&
+                    [$replica2 dbsize] == [$primary dbsize]
+                } else {
+                    fail "Replicas not in sync before disconnect"
+                }
+
+                # Disconnect replica1
+                $replica1 replicaof no one
+
+                # Drive more traffic — replica2 should stay connected and in sync
+                for {set i 0} {$i < 200} {incr i} {
+                    $primary set "post_disconnect:$i" [string repeat "x" 50]
+                }
+
+                wait_for_condition 50 200 {
+                    [$replica2 get "post_disconnect:199"] eq [string repeat "x" 50]
+                } else {
+                    fail "Replica2 did not stay in sync after replica1 disconnect"
+                }
+
+                # Reconnect replica1
+                $replica1 replicaof $primary_host $primary_port
+
+                wait_for_condition 50 200 {
+                    [status $replica1 master_link_status] eq "up"
+                } else {
+                    fail "Replica1 did not reconnect"
+                }
+
+                # Wait for replica1 to catch up
+                wait_for_condition 50 200 {
+                    [$replica1 dbsize] == [$primary dbsize]
+                } else {
+                    fail "Replica1 did not re-sync: replica1=[$replica1 dbsize] primary=[$primary dbsize]"
+                }
+
+                # Verify compression is re-negotiated on replica1
+                wait_for_condition 50 200 {
+                    [regexp -all "compression=lz4" [$primary info replication]] >= 2
+                } else {
+                    fail "Compression not re-negotiated after reconnect"
+                }
+
+                # Verify data integrity
+                assert_equal [$primary debug digest] [$replica1 debug digest]
+                assert_equal [$primary debug digest] [$replica2 debug digest]
+
+                $replica2 replicaof no one
+            }
+            $replica1 replicaof no one
+        }
+    }
+}
+
+
 }
