@@ -13,6 +13,11 @@
 #define IO_SPSC_QUEUE_SIZE 4096
 
 static _Thread_local int thread_id = 0;
+
+/* Returns the current thread's IO thread id. 0 = main thread, 1..N = IO thread. */
+int IOThreadGetSelfId(void) {
+    return thread_id;
+}
 static _Thread_local mpscTicket io_thread_ticket = {0};
 /* Backlog of responses when io_shared_outbox is full. Should be rare. */
 static _Thread_local list *pending_io_responses = NULL;
@@ -581,23 +586,6 @@ int trySendWriteToIOThreads(client *c) {
     c->io_write_state = CLIENT_PENDING_IO;
     void *job = tagJob(c, JOB_REQ_WRITE_CLIENT);
 
-    /* Route compressed replicas to their affinity thread's private inbox for cache locality.
-     * Re-assign affinity_tid if the thread count changed (scale-up/down). */
-    if (is_replica && c->repl_data->repl_compressor && server.repl_compression_thread_affinity) {
-        if (c->repl_data->affinity_tid <= 0 ||
-            c->repl_data->affinity_tid >= server.active_io_threads_num) {
-            replAssignAffinityTid(c);
-        }
-        if (c->repl_data->affinity_tid > 0 &&
-            c->repl_data->affinity_tid < server.active_io_threads_num &&
-            !spscIsFull(&io_private_inbox[c->repl_data->affinity_tid])) {
-            spscEnqueue(&io_private_inbox[c->repl_data->affinity_tid], job, false);
-            goto enqueued;
-        }
-        /* Affinity miss — fall through to shared inbox */
-        c->repl_data->repl_compression_affinity_misses++;
-    }
-
     if (unlikely(spmcEnqueue(&io_shared_inbox, job) == false)) {
         c->io_write_state = CLIENT_IDLE;
         connSetPostponeUpdateState(c->conn, 0);
@@ -616,7 +604,6 @@ int trySendWriteToIOThreads(client *c) {
         }
     }
 
-enqueued:
     if (c->flag.pending_write) {
         listUnlinkNode(server.clients_pending_write, &c->clients_pending_write_node);
         c->flag.pending_write = 0;
@@ -938,37 +925,4 @@ int processIOThreadsResponses(void) {
         /* If the queue was empty at the last try - don't try again */
         if (dequeued_count == 0) return total_processed;
     }
-}
-
-/* Round-robin counter for replica thread affinity */
-static int repl_affinity_next_tid = 1;
-
-/* Assign a sticky IO thread ID to a compressed replica for write affinity.
- * This ensures all writes for a given replica go to the same IO thread,
- * avoiding contention on the compression context. */
-void replAssignAffinityTid(client *c) {
-    if (!server.repl_compression_thread_affinity || server.io_threads_num <= 1) {
-        c->repl_data->affinity_tid = -1;
-        return;
-    }
-    /* Use active_io_threads_num for the range so we only assign to threads
-     * that are currently awake. If active==1 (all sleeping), set tid=-1;
-     * the routing path will re-call us on the next write after threads scale up. */
-    if (server.active_io_threads_num <= 1) {
-        c->repl_data->affinity_tid = -1;
-        return;
-    }
-    if (repl_affinity_next_tid <= 0 || repl_affinity_next_tid >= server.active_io_threads_num) {
-        repl_affinity_next_tid = 1;
-    }
-    c->repl_data->affinity_tid = repl_affinity_next_tid;
-    repl_affinity_next_tid++;
-    if (repl_affinity_next_tid >= server.active_io_threads_num) {
-        repl_affinity_next_tid = 1;
-    }
-}
-
-/* Wrapper for gtest to reset the round-robin counter to its initial state. */
-void testOnlyResetReplAffinityNextTid(void) {
-    repl_affinity_next_tid = 1;
 }

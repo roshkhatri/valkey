@@ -2525,9 +2525,8 @@ int replInitCompression(client *c, compressionAlgo algo, int level) {
     c->repl_data->compressed_buf_pos = 0;
     c->repl_data->compressed_raw_bytes = 0;
     c->repl_data->compression_error = 0;
-
-    /* Assign sticky thread affinity */
-    replAssignAffinityTid(c);
+    c->repl_data->last_processed_tid = -1;
+    c->repl_data->repl_compression_thread_switches = 0;
 
     return C_OK;
 }
@@ -2551,14 +2550,14 @@ void replDestroyCompression(client *c) {
     c->repl_data->compressed_buf = NULL;
     c->repl_data->compressed_buf_pos = 0;
     c->repl_data->compressed_raw_bytes = 0;
-    c->repl_data->affinity_tid = -1;
     c->repl_data->compression_error = 0;
     c->repl_data->repl_compressed_bytes_total = 0;
     c->repl_data->repl_uncompressed_bytes_total = 0;
     c->repl_data->repl_compression_errors = 0;
     c->repl_data->repl_compression_cpu_usec = 0;
     c->repl_data->repl_compression_phase0_retries = 0;
-    c->repl_data->repl_compression_affinity_misses = 0;
+    c->repl_data->last_processed_tid = -1;
+    c->repl_data->repl_compression_thread_switches = 0;
 }
 
 #define REPL_COMPRESSION_BATCH_LIMIT (1024 * 1024) /* 1 MB per dispatch cycle */
@@ -2567,6 +2566,15 @@ void replDestroyCompression(client *c) {
 static void writeToReplicaCompressed(client *c) {
     streamWriter *compressor = c->repl_data->repl_compressor;
     serverAssert(compressor != NULL);
+
+    /* Track which thread is processing this write. Increment the switch counter
+     * when the processing thread differs from the previous invocation. */
+    int my_tid = IOThreadGetSelfId();
+    if (c->repl_data->last_processed_tid != -1 &&
+        c->repl_data->last_processed_tid != my_tid) {
+        c->repl_data->repl_compression_thread_switches++;
+    }
+    c->repl_data->last_processed_tid = my_tid;
 
     /* Phase 0: If there's unsent compressed data from a previous partial write,
      * send that first before compressing new data. */

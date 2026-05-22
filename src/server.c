@@ -6644,7 +6644,7 @@ sds genValkeyInfoString(dict *section_dict, int all_sections, int everything) {
                                         ",compression_errors=%zu"
                                         ",compression_cpu_usec=%lld"
                                         ",compression_phase0_retries=%zu"
-                                        ",affinity_misses=%zu",
+                                        ",thread_switches=%zu",
                                         compressionAlgoName(REPL_COMPRESSION_ALGO),
                                         replica->repl_data->repl_compressed_bytes_total,
                                         replica->repl_data->repl_uncompressed_bytes_total,
@@ -6655,7 +6655,7 @@ sds genValkeyInfoString(dict *section_dict, int all_sections, int everything) {
                                         replica->repl_data->repl_compression_errors,
                                         replica->repl_data->repl_compression_cpu_usec,
                                         replica->repl_data->repl_compression_phase0_retries,
-                                        replica->repl_data->repl_compression_affinity_misses);
+                                        replica->repl_data->repl_compression_thread_switches);
                 }
                 info = sdscat(info, "\r\n");
                 replica_id++;

@@ -39,7 +39,6 @@ int clientHasPendingIO(struct client *c);
 int processIOThreadsResponses(void);
 int getCurTid(void);
 void sendToMainThread(void *data, int type);
-void replAssignAffinityTid(client *c);
-void testOnlyResetReplAffinityNextTid(void);
+int IOThreadGetSelfId(void);
 
 #endif /* IO_THREADS_H */

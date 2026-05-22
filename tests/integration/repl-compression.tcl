@@ -298,9 +298,10 @@ start_server {tags {"repl"} overrides {save ""}} {
         }
     }
 
-    test {IO-thread affinity distributes replicas across threads} {
-        # This test verifies that multiple compressed replicas get different affinity tids
-        # by checking that replication works correctly with multiple replicas
+    test {Multiple compressed replicas receive replication correctly} {
+        # Verifies that multiple compressed replicas can connect to the same
+        # primary and all receive replication data. With IO threads enabled,
+        # writes are distributed across the shared inbox.
         $primary config set replcompression yes
 
         start_server {overrides {save "" replcompression yes repl-diskless-load swapdb}} {

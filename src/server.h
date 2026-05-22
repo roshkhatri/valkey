@@ -1270,7 +1270,6 @@ typedef struct ClientReplicationData {
     sds compressed_buf;            /* Pending compressed bytes for this replica. */
     size_t compressed_buf_pos;     /* Next byte to write from compressed_buf. */
     size_t compressed_raw_bytes;   /* Raw bytes represented by compressed_buf. */
-    int affinity_tid;              /* Sticky IO thread ID, -1 if unset. */
     int compression_error;         /* Async compression error flag. */
     /* Compression metrics (primary side, per-replica) */
     size_t repl_compressed_bytes_total;      /* Total compressed bytes sent */
@@ -1278,7 +1277,8 @@ typedef struct ClientReplicationData {
     size_t repl_compression_errors;          /* Compression failure count */
     long long repl_compression_cpu_usec;     /* Cumulative CPU time in compression (microseconds) */
     size_t repl_compression_phase0_retries;  /* Times Phase 0 drained unsent data (backpressure indicator) */
-    size_t repl_compression_affinity_misses; /* Times affinity fell back to shared inbox */
+    int last_processed_tid;                  /* Last thread (0=main, 1..N=IO) that processed a compressed write. -1=uninit. */
+    size_t repl_compression_thread_switches; /* Times the processing thread changed for this replica. */
 } ClientReplicationData;
 
 typedef struct ClientModuleData {
@@ -2082,7 +2082,6 @@ struct valkeyServer {
     int rdb_compression_algo;             /* RDB compression algorithm (compressionAlgo):
                                            * ALGO_LZF (default), ALGO_LZ4 */
     int repl_compression;                 /* Use compression for replication? 0=no (default) */
-    int repl_compression_thread_affinity; /* Pin compressed replicas to one IO thread. 1=yes (default) */
     int rdb_checksum;                     /* Use RDB checksum? */
     int rdb_del_sync_files;               /* Remove RDB files used only for SYNC if
                                              the instance does not use persistence. */
