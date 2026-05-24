@@ -4554,6 +4554,8 @@ int replDecompressQueryBuf(client *c, size_t new_data_start) {
     serverAssert(server.repl_stream_decode_buf != NULL);
     sdsclear(server.repl_stream_decode_buf);
 
+    monotime decompress_start = getMonotonicUs();
+
     if (streamReaderFeed(server.repl_stream_decoder,
                          c->querybuf + new_data_start,
                          raw_input_len) != 0) {
@@ -4609,6 +4611,9 @@ int replDecompressQueryBuf(client *c, size_t new_data_start) {
         sdslen(server.repl_stream_decode_buf) < sdsalloc(server.repl_stream_decode_buf) / 4) {
         server.repl_stream_decode_buf = sdsRemoveFreeSpace(server.repl_stream_decode_buf, 0);
     }
+
+    server.repl_decompression_cpu_usec += getMonotonicUs() - decompress_start;
+    server.repl_decompressed_bytes_total += decompressed_len;
     return C_OK;
 }
 
@@ -4633,7 +4638,17 @@ void readQueryFromClient(connection *conn) {
                 freeClientAsync(c);
                 return;
             }
-            if (processInputBuffer(c) == C_ERR) return;
+            if (c->flag.primary) {
+                /* Track replica-side replication apply CPU (decompression already
+                 * timed inside replDecompressQueryBuf and is excluded here). */
+                monotime apply_start = getMonotonicUs();
+                int rc = processInputBuffer(c);
+                server.repl_apply_cpu_usec += getMonotonicUs() - apply_start;
+                server.repl_apply_batches++;
+                if (rc == C_ERR) return;
+            } else {
+                if (processInputBuffer(c) == C_ERR) return;
+            }
             trimCommandQueue(c);
         }
         repeat = (c->flag.primary &&

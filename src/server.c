@@ -6597,6 +6597,17 @@ sds genValkeyInfoString(dict *section_dict, int all_sections, int everything) {
                 info = sdscatfmt(info, "repl_decompression_errors:%U\r\n",
                                  (unsigned long long)server.repl_decompression_errors);
             }
+            if (server.repl_apply_batches > 0) {
+                info = sdscatfmt(info,
+                                 "repl_decompression_cpu_usec:%I\r\n"
+                                 "repl_decompressed_bytes_total:%U\r\n"
+                                 "repl_apply_cpu_usec:%I\r\n"
+                                 "repl_apply_batches:%U\r\n",
+                                 (long long)server.repl_decompression_cpu_usec,
+                                 (unsigned long long)server.repl_decompressed_bytes_total,
+                                 (long long)server.repl_apply_cpu_usec,
+                                 (unsigned long long)server.repl_apply_batches);
+            }
         }
 
         info = sdscatprintf(info, "connected_slaves:%lu\r\n", listLength(server.replicas));

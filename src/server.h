@@ -2226,6 +2226,10 @@ struct valkeyServer {
     streamReader *repl_stream_decoder;    /* Replica-side compressed replication decoder (push-mode). */
     sds repl_stream_decode_buf;           /* Scratch buffer for decoded replication bytes. */
     size_t repl_decompression_errors;     /* Decompression failures (replica side). */
+    long long repl_decompression_cpu_usec; /* Cumulative μs spent in replDecompressQueryBuf. */
+    size_t repl_decompressed_bytes_total;  /* Total decompressed bytes processed (replica side). */
+    long long repl_apply_cpu_usec;        /* Cumulative μs spent parsing+executing replication commands. */
+    size_t repl_apply_batches;            /* Number of read→decompress→apply cycles processed. */
 
     /* The following two fields is where we store primary PSYNC replid/offset
      * while the PSYNC is in progress. At the end we'll copy the fields into
