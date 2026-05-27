@@ -2591,7 +2591,7 @@ static int updateJemallocBgThread(const char **err) {
 static int updateReplCompression(const char **err) {
     UNUSED(err);
     if (!server.repl_compression) {
-        disconnectCompressedReplicas();
+        markCompressedReplicasForDisconnect();
     }
     return 1;
 }

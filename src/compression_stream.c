@@ -380,6 +380,16 @@ void streamWriterSetError(streamWriter *t) {
     t->errored = true;
 }
 
+size_t streamWriterMemUsage(const streamWriter *t) {
+    if (!t) return 0;
+    /* sizeof(*t) covers the struct itself + small fields.
+     * out_buf_size is the scratch buffer for compressed output (variable).
+     * The codec context (cctx) is allocated inside the compressor init;
+     * we approximate by not including it here — add a codec-level accessor
+     * if more precise accounting is needed later. */
+    return sizeof(*t) + t->out_buf_size;
+}
+
 /* ===== Streaming reader ===== */
 
 #define STREAM_READER_READ_WOULD_BLOCK ((ssize_t) - 2)

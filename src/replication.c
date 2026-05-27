@@ -87,9 +87,13 @@ ConnectionType *connTypeOfReplication(void) {
  * IP address and its listening port which is more clear for the user, for
  * example: "Closing connection with replica 10.1.2.3:6380". */
 
-/* Disconnect all replicas that have active compression.
- * Called when replcompression is disabled at runtime. */
-void disconnectCompressedReplicas(void) {
+/* Mark all compressed replicas for asynchronous disconnect.
+ * Called from the replcompression config-apply callback. We can't transition
+ * existing replicas off compression mid-link (LZ4 frame state was negotiated
+ * at PSYNC handshake), so disconnecting and forcing reconnection is the only
+ * safe transition. Uses freeClientAsync to defer cleanup to the next event-
+ * loop tick — sync freeClient would block the main thread during CONFIG SET. */
+void markCompressedReplicasForDisconnect(void) {
     listIter li;
     listNode *ln;
     int disconnected = 0;
@@ -179,7 +183,12 @@ static int replicaInitCompressionOnPsync(client *c) {
     return C_OK;
 }
 
-#define REPL_STREAM_DECODER_FEED_CAP (64 * 1024 * 1024) /* match old replStreamDecoder input cap */
+/* Push-mode reader feed cap: maximum compressed bytes we'll buffer in the
+ * decoder's input queue before declaring back-pressure. 64 MB matches the
+ * input cap used by the legacy replStreamDecoder and bounds memory under
+ * sustained socket back-pressure (e.g., slow event-loop processing on the
+ * replica). Exceeding this triggers a sticky decoder error. */
+#define REPL_STREAM_DECODER_FEED_CAP (64 * 1024 * 1024)
 
 int replInitDecompression(void) {
     replDestroyDecompression();

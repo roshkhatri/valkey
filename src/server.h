@@ -462,6 +462,11 @@ typedef enum {
  * transport path. The algorithm is fixed to LZ4 and the level is fixed to LZ4
  * HC level 5 (higher compression, moderate CPU). */
 #define REPL_COMPRESSION_ALGO ALGO_LZ4
+/* LZ4 fast mode (level 0) — chosen for maximum compression throughput rather
+ * than maximum ratio. LZ4 fast can compress at ~5 GB/s on modern x86 vs ~500
+ * MB/s for HC modes; for replication, throughput dominates because the network
+ * is typically the bottleneck before compression CPU is. The trade-off is
+ * ~10-15% worse compression ratio than HC modes. */
 #define REPL_COMPRESSION_LEVEL 0
 
 /* Replica requirements */
@@ -1270,13 +1275,16 @@ typedef struct ClientReplicationData {
     sds compressed_buf;            /* Pending compressed bytes for this replica. */
     size_t compressed_buf_pos;     /* Next byte to write from compressed_buf. */
     size_t compressed_raw_bytes;   /* Raw bytes represented by compressed_buf. */
-    int compression_error;         /* Async compression error flag. */
+    _Atomic(int) compression_error; /* Async compression error flag.
+                                     * Set by IO thread inside writeToReplicaCompressed,
+                                     * read by main thread in postWriteToReplica.
+                                     * Atomic to make the cross-thread ordering explicit. */
     /* Compression metrics (primary side, per-replica) */
     size_t repl_compressed_bytes_total;      /* Total compressed bytes sent */
     size_t repl_uncompressed_bytes_total;    /* Total raw bytes before compression */
     size_t repl_compression_errors;          /* Compression failure count */
     long long repl_compression_cpu_usec;     /* Cumulative CPU time in compression (microseconds) */
-    size_t repl_compression_phase0_retries;  /* Times Phase 0 drained unsent data (backpressure indicator) */
+    size_t repl_compression_pending_drains;  /* Times the resume-pending path ran (backpressure indicator) */
     int last_processed_tid;                  /* Last thread (0=main, 1..N=IO) that processed a compressed write. -1=uninit. */
     int affinity_tid;                        /* Sticky IO thread ID for compressed replica writes. -1 = no owner. */
     size_t repl_compression_thread_switches; /* Times the processing thread changed for this replica. */
@@ -3039,7 +3047,7 @@ int getClientTypeByName(char *name);
 char *getClientTypeName(int client_class);
 void flushReplicasOutputBuffers(void);
 void disconnectReplicas(void);
-void disconnectCompressedReplicas(void);
+void markCompressedReplicasForDisconnect(void);
 int replInitCompression(client *c, compressionAlgo algo, int level);
 void replDestroyCompression(client *c);
 void replBalanceAffinity(void);

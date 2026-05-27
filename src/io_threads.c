@@ -14,10 +14,7 @@
 
 static _Thread_local int thread_id = 0;
 
-/* Returns the current thread's IO thread id. 0 = main thread, 1..N = IO thread. */
-int IOThreadGetSelfId(void) {
-    return thread_id;
-}
+
 static _Thread_local mpscTicket io_thread_ticket = {0};
 /* Backlog of responses when io_shared_outbox is full. Should be rare. */
 static _Thread_local list *pending_io_responses = NULL;

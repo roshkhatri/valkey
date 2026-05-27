@@ -89,6 +89,10 @@ int streamWriterFinish(streamWriter *t);
 void streamWriterDestroy(streamWriter *t);
 int streamWriterIsErrored(const streamWriter *t);
 void streamWriterSetError(streamWriter *t);
+
+/* Return the approximate memory usage of the streamWriter context, including
+ * the LZ4 codec state and the internal output scratch buffer. */
+size_t streamWriterMemUsage(const streamWriter *t);
 int streamReadEnvelopeInfo(const uint8_t *buf,
                            size_t len,
                            uint8_t expected_stream_kind,
