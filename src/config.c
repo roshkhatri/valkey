@@ -2587,6 +2587,14 @@ static int updateJemallocBgThread(const char **err) {
     return 1;
 }
 
+static int updateReplCompression(const char **err) {
+    UNUSED(err);
+    if (!server.repl_compression) {
+        markCompressedReplicasForDisconnect();
+    }
+    return 1;
+}
+
 static int updateReplBacklogSize(const char **err) {
     UNUSED(err);
     resizeReplicationBacklog();
@@ -3264,6 +3272,7 @@ static int isValidDbHashSeed(sds val, const char **err) {
     return 1;
 }
 
+
 standardConfig static_configs[] = {
     /* Bool configs */
     createBoolConfig("rdbchecksum", NULL, IMMUTABLE_CONFIG, server.rdb_checksum, 1, NULL, NULL),
@@ -3271,6 +3280,8 @@ standardConfig static_configs[] = {
     createBoolConfig("always-show-logo", NULL, IMMUTABLE_CONFIG, server.always_show_logo, 0, NULL, NULL),
     createBoolConfig("protected-mode", NULL, MODIFIABLE_CONFIG, server.protected_mode, 1, NULL, NULL),
     createBoolConfig("rdbcompression", NULL, MODIFIABLE_CONFIG, server.rdb_compression, 1, NULL, NULL),
+    createBoolConfig("replcompression", NULL, MODIFIABLE_CONFIG, server.repl_compression, 0, NULL, updateReplCompression),
+    createBoolConfig("repl-compression-thread-affinity", NULL, MODIFIABLE_CONFIG, server.repl_compression_thread_affinity, 1, NULL, NULL),
     createBoolConfig("rdb-del-sync-files", NULL, MODIFIABLE_CONFIG, server.rdb_del_sync_files, 0, NULL, NULL),
     createBoolConfig("activerehashing", NULL, MODIFIABLE_CONFIG, server.activerehashing, 1, NULL, NULL),
     createBoolConfig("stop-writes-on-bgsave-error", NULL, MODIFIABLE_CONFIG, server.stop_writes_on_bgsave_err, 1, NULL, NULL),
