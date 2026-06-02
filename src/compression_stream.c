@@ -76,12 +76,12 @@ static int vkcsCodecToCompressionAlgo(vkcsCodec codec, compressionAlgo *algo) {
     }
 }
 
-static int writeVkcsEnvelope(vkcsEmitFn emit_cb,
+static int writeVkcsEnvelope(vkcsEmitFn emit_fn,
                              void *ctx,
                              vkcsCodec codec,
                              uint8_t stream_kind,
                              bool codec_checksum_enabled) {
-    if (!emit_cb || !vkcsCodecIsSupported(codec)) return -1;
+    if (!emit_fn || !vkcsCodecIsSupported(codec)) return -1;
 
     uint8_t envelope[VKCS_ENVELOPE_SIZE] = {
         VKCS_MAGIC_0,
@@ -93,7 +93,7 @@ static int writeVkcsEnvelope(vkcsEmitFn emit_cb,
         codec_checksum_enabled ? VKCS_FLAG_CODEC_CHECKSUM : 0,
         stream_kind,
     };
-    return emit_cb(ctx, envelope, VKCS_ENVELOPE_SIZE) == 0 ? 0 : -1;
+    return emit_fn(ctx, envelope, VKCS_ENVELOPE_SIZE) == 0 ? 0 : -1;
 }
 
 /* Rejects unknown flag bits so a future format extension fails loud rather
@@ -214,7 +214,7 @@ struct streamWriter {
     streamCompressor compressor;
     uint8_t *out_buf;
     size_t out_buf_size;
-    vkcsEmitFn emit_cb;
+    vkcsEmitFn emit_fn;
     void *emit_ctx;
     uint8_t stream_kind;
     bool envelope_written;
@@ -225,10 +225,10 @@ struct streamWriter {
 
 static int streamWriterInitContext(streamWriter *t,
                                    const streamWriterConfig *cfg,
-                                   vkcsEmitFn emit_cb,
+                                   vkcsEmitFn emit_fn,
                                    void *emit_ctx) {
     memset(t, 0, sizeof(*t));
-    t->emit_cb = emit_cb;
+    t->emit_fn = emit_fn;
     t->emit_ctx = emit_ctx;
     t->stream_kind = cfg->stream_kind;
 
@@ -243,7 +243,7 @@ static int streamWriterEnsureEnvelope(streamWriter *t) {
     if (t->envelope_written) return 0;
     vkcsCodec codec;
     if (compressionAlgoToVkcsCodec(t->compressor.algo, &codec) != 0 ||
-        writeVkcsEnvelope(t->emit_cb, t->emit_ctx, codec,
+        writeVkcsEnvelope(t->emit_fn, t->emit_ctx, codec,
                           t->stream_kind, t->compressor.codec_checksum) != 0) {
         t->errored = true;
         return -1;
@@ -255,7 +255,7 @@ static int streamWriterEnsureEnvelope(streamWriter *t) {
 
 static int streamWriterEmit(streamWriter *t, const uint8_t *buf, size_t len) {
     if (len == 0) return 0;
-    if (t->emit_cb(t->emit_ctx, buf, len) != 0) {
+    if (t->emit_fn(t->emit_ctx, buf, len) != 0) {
         t->errored = true;
         return -1;
     }
@@ -293,7 +293,7 @@ static int streamWriterFeedAndEmit(streamWriter *t,
 }
 
 static void streamWriterReleaseContext(streamWriter *t) {
-    streamCompressorDestroy(&t->compressor);
+    streamCompressorFree(&t->compressor);
     if (t->out_buf) {
         zfree(t->out_buf);
         t->out_buf = NULL;
@@ -302,12 +302,12 @@ static void streamWriterReleaseContext(streamWriter *t) {
 }
 
 streamWriter *streamWriterCreate(const streamWriterConfig *cfg,
-                                 vkcsEmitFn emit_cb,
+                                 vkcsEmitFn emit_fn,
                                  void *emit_ctx) {
-    if (!cfg || !emit_cb || !compressionAlgoSupportsStreaming(cfg->algo)) return NULL;
+    if (!cfg || !emit_fn || !compressionAlgoSupportsStreaming(cfg->algo)) return NULL;
 
     streamWriter *t = zmalloc(sizeof(*t));
-    if (streamWriterInitContext(t, cfg, emit_cb, emit_ctx) != 0) {
+    if (streamWriterInitContext(t, cfg, emit_fn, emit_ctx) != 0) {
         zfree(t);
         return NULL;
     }
@@ -362,7 +362,7 @@ int streamWriterFinish(streamWriter *t) {
     return streamWriterFeedAndEmit(t, NULL, 0, FLUSH_END);
 }
 
-void streamWriterDestroy(streamWriter *t) {
+void streamWriterFree(streamWriter *t) {
     if (!t) return;
     streamWriterReleaseContext(t);
     zfree(t);
@@ -429,7 +429,7 @@ static int streamReaderInitCompressedState(streamReader *t, size_t buffer_size) 
 
 static void streamReaderResetCompressedState(streamReader *t) {
     if (t->decompressor_initialized) {
-        streamDecompressorDestroy(&t->decompressor);
+        streamDecompressorFree(&t->decompressor);
         t->decompressor_initialized = false;
     }
     if (t->compressed_buf) {
@@ -449,7 +449,7 @@ static void streamReaderResetCompressedState(streamReader *t) {
 streamReader *streamReaderCreate(const streamReaderConfig *cfg,
                                  streamReaderReadFn read_cb,
                                  void *read_ctx) {
-    if (!cfg || !read_cb) return NULL;
+    if (!cfg || !read_cb || cfg->buffer_size == 0) return NULL;
 
     streamReader *t = zcalloc(sizeof(*t));
     t->read_cb = read_cb;
@@ -457,7 +457,7 @@ streamReader *streamReaderCreate(const streamReaderConfig *cfg,
     t->probe_cfg.allow_passthrough = cfg->allow_passthrough;
     t->probe_cfg.expected_stream_kind = cfg->expected_stream_kind;
     vkcsProbeInit(&t->probe);
-    t->buffer_size = cfg->buffer_size ? cfg->buffer_size : STREAM_READER_BUFFER_SIZE_DEFAULT;
+    t->buffer_size = cfg->buffer_size;
     if (t->buffer_size < STREAM_READER_BUFFER_SIZE_MIN) {
         t->buffer_size = STREAM_READER_BUFFER_SIZE_MIN;
     }
@@ -746,7 +746,7 @@ int streamReaderValidateEnd(streamReader *t) {
     return 0;
 }
 
-void streamReaderDestroy(streamReader *t) {
+void streamReaderFree(streamReader *t) {
     if (!t) return;
     streamReaderResetCompressedState(t);
     zfree(t);

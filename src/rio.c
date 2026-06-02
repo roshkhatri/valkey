@@ -109,7 +109,7 @@ static const rio rioBufferIO = {
     .flags = 0,
     .processed_bytes = 0,
     .max_processing_chunk = 0,
-    .type = RIO_TYPE_BUFFER,
+    .transport_type = RIO_TYPE_BUFFER,
     .io = {{NULL, 0}},
 };
 
@@ -213,7 +213,7 @@ static const rio rioFileIO = {
     .flags = 0,
     .processed_bytes = 0,
     .max_processing_chunk = 0,
-    .type = RIO_TYPE_FILE,
+    .transport_type = RIO_TYPE_FILE,
     .io = {{NULL, 0}},
 };
 
@@ -346,7 +346,7 @@ static const rio rioConnIO = {
     .flags = 0,
     .processed_bytes = 0,
     .max_processing_chunk = 0,
-    .type = RIO_TYPE_CONN,
+    .transport_type = RIO_TYPE_CONN,
     .io = {{NULL, 0}},
 };
 
@@ -464,7 +464,7 @@ static const rio rioFdIO = {
     .flags = 0,
     .processed_bytes = 0,
     .max_processing_chunk = 0,
-    .type = RIO_TYPE_FD,
+    .transport_type = RIO_TYPE_FD,
     .io = {{NULL, 0}},
 };
 
@@ -540,9 +540,13 @@ void rioSetReclaimCache(rio *r, int enabled) {
     r->io.file.reclaim_cache = enabled;
 }
 
-/* Check the type of rio. */
-uint8_t rioCheckType(rio *r) {
-    return r->type;
+/* Return the underlying transport type of the rio. */
+uint8_t rioGetTransportType(const rio *r) {
+    return r->transport_type;
+}
+
+int rioIsConnTransport(const rio *r) {
+    return r && r->transport_type == RIO_TYPE_CONN;
 }
 
 /* --------------------------- Higher level interface --------------------------
@@ -694,7 +698,7 @@ static const rio rioConnsetIO = {
     .flags = 0,
     .processed_bytes = 0,
     .max_processing_chunk = 0,
-    .type = RIO_TYPE_CONN,
+    .transport_type = RIO_TYPE_CONN,
     .io = {{NULL, 0}},
 };
 

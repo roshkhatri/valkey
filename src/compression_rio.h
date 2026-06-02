@@ -29,20 +29,18 @@ typedef enum {
     DECOMPRESS_RIO_INIT_INCOMPATIBLE = 1,
 } decompressRioInitResult;
 
-int rioInitWithCompress(compressRio *cr, rio *inner, const streamWriterConfig *cfg);
+int rioInitWithCompression(compressRio *cr, rio *inner, const streamWriterConfig *cfg);
 int compressRioFinish(compressRio *cr);
-void compressRioDestroy(compressRio *cr);
+void compressRioFree(compressRio *cr);
 
 /* Probes the wrapped rio so the caller learns up front whether it is plain,
  * compressed, or carrying an envelope this build cannot read. */
-decompressRioInitResult rioInitWithDecompress(decompressRio *dr,
-                                              rio *inner,
-                                              const streamReaderConfig *cfg,
-                                              streamReaderInfo *info);
-streamReaderError decompressRioGetError(const decompressRio *dr);
-/* Returns the typed pointer when `r` is a decompressRio, NULL otherwise. */
-const decompressRio *rioAsDecompressRio(const rio *r);
+decompressRioInitResult rioInitWithDecompression(decompressRio *dr,
+                                                 rio *inner,
+                                                 const streamReaderConfig *cfg,
+                                                 streamReaderInfo *info);
+streamReaderError rioGetDecompressionError(const rio *r);
 int decompressRioValidateEnd(decompressRio *dr);
-void decompressRioDestroy(decompressRio *dr);
+void decompressRioFree(decompressRio *dr);
 
 #endif /* COMPRESSION_RIO_H */

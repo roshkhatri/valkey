@@ -860,7 +860,7 @@ int redis_check_rdb(char *rdbfilename, FILE *fp) {
         goto err;
     }
 
-    rdbInputStreamDestroy(&input);
+    rdbInputStreamFree(&input);
     rdbstate.rio = &file_rdb;
     if (closefile) fclose(fp);
     stopLoading(1);
@@ -875,7 +875,7 @@ eoferr: /* unexpected end of file is handled here with a fatal exit */
         rdbCheckError("Unexpected EOF reading RDB file");
     }
 err:
-    rdbInputStreamDestroy(&input);
+    rdbInputStreamFree(&input);
     rdbstate.rio = &file_rdb;
     if (closefile) fclose(fp);
     stopLoading(0);

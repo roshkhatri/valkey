@@ -1609,9 +1609,9 @@ static int rdbSaveInternal(int req, const char *filename, rdbSaveInfo *rsi, int 
             .stream_kind = STREAM_KIND_RDB,
             .codec_checksum_enabled = server.rdb_checksum != 0,
         };
-        if (rioInitWithCompress(&cr, &rdb, &cfg) != 0) {
+        if (rioInitWithCompression(&cr, &rdb, &cfg) != 0) {
             errno = EIO; /* Compressor init failure — set errno for werr log */
-            err_op = "rioInitWithCompress";
+            err_op = "rioInitWithCompression";
             goto werr;
         }
         save_rio = (rio *)&cr;
@@ -1636,11 +1636,11 @@ static int rdbSaveInternal(int req, const char *filename, rdbSaveInfo *rsi, int 
         if (compressRioFinish(&cr) != 0) {
             errno = EIO; /* Compression finalization failure */
             err_op = "compressRioFinish";
-            compressRioDestroy(&cr);
+            compressRioFree(&cr);
             cr_initialized = false;
             goto werr;
         }
-        compressRioDestroy(&cr);
+        compressRioFree(&cr);
         cr_initialized = false;
     }
 
@@ -1670,7 +1670,7 @@ werr:
     if (cr_initialized) {
         /* Skip finish on error — output is being discarded (unlink below).
          * Just release resources. */
-        compressRioDestroy(&cr);
+        compressRioFree(&cr);
     }
     if (fp) fclose(fp);
     unlink(filename);
@@ -1726,10 +1726,11 @@ int rdbSave(int req, char *filename, rdbSaveInfo *rsi, int rdbflags) {
         return C_ERR;
     }
 
-    serverLog(LL_NOTICE, "DB saved on disk");
     if (isRdbStreamingCompressionEnabled()) {
-        serverLog(LL_VERBOSE, "RDB saved with %s streaming compression",
+        serverLog(LL_NOTICE, "DB saved on disk with %s streaming compression",
                   compressionAlgoName((compressionAlgo)server.rdb_compression_algo));
+    } else {
+        serverLog(LL_NOTICE, "DB saved on disk");
     }
     server.dirty = 0;
     server.lastsave = time(NULL);
@@ -3135,7 +3136,7 @@ void rdbLoadProgressCallback(rio *r, const void *buf, size_t len) {
         processEventsWhileBlocked();
         processModuleLoadingProgressEvent(0);
     }
-    if (server.repl_state == REPL_STATE_TRANSFER && rioCheckType(r) == RIO_TYPE_CONN) {
+    if (server.repl_state == REPL_STATE_TRANSFER && rioIsConnTransport(r)) {
         server.stat_net_repl_input_bytes += len;
     }
 }
@@ -3152,13 +3153,13 @@ decompressRioInitResult rdbInputStreamPrepare(rdbInputStream *input) {
     streamReaderConfig reader_cfg = {
         .expected_stream_kind = STREAM_KIND_RDB,
         .allow_passthrough = true,
-        .buffer_size = 0,
+        .buffer_size = STREAM_READER_BUFFER_SIZE_DEFAULT,
     };
 
     if (!input || !input->raw_rio) return DECOMPRESS_RIO_INIT_ERROR;
 
     decompressRioInitResult init_rc =
-        rioInitWithDecompress(&input->decompressor, input->raw_rio, &reader_cfg, &input->stream_info);
+        rioInitWithDecompression(&input->decompressor, input->raw_rio, &reader_cfg, &input->stream_info);
     if (init_rc == DECOMPRESS_RIO_INIT_OK) {
         input->initialized = true;
         input->rdb_rio = (rio *)&input->decompressor;
@@ -3169,10 +3170,10 @@ decompressRioInitResult rdbInputStreamPrepare(rdbInputStream *input) {
     return init_rc;
 }
 
-void rdbInputStreamDestroy(rdbInputStream *input) {
+void rdbInputStreamFree(rdbInputStream *input) {
     if (!input) return;
     if (input->initialized) {
-        decompressRioDestroy(&input->decompressor);
+        decompressRioFree(&input->decompressor);
         input->initialized = false;
     }
     input->rdb_rio = input->raw_rio;
@@ -3184,8 +3185,7 @@ int rdbInputStreamValidateEnd(rdbInputStream *input) {
 }
 
 bool rdbRioHasCorruptCompressedInput(const rio *rdb) {
-    const decompressRio *dr = rioAsDecompressRio(rdb);
-    return dr && decompressRioGetError(dr) == STREAM_READER_ERROR_CORRUPT;
+    return rioGetDecompressionError(rdb) == STREAM_READER_ERROR_CORRUPT;
 }
 
 /* Save the given functions_ctx to the rdb.
@@ -3786,7 +3786,7 @@ int rdbLoad(char *filename, rdbSaveInfo *rsi, int rdbflags) {
     }
 
 done:
-    rdbInputStreamDestroy(&input);
+    rdbInputStreamFree(&input);
     fclose(fp);
     stopLoading(retval == RDB_OK);
     /* Reclaim the cache backed by rdb */

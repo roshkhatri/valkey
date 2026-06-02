@@ -10,9 +10,9 @@
 #include "compression.h"
 
 int compressionLz4CompressorInit(streamCompressor *sc);
-void compressionLz4CompressorDestroy(streamCompressor *sc);
+void compressionLz4CompressorFree(streamCompressor *sc);
 int compressionLz4DecompressorInit(streamDecompressor *sd);
-void compressionLz4DecompressorDestroy(streamDecompressor *sd);
+void compressionLz4DecompressorFree(streamDecompressor *sd);
 size_t compressionLz4OutputBound(size_t input_len);
 
 ssize_t compressionLz4CompressFeed(streamCompressor *sc,

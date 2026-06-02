@@ -79,8 +79,8 @@ struct _rio {
     /* maximum single read or write chunk size */
     size_t max_processing_chunk;
 
-    /* Backend type (RIO_TYPE_*). Decorators should preserve the wrapped type. */
-    uint8_t type;
+    /* Transport type (RIO_TYPE_*). Rio decorators preserve the wrapped transport. */
+    uint8_t transport_type;
 
     /* Backend-specific vars. */
     union {
@@ -214,7 +214,8 @@ void rioGenericUpdateChecksum(rio *r, const void *buf, size_t len);
 ssize_t rioReadPartial(rio *r, void *buf, size_t len);
 void rioSetAutoSync(rio *r, off_t bytes);
 void rioSetReclaimCache(rio *r, int enabled);
-uint8_t rioCheckType(rio *r);
+uint8_t rioGetTransportType(const rio *r);
+int rioIsConnTransport(const rio *r);
 void rioInitWithConnset(rio *r, connection **conns, int numconns);
 void rioFreeConnset(rio *r);
 #endif

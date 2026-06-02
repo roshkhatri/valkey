@@ -27,7 +27,7 @@ int compressionLz4CompressorInit(streamCompressor *sc) {
     return 0;
 }
 
-void compressionLz4CompressorDestroy(streamCompressor *sc) {
+void compressionLz4CompressorFree(streamCompressor *sc) {
     if (!sc || !sc->ctx) return;
     LZ4F_freeCompressionContext((LZ4F_cctx *)sc->ctx);
     sc->ctx = NULL;
@@ -41,7 +41,7 @@ int compressionLz4DecompressorInit(streamDecompressor *sd) {
     return 0;
 }
 
-void compressionLz4DecompressorDestroy(streamDecompressor *sd) {
+void compressionLz4DecompressorFree(streamDecompressor *sd) {
     if (!sd || !sd->ctx) return;
     LZ4F_freeDecompressionContext((LZ4F_dctx *)sd->ctx);
     sd->ctx = NULL;
@@ -77,7 +77,7 @@ ssize_t compressionLz4CompressFeed(streamCompressor *sc,
                                                   ? LZ4F_contentChecksumEnabled
                                                   : LZ4F_noContentChecksum;
         size_t r = LZ4F_compressBegin(cctx, output, output_capacity, &prefs);
-        if (LZ4F_isError(r)) return -1;
+        if (LZ4F_isError(r)) return -1; /* No frame bytes emitted yet: retriable, don't latch errored. */
         offset = r;
         sc->stream_started = true;
     }
