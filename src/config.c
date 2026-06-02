@@ -636,7 +636,6 @@ void loadServerConfigFromString(sds config) {
     return;
 
 loaderr:
-    reading_config_file = 0;
     if (argv) sdsfreesplitres(argv, argc);
     fprintf(stderr, "\n*** FATAL CONFIG FILE ERROR (Version %s) ***\n", VALKEY_VERSION);
     if (i < totlines) {
