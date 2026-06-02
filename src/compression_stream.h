@@ -56,7 +56,7 @@ typedef struct {
 typedef struct {
     uint8_t expected_stream_kind;
     bool allow_passthrough;
-    size_t buffer_size; /* Must be nonzero; clamped to STREAM_READER_BUFFER_SIZE_MIN. */
+    size_t buffer_size; /* Must be nonzero. */
 } streamReaderConfig;
 
 typedef struct streamWriter streamWriter;
