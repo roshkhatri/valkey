@@ -40,6 +40,8 @@ decompressRioInitResult rioInitWithDecompress(decompressRio *dr,
                                               const streamReaderConfig *cfg,
                                               streamReaderInfo *info);
 streamReaderError decompressRioGetError(const decompressRio *dr);
+/* Returns the typed pointer when `r` is a decompressRio, NULL otherwise. */
+const decompressRio *rioAsDecompressRio(const rio *r);
 int decompressRioValidateEnd(decompressRio *dr);
 void decompressRioDestroy(decompressRio *dr);
 

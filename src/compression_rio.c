@@ -186,6 +186,12 @@ streamReaderError decompressRioGetError(const decompressRio *dr) {
     return streamReaderGetError(dr->reader);
 }
 
+/* Identifies a decompressRio by its read vtable, which is unique to the type. */
+const decompressRio *rioAsDecompressRio(const rio *r) {
+    if (!r || r->read != decompressRioRead) return NULL;
+    return (const decompressRio *)r;
+}
+
 int decompressRioValidateEnd(decompressRio *dr) {
     if (!dr || !dr->reader) return -1;
     return streamReaderValidateEnd(dr->reader);
