@@ -518,7 +518,7 @@ ssize_t rdbSaveRawString(rio *rdb, unsigned char *s, size_t len) {
         }
     }
 
-    /* Try LZF compression — values under 20 bytes don't compress, skip those.
+    /* Try LZF compression. Values under 20 bytes don't compress, skip those.
      * Skip per-string LZF when the rio has whole-stream compression so we
      * don't compress twice; standalone rios (DUMP, AOF rewrite, diskless)
      * still hit this path. */
@@ -1599,7 +1599,7 @@ static int rdbSaveInternal(int req, const char *filename, rdbSaveInfo *rsi, int 
      * compressRio. rdbSaveRio writes through the compressor transparently.
      * Per-string LZF is gated on RIO_FLAG_STREAMING_COMPRESSION (set on
      * the wrapper, not on the inner rio), so paths without a streaming
-     * wrapper — DUMP, AOF rewrite, diskless sync — keep using LZF as
+     * wrapper (DUMP, AOF rewrite, diskless sync) keep using LZF as
      * before. */
     rio *save_rio = &rdb;
     if (use_streaming_compression) {
@@ -1610,7 +1610,7 @@ static int rdbSaveInternal(int req, const char *filename, rdbSaveInfo *rsi, int 
             .codec_checksum_enabled = server.rdb_checksum != 0,
         };
         if (rioInitWithCompression(&cr, &rdb, &cfg) != 0) {
-            errno = EIO; /* Compressor init failure — set errno for werr log */
+            errno = EIO; /* Compressor init failure, set errno for werr log */
             err_op = "rioInitWithCompression";
             goto werr;
         }
@@ -1668,7 +1668,7 @@ werr:
     saved_errno = errno;
     serverLog(LL_WARNING, "Write error while saving DB to the disk(%s): %s", err_op, strerror(errno));
     if (cr_initialized) {
-        /* Skip finish on error — output is being discarded (unlink below).
+        /* Skip finish on error, output is being discarded (unlink below).
          * Just release resources. */
         compressRioFree(&cr);
     }

@@ -65,7 +65,7 @@ ssize_t compressionLz4CompressFeed(streamCompressor *sc,
     /* All capacity-shortage early returns below are retriable: they happen
      * before LZ4F mutates its own state, so the caller can grow the buffer
      * and retry without breaking the frame. LZ4F errors after that point
-     * latch sc->errored — no mid-stream retry is possible. */
+     * latch sc->errored, no mid-stream retry is possible. */
 
     if (!sc->stream_started) {
         LZ4F_preferences_t prefs = lz4f_prefs;

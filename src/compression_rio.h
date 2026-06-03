@@ -11,7 +11,7 @@
 #include "rio.h"
 
 typedef struct {
-    rio base; /* Must be first — allows casting to (rio *). */
+    rio base; /* Must be first, allows casting to (rio *). */
     rio *inner;
     streamWriter *writer;
     bool finalized;

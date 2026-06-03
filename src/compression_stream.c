@@ -316,7 +316,7 @@ streamWriter *streamWriterCreate(const streamWriterConfig *cfg,
 
 ssize_t streamWriterWrite(streamWriter *t, const void *buf, size_t len) {
     if (!t || t->errored) return -1;
-    /* Writes after finish are a caller bug — silently dropping them would
+    /* Writes after finish are a caller bug; silently dropping them would
      * corrupt the consumer's view of the stream. */
     if (t->finished) return -1;
     if (len == 0) return 0;
@@ -580,7 +580,7 @@ static size_t streamReaderCompressedBufTailSpace(streamReader *t) {
         return t->buffer_size - t->compressed_buf_len;
     }
 
-    /* Buffer full and the codec made no progress — treat as corrupt rather
+    /* Buffer full and the codec made no progress, treat as corrupt rather
      * than grow buffers indefinitely. */
     streamReaderSetError(t, STREAM_READER_ERROR_CORRUPT);
     return 0;

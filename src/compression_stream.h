@@ -79,6 +79,11 @@ typedef enum {
 /* Returns >0 bytes read, 0 on EOF, -1 on error. Partial reads allowed. */
 typedef ssize_t (*streamReaderReadFn)(void *ctx, void *buf, size_t len);
 
+/* The writer pushes compressed bytes to a vkcsEmitFn sink; the reader pulls
+ * from a streamReaderReadFn source. streamWriterFinish must run before freeing,
+ * since it emits the frame end; a writer freed without it is truncated. The
+ * reader probes the envelope on the first read, so streamReaderProbe and
+ * streamReaderGetInfo are only needed to classify the stream up front. */
 streamWriter *streamWriterCreate(const streamWriterConfig *cfg,
                                  vkcsEmitFn emit_fn,
                                  void *emit_ctx);
