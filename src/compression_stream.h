@@ -14,11 +14,7 @@
  *   [4]    version (currently VKCS_VERSION)
  *   [5]    codec id
  *   [6]    flags (bit 0 = codec checksum enabled; other bits reserved)
- *   [7]    stream kind
- *
- * The stream kind identifies the decompressed payload, so readers can reject a
- * valid compressed stream that is meant for a different logical consumer before
- * handing bytes to RDB, replication, or another parser. */
+ *   [7]    stream kind */
 #define VKCS_MAGIC_0 0x56 /* 'V' */
 #define VKCS_MAGIC_1 0x4B /* 'K' */
 #define VKCS_MAGIC_2 0x43 /* 'C' */
@@ -32,11 +28,9 @@ typedef enum {
     STREAM_KIND_RDB = 0x00,
 } streamKind;
 
-typedef enum {
-    VKCS_CODEC_LZ4 = 0x01,
-} vkcsCodec;
-
-typedef int (*vkcsEmitFn)(void *ctx, const uint8_t *data, size_t len);
+typedef int (*streamWriterEmitFn)(void *ctx, const uint8_t *data, size_t len);
+/* Returns >0 bytes read, 0 on EOF, -1 on error. Partial reads allowed. */
+typedef ssize_t (*streamReaderReadFn)(void *ctx, void *buf, size_t len);
 
 /* Default reader compressed-input/decompressed-output buffer size. Tiny caller
  * values are clamped up so the LZ4 decoder can always make forward progress
@@ -59,9 +53,6 @@ typedef struct {
     size_t buffer_size; /* Must be nonzero. */
 } streamReaderConfig;
 
-typedef struct streamWriter streamWriter;
-typedef struct streamReader streamReader;
-
 typedef struct {
     compressionAlgo algo;
     uint8_t stream_kind;
@@ -76,44 +67,82 @@ typedef enum {
     STREAM_READER_ERROR_CORRUPT = 3,
 } streamReaderError;
 
-/* Returns >0 bytes read, 0 on EOF, -1 on error. Partial reads allowed. */
-typedef ssize_t (*streamReaderReadFn)(void *ctx, void *buf, size_t len);
+typedef struct streamWriter {
+    streamCompressor compressor;
+    uint8_t *out_buf;
+    size_t out_buf_size;
+    streamWriterEmitFn emit_fn;
+    void *emit_ctx;
+    uint8_t stream_kind;
+    bool envelope_written;
+    bool finished;
+    bool errored;
+    uint64_t bytes_emitted;
+} streamWriter;
 
-/* The writer pushes compressed bytes to a vkcsEmitFn sink; the reader pulls
- * from a streamReaderReadFn source. streamWriterFinish must run before freeing,
- * since it emits the frame end; a writer freed without it is truncated. The
- * reader probes the envelope on the first read, so streamReaderProbe and
- * streamReaderGetInfo are only needed to classify the stream up front. */
-streamWriter *streamWriterCreate(const streamWriterConfig *cfg,
-                                 vkcsEmitFn emit_fn,
-                                 void *emit_ctx);
+typedef struct streamReader {
+    streamReaderReadFn read_cb;
+    void *read_ctx;
+
+    struct {
+        bool allow_passthrough;
+        uint8_t expected_stream_kind;
+    } probe_cfg;
+    struct {
+        uint8_t header[VKCS_ENVELOPE_SIZE];
+        size_t header_len;
+        bool ready;
+        bool compressed;
+        bool codec_checksum_enabled;
+        compressionAlgo algo;
+        uint8_t stream_kind;
+    } probe;
+    size_t probe_replay_pos; /* Passthrough bytes left to replay from probe. */
+    size_t buffer_size;
+    bool errored;
+    streamReaderError error_kind;
+
+    streamDecompressor decompressor;
+    bool decompressor_initialized;
+
+    uint8_t *compressed_buf;
+    size_t compressed_buf_pos;
+    size_t compressed_buf_len;
+
+    uint8_t *decompressed_buf;
+    size_t decompressed_buf_pos;
+    size_t decompressed_buf_len;
+} streamReader;
+
+/* The writer pushes compressed bytes to a streamWriterEmitFn sink; the reader
+ * pulls from a streamReaderReadFn source. streamWriterFinish must run before
+ * freeing, since it emits the frame end; a writer freed without it is
+ * truncated. The reader probes the envelope on the first read, so
+ * streamReaderProbe and streamReaderGetInfo are only needed to classify the
+ * stream up front. */
+int streamWriterInit(streamWriter *writer, streamWriterConfig *cfg, streamWriterEmitFn emit_fn, void *emit_ctx);
 
 /* Returns compressed bytes emitted to the sink (not input bytes consumed),
  * including the envelope on the first successful write. -1 on error. */
-ssize_t streamWriterWrite(streamWriter *t, const void *buf, size_t len);
-int streamWriterFlush(streamWriter *t);
-int streamWriterFinish(streamWriter *t);
-void streamWriterFree(streamWriter *t);
-int streamWriterIsErrored(const streamWriter *t);
-void streamWriterSetError(streamWriter *t);
+ssize_t streamWriterWrite(streamWriter *writer, const void *buf, size_t len);
+int streamWriterFlush(streamWriter *writer);
+int streamWriterFinish(streamWriter *writer);
+void streamWriterFree(streamWriter *writer);
 int streamReadEnvelopeInfo(const uint8_t *buf,
                            size_t len,
                            uint8_t expected_stream_kind,
                            streamReaderInfo *info);
 
-streamReader *streamReaderCreate(const streamReaderConfig *cfg,
-                                 streamReaderReadFn read_cb,
-                                 void *read_ctx);
+int streamReaderInit(streamReader *reader, streamReaderConfig *cfg, streamReaderReadFn read_cb, void *read_ctx);
 
 /* Drives the wrapped read callback synchronously. Caller must ensure the
  * source can block (file rios are fine; non-blocking sources are not). */
-int streamReaderProbe(streamReader *t);
+int streamReaderProbe(streamReader *reader);
 
 /* Full or fail: returns len on success, 0 on EOF, -1 on error. */
-ssize_t streamReaderRead(streamReader *t, void *buf, size_t len);
-int streamReaderGetInfo(streamReader *t, streamReaderInfo *info);
-streamReaderError streamReaderGetError(const streamReader *t);
-int streamReaderValidateEnd(streamReader *t);
-void streamReaderFree(streamReader *t);
+ssize_t streamReaderRead(streamReader *reader, void *buf, size_t len);
+int streamReaderGetInfo(streamReader *reader, streamReaderInfo *info);
+int streamReaderValidateEnd(streamReader *reader);
+void streamReaderFree(streamReader *reader);
 
 #endif /* COMPRESSION_STREAM_H */

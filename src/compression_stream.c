@@ -5,6 +5,7 @@
  */
 
 #include "compression_stream.h"
+#include "serverassert.h"
 #include "zmalloc.h"
 #include <limits.h>
 #include <string.h>
@@ -18,70 +19,37 @@ typedef enum {
     VKCS_PROBE_ERROR = 3,
 } vkcsProbeResult;
 
-typedef struct {
-    bool allow_passthrough;
-    uint8_t expected_stream_kind;
-} vkcsProbeConfig;
-
-typedef struct {
-    uint8_t header[VKCS_ENVELOPE_SIZE];
-    size_t header_len;
-    bool ready;
-    bool compressed;
-    bool codec_checksum_enabled;
-    compressionAlgo algo;
-    uint8_t stream_kind;
-} vkcsProbe;
-
-static bool vkcsCodecIsSupported(vkcsCodec codec) {
-    return codec == VKCS_CODEC_LZ4;
+static bool streamReaderProbeHasMagicPrefix(streamReader *reader) {
+    if (reader->probe.header_len == 0) return false;
+    size_t magic_prefix_len = reader->probe.header_len < VKCS_MAGIC_SIZE ? reader->probe.header_len : VKCS_MAGIC_SIZE;
+    return memcmp(reader->probe.header, "VKCS", magic_prefix_len) == 0;
 }
 
-static bool vkcsProbeHasMagicPrefix(const vkcsProbe *probe) {
-    if (probe->header_len == 0) return false;
-    size_t magic_prefix_len = probe->header_len < VKCS_MAGIC_SIZE ? probe->header_len : VKCS_MAGIC_SIZE;
-    return memcmp(probe->header, "VKCS", magic_prefix_len) == 0;
+static void streamReaderProbeSetPassthrough(streamReader *reader) {
+    reader->probe.ready = true;
+    reader->probe.compressed = false;
+    reader->probe.codec_checksum_enabled = false;
+    reader->probe.algo = ALGO_NONE;
+    reader->probe.stream_kind = 0;
 }
 
-static void vkcsProbeSetPassthrough(vkcsProbe *probe) {
-    probe->ready = true;
-    probe->compressed = false;
-    probe->codec_checksum_enabled = false;
-    probe->algo = ALGO_NONE;
-    probe->stream_kind = 0;
+static void streamReaderProbeSetCompressed(streamReader *reader,
+                                           compressionAlgo algo,
+                                           uint8_t stream_kind,
+                                           bool codec_checksum_enabled) {
+    reader->probe.ready = true;
+    reader->probe.compressed = true;
+    reader->probe.codec_checksum_enabled = codec_checksum_enabled;
+    reader->probe.algo = algo;
+    reader->probe.stream_kind = stream_kind;
 }
 
-static void vkcsProbeSetCompressed(vkcsProbe *probe,
-                                   compressionAlgo algo,
-                                   uint8_t stream_kind,
-                                   bool codec_checksum_enabled) {
-    probe->ready = true;
-    probe->compressed = true;
-    probe->codec_checksum_enabled = codec_checksum_enabled;
-    probe->algo = algo;
-    probe->stream_kind = stream_kind;
-}
-
-static int compressionAlgoToVkcsCodec(compressionAlgo algo, vkcsCodec *codec) {
-    switch (algo) {
-    case ALGO_LZ4: *codec = VKCS_CODEC_LZ4; return 0;
-    default: return -1;
-    }
-}
-
-static int vkcsCodecToCompressionAlgo(vkcsCodec codec, compressionAlgo *algo) {
-    switch (codec) {
-    case VKCS_CODEC_LZ4: *algo = ALGO_LZ4; return 0;
-    default: return -1;
-    }
-}
-
-static int writeVkcsEnvelope(vkcsEmitFn emit_fn,
+static int writeVkcsEnvelope(streamWriterEmitFn emit_fn,
                              void *ctx,
-                             vkcsCodec codec,
+                             compressionAlgo algo,
                              uint8_t stream_kind,
                              bool codec_checksum_enabled) {
-    if (!emit_fn || !vkcsCodecIsSupported(codec)) return -1;
+    if (!compressionAlgoSupportsStreaming(algo)) return -1;
 
     uint8_t envelope[VKCS_ENVELOPE_SIZE] = {
         VKCS_MAGIC_0,
@@ -89,7 +57,7 @@ static int writeVkcsEnvelope(vkcsEmitFn emit_fn,
         VKCS_MAGIC_2,
         VKCS_MAGIC_3,
         VKCS_VERSION,
-        (uint8_t)codec,
+        (uint8_t)algo,
         codec_checksum_enabled ? VKCS_FLAG_CODEC_CHECKSUM : 0,
         stream_kind,
     };
@@ -100,21 +68,21 @@ static int writeVkcsEnvelope(vkcsEmitFn emit_fn,
  * than silently corrupting load. */
 static int readVkcsEnvelope(const uint8_t *buf,
                             size_t len,
-                            vkcsCodec *codec,
+                            compressionAlgo *algo,
                             uint8_t *stream_kind,
                             bool *codec_checksum_enabled) {
-    if (!buf || len < VKCS_ENVELOPE_SIZE) return -1;
+    if (len < VKCS_ENVELOPE_SIZE) return -1;
 
     if (memcmp(buf, "VKCS", VKCS_MAGIC_SIZE) != 0) return -1;
     if (buf[4] != VKCS_VERSION) return -1;
 
-    vkcsCodec parsed_codec = (vkcsCodec)buf[5];
-    if (!vkcsCodecIsSupported(parsed_codec)) return -1;
+    compressionAlgo parsed_algo = (compressionAlgo)buf[5];
+    if (!compressionAlgoSupportsStreaming(parsed_algo)) return -1;
 
     uint8_t flags = buf[6];
     if (flags & ~VKCS_FLAG_CODEC_CHECKSUM) return -1;
 
-    if (codec) *codec = parsed_codec;
+    if (algo) *algo = parsed_algo;
     if (stream_kind) *stream_kind = buf[7];
     if (codec_checksum_enabled) *codec_checksum_enabled = (flags & VKCS_FLAG_CODEC_CHECKSUM) != 0;
     return 0;
@@ -124,15 +92,13 @@ int streamReadEnvelopeInfo(const uint8_t *buf,
                            size_t len,
                            uint8_t expected_stream_kind,
                            streamReaderInfo *info) {
-    vkcsCodec codec;
     uint8_t stream_kind = 0;
     bool codec_checksum_enabled = false;
     compressionAlgo algo = ALGO_NONE;
 
-    if (!info || len < VKCS_ENVELOPE_SIZE ||
-        readVkcsEnvelope(buf, len, &codec, &stream_kind, &codec_checksum_enabled) != 0 ||
-        stream_kind != expected_stream_kind ||
-        vkcsCodecToCompressionAlgo(codec, &algo) != 0) {
+    if (len < VKCS_ENVELOPE_SIZE ||
+        readVkcsEnvelope(buf, len, &algo, &stream_kind, &codec_checksum_enabled) != 0 ||
+        stream_kind != expected_stream_kind) {
         return -1;
     }
 
@@ -143,51 +109,45 @@ int streamReadEnvelopeInfo(const uint8_t *buf,
     return 0;
 }
 
-static void vkcsProbeInit(vkcsProbe *probe) {
-    memset(probe, 0, sizeof(*probe));
-    probe->algo = ALGO_NONE;
-}
-
 /* Incremental: wrapped rios may legally return fewer than VKCS_ENVELOPE_SIZE
  * bytes per read. Consumed bytes are retained in probe->header so passthrough
  * can replay them exactly. */
-static vkcsProbeResult vkcsProbeFeed(vkcsProbe *probe,
-                                     const vkcsProbeConfig *cfg,
-                                     const uint8_t *src,
-                                     size_t src_len,
-                                     bool input_eof,
-                                     size_t *src_consumed) {
+static vkcsProbeResult streamReaderProbeFeed(streamReader *reader,
+                                             const uint8_t *src,
+                                             size_t src_len,
+                                             bool input_eof,
+                                             size_t *src_consumed) {
     size_t consumed = 0;
     *src_consumed = 0;
-    if (probe->ready) {
-        return probe->compressed ? VKCS_PROBE_COMPRESSED : VKCS_PROBE_PASSTHROUGH;
+    if (reader->probe.ready) {
+        return reader->probe.compressed ? VKCS_PROBE_COMPRESSED : VKCS_PROBE_PASSTHROUGH;
     }
 
     while (consumed < src_len) {
-        size_t target = probe->header_len < VKCS_MAGIC_SIZE ? VKCS_MAGIC_SIZE : VKCS_ENVELOPE_SIZE;
-        size_t need = target - probe->header_len;
+        size_t target = reader->probe.header_len < VKCS_MAGIC_SIZE ? VKCS_MAGIC_SIZE : VKCS_ENVELOPE_SIZE;
+        size_t need = target - reader->probe.header_len;
         size_t take = src_len - consumed < need ? src_len - consumed : need;
 
-        memcpy(probe->header + probe->header_len, src + consumed, take);
-        probe->header_len += take;
+        memcpy(reader->probe.header + reader->probe.header_len, src + consumed, take);
+        reader->probe.header_len += take;
         consumed += take;
 
-        if (probe->header_len >= VKCS_MAGIC_SIZE && memcmp(probe->header, "VKCS", VKCS_MAGIC_SIZE) != 0) {
+        if (reader->probe.header_len >= VKCS_MAGIC_SIZE && memcmp(reader->probe.header, "VKCS", VKCS_MAGIC_SIZE) != 0) {
             *src_consumed = consumed;
-            if (!cfg->allow_passthrough) return VKCS_PROBE_ERROR;
-            vkcsProbeSetPassthrough(probe);
+            if (!reader->probe_cfg.allow_passthrough) return VKCS_PROBE_ERROR;
+            streamReaderProbeSetPassthrough(reader);
             return VKCS_PROBE_PASSTHROUGH;
         }
 
-        if (probe->header_len == VKCS_ENVELOPE_SIZE) {
+        if (reader->probe.header_len == VKCS_ENVELOPE_SIZE) {
             streamReaderInfo info = {0};
-            if (streamReadEnvelopeInfo(probe->header, VKCS_ENVELOPE_SIZE,
-                                       cfg->expected_stream_kind, &info) != 0) {
+            if (streamReadEnvelopeInfo(reader->probe.header, VKCS_ENVELOPE_SIZE,
+                                       reader->probe_cfg.expected_stream_kind, &info) != 0) {
                 *src_consumed = consumed;
                 return VKCS_PROBE_ERROR;
             }
-            vkcsProbeSetCompressed(probe, info.algo, info.stream_kind,
-                                   info.codec_checksum_enabled);
+            streamReaderProbeSetCompressed(reader, info.algo, info.stream_kind,
+                                           info.codec_checksum_enabled);
             *src_consumed = consumed;
             return VKCS_PROBE_COMPRESSED;
         }
@@ -196,9 +156,9 @@ static vkcsProbeResult vkcsProbeFeed(vkcsProbe *probe,
     if (input_eof) {
         *src_consumed = consumed;
         /* EOF mid-magic looks like a truncated VKCS, not a valid passthrough. */
-        if (vkcsProbeHasMagicPrefix(probe)) return VKCS_PROBE_ERROR;
-        if (!cfg->allow_passthrough) return VKCS_PROBE_ERROR;
-        vkcsProbeSetPassthrough(probe);
+        if (streamReaderProbeHasMagicPrefix(reader)) return VKCS_PROBE_ERROR;
+        if (!reader->probe_cfg.allow_passthrough) return VKCS_PROBE_ERROR;
+        streamReaderProbeSetPassthrough(reader);
         return VKCS_PROBE_PASSTHROUGH;
     }
 
@@ -210,544 +170,463 @@ static vkcsProbeResult vkcsProbeFeed(vkcsProbe *probe,
 
 #define STREAM_WRITER_INPUT_CHUNK_SIZE (1024 * 1024)
 
-struct streamWriter {
-    streamCompressor compressor;
-    uint8_t *out_buf;
-    size_t out_buf_size;
-    vkcsEmitFn emit_fn;
-    void *emit_ctx;
-    uint8_t stream_kind;
-    bool envelope_written;
-    bool finished;
-    bool errored;
-    uint64_t bytes_emitted;
-};
+int streamWriterInit(streamWriter *writer, streamWriterConfig *cfg, streamWriterEmitFn emit_fn, void *emit_ctx) {
+    if (!compressionAlgoSupportsStreaming(cfg->algo)) return -1;
 
-static int streamWriterInitContext(streamWriter *t,
-                                   const streamWriterConfig *cfg,
-                                   vkcsEmitFn emit_fn,
-                                   void *emit_ctx) {
-    memset(t, 0, sizeof(*t));
-    t->emit_fn = emit_fn;
-    t->emit_ctx = emit_ctx;
-    t->stream_kind = cfg->stream_kind;
+    memset(writer, 0, sizeof(*writer));
+    writer->emit_fn = emit_fn;
+    writer->emit_ctx = emit_ctx;
+    writer->stream_kind = cfg->stream_kind;
 
-    if (streamCompressorInit(&t->compressor, cfg->algo, cfg->level) != 0) return -1;
-    t->compressor.codec_checksum = cfg->codec_checksum_enabled;
+    if (streamCompressorInit(&writer->compressor, cfg->algo, cfg->level) != 0) return -1;
+    writer->compressor.codec_checksum = cfg->codec_checksum_enabled;
     return 0;
 }
 
 /* Envelope is emitted lazily so a writer that's created but never written
  * doesn't leave a stub envelope on the sink. */
-static int streamWriterEnsureEnvelope(streamWriter *t) {
-    if (t->envelope_written) return 0;
-    vkcsCodec codec;
-    if (compressionAlgoToVkcsCodec(t->compressor.algo, &codec) != 0 ||
-        writeVkcsEnvelope(t->emit_fn, t->emit_ctx, codec,
-                          t->stream_kind, t->compressor.codec_checksum) != 0) {
-        t->errored = true;
+static int streamWriterEnsureEnvelope(streamWriter *writer) {
+    if (writer->envelope_written) return 0;
+    if (writeVkcsEnvelope(writer->emit_fn, writer->emit_ctx, writer->compressor.algo,
+                          writer->stream_kind, writer->compressor.codec_checksum) != 0) {
+        writer->errored = true;
         return -1;
     }
-    t->bytes_emitted += VKCS_ENVELOPE_SIZE;
-    t->envelope_written = true;
+    writer->bytes_emitted += VKCS_ENVELOPE_SIZE;
+    writer->envelope_written = true;
     return 0;
 }
 
-static int streamWriterEmit(streamWriter *t, const uint8_t *buf, size_t len) {
+static int streamWriterEmit(streamWriter *writer, const uint8_t *buf, size_t len) {
     if (len == 0) return 0;
-    if (t->emit_fn(t->emit_ctx, buf, len) != 0) {
-        t->errored = true;
+    if (writer->emit_fn(writer->emit_ctx, buf, len) != 0) {
+        writer->errored = true;
         return -1;
     }
-    t->bytes_emitted += len;
+    writer->bytes_emitted += len;
     return 0;
 }
 
-static int streamWriterEnsureOutBuf(streamWriter *t, size_t input_len) {
-    size_t needed = streamCompressOutputBound(&t->compressor, input_len);
+static int streamWriterEnsureOutBuf(streamWriter *writer, size_t input_len) {
+    size_t needed = streamCompressorOutputBound(&writer->compressor, input_len);
     if (needed == 0) {
-        t->errored = true;
+        writer->errored = true;
         return -1;
     }
-    if (needed > t->out_buf_size) {
-        t->out_buf = zrealloc(t->out_buf, needed);
-        t->out_buf_size = needed;
+    if (needed > writer->out_buf_size) {
+        writer->out_buf = zrealloc(writer->out_buf, needed);
+        writer->out_buf_size = needed;
     }
     return 0;
 }
 
-static int streamWriterFeedAndEmit(streamWriter *t,
+static int streamWriterFeedAndEmit(streamWriter *writer,
                                    const uint8_t *input,
                                    size_t input_len,
                                    compressFlushMode flush_mode) {
-    if (streamWriterEnsureOutBuf(t, input_len) != 0) return -1;
+    if (streamWriterEnsureOutBuf(writer, input_len) != 0) return -1;
 
-    ssize_t compressed = streamCompressFeed(&t->compressor, t->out_buf,
-                                            t->out_buf_size,
-                                            input, input_len, flush_mode);
+    ssize_t compressed = streamCompressorFeed(&writer->compressor, writer->out_buf,
+                                              writer->out_buf_size,
+                                              input, input_len, flush_mode);
     if (compressed < 0) {
-        t->errored = true;
+        writer->errored = true;
         return -1;
     }
-    return streamWriterEmit(t, t->out_buf, (size_t)compressed);
+    return streamWriterEmit(writer, writer->out_buf, (size_t)compressed);
 }
 
-static void streamWriterReleaseContext(streamWriter *t) {
-    streamCompressorFree(&t->compressor);
-    if (t->out_buf) {
-        zfree(t->out_buf);
-        t->out_buf = NULL;
+void streamWriterFree(streamWriter *writer) {
+    streamCompressorFree(&writer->compressor);
+    if (writer->out_buf) {
+        zfree(writer->out_buf);
+        writer->out_buf = NULL;
     }
-    t->out_buf_size = 0;
+    writer->out_buf_size = 0;
 }
 
-streamWriter *streamWriterCreate(const streamWriterConfig *cfg,
-                                 vkcsEmitFn emit_fn,
-                                 void *emit_ctx) {
-    if (!cfg || !emit_fn || !compressionAlgoSupportsStreaming(cfg->algo)) return NULL;
-
-    streamWriter *t = zmalloc(sizeof(*t));
-    if (streamWriterInitContext(t, cfg, emit_fn, emit_ctx) != 0) {
-        zfree(t);
-        return NULL;
-    }
-    return t;
-}
-
-ssize_t streamWriterWrite(streamWriter *t, const void *buf, size_t len) {
-    if (!t || t->errored) return -1;
+ssize_t streamWriterWrite(streamWriter *writer, const void *buf, size_t len) {
     /* Writes after finish are a caller bug; silently dropping them would
      * corrupt the consumer's view of the stream. */
-    if (t->finished) return -1;
+    if (writer->finished) return -1;
     if (len == 0) return 0;
     if (len > (size_t)SSIZE_MAX) return -1;
 
     const uint8_t *src = (const uint8_t *)buf;
     size_t remaining = len;
-    uint64_t emitted_before = t->bytes_emitted;
-    if (streamWriterEnsureEnvelope(t) != 0) return -1;
+    uint64_t emitted_before = writer->bytes_emitted;
+    if (streamWriterEnsureEnvelope(writer) != 0) return -1;
     while (remaining > 0) {
         size_t chunk_len = remaining < STREAM_WRITER_INPUT_CHUNK_SIZE
                                ? remaining
                                : STREAM_WRITER_INPUT_CHUNK_SIZE;
-        if (streamWriterFeedAndEmit(t, src, chunk_len, FLUSH_CONTINUE) != 0) return -1;
+        if (streamWriterFeedAndEmit(writer, src, chunk_len, FLUSH_CONTINUE) != 0) return -1;
         src += chunk_len;
         remaining -= chunk_len;
     }
-    uint64_t emitted_delta = t->bytes_emitted - emitted_before;
+    uint64_t emitted_delta = writer->bytes_emitted - emitted_before;
     if (emitted_delta > (uint64_t)SSIZE_MAX) {
-        t->errored = true;
+        writer->errored = true;
         return -1;
     }
     return (ssize_t)emitted_delta;
 }
 
-int streamWriterFlush(streamWriter *t) {
-    if (!t || t->errored) return -1;
+int streamWriterFlush(streamWriter *writer) {
     /* Flush after finish is a no-op: frame is already closed. */
-    if (t->finished) return 0;
+    if (writer->finished) return 0;
 
-    if (!t->envelope_written || !t->compressor.stream_started) return 0;
-    return streamWriterFeedAndEmit(t, NULL, 0, FLUSH_SYNC);
+    if (!writer->envelope_written || !writer->compressor.stream_started) return 0;
+    return streamWriterFeedAndEmit(writer, NULL, 0, FLUSH_SYNC);
 }
 
-int streamWriterFinish(streamWriter *t) {
-    if (!t || t->errored) return -1;
-    if (t->finished) return 0;
-    t->finished = true;
+int streamWriterFinish(streamWriter *writer) {
+    if (writer->finished) return 0;
+    writer->finished = true;
 
     /* Even an empty stream produces a valid envelope + empty frame so the
      * loader sees a well-formed file. */
-    if (streamWriterEnsureEnvelope(t) != 0) return -1;
-    return streamWriterFeedAndEmit(t, NULL, 0, FLUSH_END);
-}
-
-void streamWriterFree(streamWriter *t) {
-    if (!t) return;
-    streamWriterReleaseContext(t);
-    zfree(t);
-}
-
-int streamWriterIsErrored(const streamWriter *t) {
-    return t && t->errored;
-}
-
-void streamWriterSetError(streamWriter *t) {
-    if (!t) return;
-    t->errored = true;
+    if (streamWriterEnsureEnvelope(writer) != 0) return -1;
+    return streamWriterFeedAndEmit(writer, NULL, 0, FLUSH_END);
 }
 
 /* ===== Streaming reader ===== */
 
-struct streamReader {
-    streamReaderReadFn read_cb;
-    void *read_ctx;
-
-    vkcsProbeConfig probe_cfg;
-    vkcsProbe probe;
-    size_t probe_replay_pos; /* Passthrough bytes left to replay from probe. */
-    size_t buffer_size;
-    bool errored;
-    streamReaderError error_kind;
-
-    streamDecompressor decompressor;
-    bool decompressor_initialized;
-
-    uint8_t *compressed_buf;
-    size_t compressed_buf_pos;
-    size_t compressed_buf_len;
-
-    uint8_t *decompressed_buf;
-    size_t decompressed_buf_pos;
-    size_t decompressed_buf_len;
-};
-
-static void streamReaderSetError(streamReader *t, streamReaderError error_kind) {
-    t->errored = true;
-    if (t->error_kind == STREAM_READER_ERROR_NONE) t->error_kind = error_kind;
+static void streamReaderSetError(streamReader *reader, streamReaderError error_kind) {
+    reader->errored = true;
+    if (reader->error_kind == STREAM_READER_ERROR_NONE) reader->error_kind = error_kind;
 }
 
-static ssize_t streamReaderFail(streamReader *t, size_t partial_bytes) {
-    streamReaderSetError(t, STREAM_READER_ERROR_IO);
+static ssize_t streamReaderFail(streamReader *reader, size_t partial_bytes) {
+    streamReaderSetError(reader, STREAM_READER_ERROR_IO);
     return partial_bytes > 0 ? (ssize_t)partial_bytes : -1;
 }
 
-static ssize_t streamReaderFailWithError(streamReader *t,
+static ssize_t streamReaderFailWithError(streamReader *reader,
                                          size_t partial_bytes,
                                          streamReaderError error_kind) {
-    streamReaderSetError(t, error_kind);
+    streamReaderSetError(reader, error_kind);
     return partial_bytes > 0 ? (ssize_t)partial_bytes : -1;
 }
 
-static int streamReaderInitCompressedState(streamReader *t, size_t buffer_size) {
-    if (streamDecompressorInit(&t->decompressor, t->probe.algo) != 0) return -1;
-    t->decompressor_initialized = true;
-    t->compressed_buf = zmalloc(buffer_size);
-    t->decompressed_buf = zmalloc(buffer_size);
+static int streamReaderInitCompressedState(streamReader *reader, size_t buffer_size) {
+    if (streamDecompressorInit(&reader->decompressor, reader->probe.algo) != 0) return -1;
+    reader->decompressor_initialized = true;
+    reader->compressed_buf = zmalloc(buffer_size);
+    reader->decompressed_buf = zmalloc(buffer_size);
     return 0;
 }
 
-static void streamReaderResetCompressedState(streamReader *t) {
-    if (t->decompressor_initialized) {
-        streamDecompressorFree(&t->decompressor);
-        t->decompressor_initialized = false;
+static void streamReaderResetCompressedState(streamReader *reader) {
+    if (reader->decompressor_initialized) {
+        streamDecompressorFree(&reader->decompressor);
+        reader->decompressor_initialized = false;
     }
-    if (t->compressed_buf) {
-        zfree(t->compressed_buf);
-        t->compressed_buf = NULL;
+    if (reader->compressed_buf) {
+        zfree(reader->compressed_buf);
+        reader->compressed_buf = NULL;
     }
-    t->compressed_buf_pos = 0;
-    t->compressed_buf_len = 0;
-    if (t->decompressed_buf) {
-        zfree(t->decompressed_buf);
-        t->decompressed_buf = NULL;
+    reader->compressed_buf_pos = 0;
+    reader->compressed_buf_len = 0;
+    if (reader->decompressed_buf) {
+        zfree(reader->decompressed_buf);
+        reader->decompressed_buf = NULL;
     }
-    t->decompressed_buf_pos = 0;
-    t->decompressed_buf_len = 0;
+    reader->decompressed_buf_pos = 0;
+    reader->decompressed_buf_len = 0;
 }
 
-streamReader *streamReaderCreate(const streamReaderConfig *cfg,
-                                 streamReaderReadFn read_cb,
-                                 void *read_ctx) {
-    if (!cfg || !read_cb || cfg->buffer_size == 0) return NULL;
+int streamReaderInit(streamReader *reader, streamReaderConfig *cfg, streamReaderReadFn read_cb, void *read_ctx) {
+    assert(cfg->buffer_size != 0);
 
-    streamReader *t = zcalloc(sizeof(*t));
-    t->read_cb = read_cb;
-    t->read_ctx = read_ctx;
-    t->probe_cfg.allow_passthrough = cfg->allow_passthrough;
-    t->probe_cfg.expected_stream_kind = cfg->expected_stream_kind;
-    vkcsProbeInit(&t->probe);
-    t->buffer_size = cfg->buffer_size;
-    if (t->buffer_size < STREAM_READER_BUFFER_SIZE_MIN) {
-        t->buffer_size = STREAM_READER_BUFFER_SIZE_MIN;
+    memset(reader, 0, sizeof(*reader));
+    reader->read_cb = read_cb;
+    reader->read_ctx = read_ctx;
+    reader->probe_cfg.allow_passthrough = cfg->allow_passthrough;
+    reader->probe_cfg.expected_stream_kind = cfg->expected_stream_kind;
+    reader->buffer_size = cfg->buffer_size;
+    if (reader->buffer_size < STREAM_READER_BUFFER_SIZE_MIN) {
+        reader->buffer_size = STREAM_READER_BUFFER_SIZE_MIN;
     }
-    return t;
+    return 0;
 }
 
-static size_t streamReaderProbeBytesNeeded(const streamReader *t) {
-    if (t->probe.header_len < VKCS_MAGIC_SIZE) return VKCS_MAGIC_SIZE - t->probe.header_len;
-    return VKCS_ENVELOPE_SIZE - t->probe.header_len;
+static size_t streamReaderProbeBytesNeeded(streamReader *reader) {
+    if (reader->probe.header_len < VKCS_MAGIC_SIZE) return VKCS_MAGIC_SIZE - reader->probe.header_len;
+    return VKCS_ENVELOPE_SIZE - reader->probe.header_len;
 }
 
-int streamReaderProbe(streamReader *t) {
-    if (!t || t->errored) return -1;
-    if (t->probe.ready) return 0;
+int streamReaderProbe(streamReader *reader) {
+    if (reader->errored) return -1;
+    if (reader->probe.ready) return 0;
 
-    while (!t->probe.ready) {
+    while (!reader->probe.ready) {
         uint8_t buf[VKCS_ENVELOPE_SIZE];
-        size_t need = streamReaderProbeBytesNeeded(t);
-        ssize_t got = t->read_cb(t->read_ctx, buf, need);
+        size_t need = streamReaderProbeBytesNeeded(reader);
+        ssize_t got = reader->read_cb(reader->read_ctx, buf, need);
         size_t consumed = 0;
 
         if (got < 0 || (size_t)got > need) {
-            streamReaderSetError(t, STREAM_READER_ERROR_IO);
+            streamReaderSetError(reader, STREAM_READER_ERROR_IO);
             return -1;
         }
 
-        vkcsProbeResult status = vkcsProbeFeed(&t->probe, &t->probe_cfg, buf,
-                                               got > 0 ? (size_t)got : 0,
-                                               got == 0, &consumed);
+        vkcsProbeResult status = streamReaderProbeFeed(reader, buf,
+                                                       got > 0 ? (size_t)got : 0,
+                                                       got == 0, &consumed);
         switch (status) {
         case VKCS_PROBE_ERROR:
-            streamReaderSetError(t, STREAM_READER_ERROR_INCOMPATIBLE);
+            streamReaderSetError(reader, STREAM_READER_ERROR_INCOMPATIBLE);
             return -1;
         case VKCS_PROBE_NEED_INPUT:
             continue;
         case VKCS_PROBE_COMPRESSED:
-            if (!t->decompressor_initialized &&
-                streamReaderInitCompressedState(t, t->buffer_size) != 0) {
-                streamReaderSetError(t, STREAM_READER_ERROR_IO);
+            if (!reader->decompressor_initialized &&
+                streamReaderInitCompressedState(reader, reader->buffer_size) != 0) {
+                streamReaderSetError(reader, STREAM_READER_ERROR_IO);
                 return -1;
             }
             break;
         case VKCS_PROBE_PASSTHROUGH:
             break;
         default:
-            streamReaderSetError(t, STREAM_READER_ERROR_INCOMPATIBLE);
+            streamReaderSetError(reader, STREAM_READER_ERROR_INCOMPATIBLE);
             return -1;
         }
     }
     return 0;
 }
 
-static size_t streamReaderProbeAvail(const streamReader *t) {
-    if (t->probe.header_len <= t->probe_replay_pos) return 0;
-    return t->probe.header_len - t->probe_replay_pos;
+static size_t streamReaderProbeAvail(streamReader *reader) {
+    if (reader->probe.header_len <= reader->probe_replay_pos) return 0;
+    return reader->probe.header_len - reader->probe_replay_pos;
 }
 
 /* Replay any probe-buffered bytes before reading from the wrapped source. */
-static ssize_t streamReaderReadPassthrough(streamReader *t, uint8_t *dst, size_t len) {
+static ssize_t streamReaderReadPassthrough(streamReader *reader, uint8_t *dst, size_t len) {
     size_t total = 0;
-    size_t prefix_avail = streamReaderProbeAvail(t);
+    size_t prefix_avail = streamReaderProbeAvail(reader);
     if (prefix_avail > 0) {
         size_t from_prefix = prefix_avail < len ? prefix_avail : len;
-        memcpy(dst, t->probe.header + t->probe_replay_pos, from_prefix);
-        t->probe_replay_pos += from_prefix;
+        memcpy(dst, reader->probe.header + reader->probe_replay_pos, from_prefix);
+        reader->probe_replay_pos += from_prefix;
         dst += from_prefix;
         len -= from_prefix;
         total += from_prefix;
     }
     if (len == 0) return (ssize_t)total;
 
-    ssize_t got = t->read_cb(t->read_ctx, dst, len);
-    if (got < 0 || (size_t)got > len) return streamReaderFail(t, total);
+    ssize_t got = reader->read_cb(reader->read_ctx, dst, len);
+    if (got < 0 || (size_t)got > len) return streamReaderFail(reader, total);
     return (ssize_t)(total + (size_t)got);
 }
 
-static int streamReaderDrainCompressedBuf(streamReader *t,
+static int streamReaderDrainCompressedBuf(streamReader *reader,
                                           uint8_t *out,
                                           size_t out_size,
                                           size_t *out_written) {
     *out_written = 0;
-    while (t->compressed_buf_len > 0 && *out_written < out_size) {
+    while (reader->compressed_buf_len > 0 && *out_written < out_size) {
         size_t consumed = 0;
-        size_t feed_len = t->compressed_buf_len;
-        size_t input_hint = t->decompressor.input_hint;
+        size_t feed_len = reader->compressed_buf_len;
+        size_t input_hint = reader->decompressor.input_hint;
         if (input_hint > 0 && feed_len > input_hint) feed_len = input_hint;
-        ssize_t produced = streamDecompressFeed(
-            &t->decompressor,
+        ssize_t produced = streamDecompressorFeed(
+            &reader->decompressor,
             out + *out_written, out_size - *out_written,
-            t->compressed_buf + t->compressed_buf_pos,
+            reader->compressed_buf + reader->compressed_buf_pos,
             feed_len, &consumed);
         if (produced < 0 ||
             consumed > feed_len ||
             (size_t)produced > out_size - *out_written) {
-            streamReaderSetError(t, STREAM_READER_ERROR_CORRUPT);
+            streamReaderSetError(reader, STREAM_READER_ERROR_CORRUPT);
             return -1;
         }
         *out_written += (size_t)produced;
-        t->compressed_buf_pos += consumed;
-        t->compressed_buf_len -= consumed;
-        if (t->decompressor.frame_done) break;
+        reader->compressed_buf_pos += consumed;
+        reader->compressed_buf_len -= consumed;
+        if (reader->decompressor.frame_done) break;
         if (consumed == 0 && produced == 0) break;
     }
-    if (t->compressed_buf_len == 0) t->compressed_buf_pos = 0;
+    if (reader->compressed_buf_len == 0) reader->compressed_buf_pos = 0;
     return 0;
 }
 
-static size_t streamReaderCompressedBufTailSpace(streamReader *t) {
-    size_t tail_space = t->buffer_size - t->compressed_buf_pos - t->compressed_buf_len;
+static size_t streamReaderCompressedBufTailSpace(streamReader *reader) {
+    size_t tail_space = reader->buffer_size - reader->compressed_buf_pos - reader->compressed_buf_len;
     if (tail_space > 0) return tail_space;
 
-    if (t->compressed_buf_len == 0) {
-        t->compressed_buf_pos = 0;
-        return t->buffer_size;
+    if (reader->compressed_buf_len == 0) {
+        reader->compressed_buf_pos = 0;
+        return reader->buffer_size;
     }
 
-    if (t->compressed_buf_pos > 0) {
-        memmove(t->compressed_buf, t->compressed_buf + t->compressed_buf_pos, t->compressed_buf_len);
-        t->compressed_buf_pos = 0;
-        return t->buffer_size - t->compressed_buf_len;
+    if (reader->compressed_buf_pos > 0) {
+        memmove(reader->compressed_buf, reader->compressed_buf + reader->compressed_buf_pos, reader->compressed_buf_len);
+        reader->compressed_buf_pos = 0;
+        return reader->buffer_size - reader->compressed_buf_len;
     }
 
     /* Buffer full and the codec made no progress, treat as corrupt rather
      * than grow buffers indefinitely. */
-    streamReaderSetError(t, STREAM_READER_ERROR_CORRUPT);
+    streamReaderSetError(reader, STREAM_READER_ERROR_CORRUPT);
     return 0;
 }
 
-static int streamReaderRefillCompressedBuf(streamReader *t) {
-    if (t->decompressor.frame_done) return 0;
+static int streamReaderRefillCompressedBuf(streamReader *reader) {
+    if (reader->decompressor.frame_done) return 0;
 
-    size_t read_size = streamReaderCompressedBufTailSpace(t);
-    size_t input_hint = t->decompressor.input_hint;
+    size_t read_size = streamReaderCompressedBufTailSpace(reader);
+    size_t input_hint = reader->decompressor.input_hint;
     if (input_hint > 0 && read_size > input_hint) read_size = input_hint;
     if (read_size > (size_t)SSIZE_MAX) read_size = (size_t)SSIZE_MAX;
     if (read_size == 0) return -1;
 
-    ssize_t got = t->read_cb(t->read_ctx,
-                             t->compressed_buf + t->compressed_buf_pos + t->compressed_buf_len,
-                             read_size);
+    ssize_t got = reader->read_cb(reader->read_ctx,
+                                  reader->compressed_buf + reader->compressed_buf_pos + reader->compressed_buf_len,
+                                  read_size);
     if (got < 0 || (size_t)got > read_size) return -1;
     if (got == 0) return 0;
-    t->compressed_buf_len += (size_t)got;
+    reader->compressed_buf_len += (size_t)got;
     return 1;
 }
 
-static ssize_t streamReaderFillDecompressedBuf(streamReader *t) {
+static ssize_t streamReaderFillDecompressedBuf(streamReader *reader) {
     size_t written = 0;
 
-    t->decompressed_buf_pos = 0;
-    t->decompressed_buf_len = 0;
+    reader->decompressed_buf_pos = 0;
+    reader->decompressed_buf_len = 0;
 
-    while (written < t->buffer_size) {
-        if (t->compressed_buf_len > 0) {
+    while (written < reader->buffer_size) {
+        if (reader->compressed_buf_len > 0) {
             size_t chunk_written = 0;
-            if (streamReaderDrainCompressedBuf(t, t->decompressed_buf + written,
-                                               t->buffer_size - written, &chunk_written) != 0) {
+            if (streamReaderDrainCompressedBuf(reader, reader->decompressed_buf + written,
+                                               reader->buffer_size - written, &chunk_written) != 0) {
                 written += chunk_written;
                 break;
             }
             written += chunk_written;
-            if (written >= t->buffer_size) break;
+            if (written >= reader->buffer_size) break;
         }
 
-        int read_rc = streamReaderRefillCompressedBuf(t);
+        int read_rc = streamReaderRefillCompressedBuf(reader);
         if (read_rc < 0) {
-            streamReaderSetError(t, STREAM_READER_ERROR_IO);
+            streamReaderSetError(reader, STREAM_READER_ERROR_IO);
             if (written == 0) return -1;
             break;
         }
         if (read_rc == 0) break;
     }
 
-    t->decompressed_buf_len = written;
+    reader->decompressed_buf_len = written;
     return (ssize_t)written;
 }
 
-static inline size_t streamReaderDecompressedBufAvail(const streamReader *t) {
-    if (t->decompressed_buf_len <= t->decompressed_buf_pos) return 0;
-    return t->decompressed_buf_len - t->decompressed_buf_pos;
+static inline size_t streamReaderDecompressedBufAvail(streamReader *reader) {
+    if (reader->decompressed_buf_len <= reader->decompressed_buf_pos) return 0;
+    return reader->decompressed_buf_len - reader->decompressed_buf_pos;
 }
 
-static size_t streamReaderCopyFromDecompressedBuf(streamReader *t,
+static size_t streamReaderCopyFromDecompressedBuf(streamReader *reader,
                                                   uint8_t **dst,
                                                   size_t *remaining) {
-    size_t avail = streamReaderDecompressedBufAvail(t);
+    size_t avail = streamReaderDecompressedBufAvail(reader);
     if (avail == 0 || *remaining == 0) return 0;
 
     size_t to_copy = avail < *remaining ? avail : *remaining;
-    memcpy(*dst, t->decompressed_buf + t->decompressed_buf_pos, to_copy);
-    t->decompressed_buf_pos += to_copy;
+    memcpy(*dst, reader->decompressed_buf + reader->decompressed_buf_pos, to_copy);
+    reader->decompressed_buf_pos += to_copy;
     *dst += to_copy;
     *remaining -= to_copy;
     return to_copy;
 }
 
-static ssize_t streamReaderReadCompressed(streamReader *t, uint8_t *dst, size_t len) {
+static ssize_t streamReaderReadCompressed(streamReader *reader, uint8_t *dst, size_t len) {
     size_t remaining = len;
     size_t total = 0;
 
-    total += streamReaderCopyFromDecompressedBuf(t, &dst, &remaining);
+    total += streamReaderCopyFromDecompressedBuf(reader, &dst, &remaining);
     while (remaining > 0) {
-        if (streamReaderDecompressedBufAvail(t) == 0) {
-            ssize_t filled = streamReaderFillDecompressedBuf(t);
+        if (streamReaderDecompressedBufAvail(reader) == 0) {
+            ssize_t filled = streamReaderFillDecompressedBuf(reader);
             if (filled < 0) {
                 return streamReaderFailWithError(
-                    t, total,
-                    t->error_kind == STREAM_READER_ERROR_NONE ? STREAM_READER_ERROR_IO
-                                                              : t->error_kind);
+                    reader, total,
+                    reader->error_kind == STREAM_READER_ERROR_NONE ? STREAM_READER_ERROR_IO
+                                                                   : reader->error_kind);
             }
-            if (filled == 0 && !t->decompressor.frame_done) {
-                return streamReaderFailWithError(t, total, STREAM_READER_ERROR_CORRUPT);
+            if (filled == 0 && !reader->decompressor.frame_done) {
+                return streamReaderFailWithError(reader, total, STREAM_READER_ERROR_CORRUPT);
             }
             if (filled == 0) break;
         }
 
-        total += streamReaderCopyFromDecompressedBuf(t, &dst, &remaining);
-        if (t->errored) break;
+        total += streamReaderCopyFromDecompressedBuf(reader, &dst, &remaining);
+        if (reader->errored) break;
     }
 
     return (ssize_t)total;
 }
 
-ssize_t streamReaderRead(streamReader *t, void *buf, size_t len) {
-    if (!t || !buf || t->errored) return -1;
+ssize_t streamReaderRead(streamReader *reader, void *buf, size_t len) {
+    if (reader->errored) return -1;
     if (len == 0) return 0;
     if (len > (size_t)SSIZE_MAX) return -1;
 
-    if (!t->probe.ready && streamReaderProbe(t) != 0) return -1;
+    if (!reader->probe.ready && streamReaderProbe(reader) != 0) return -1;
 
-    if (!t->probe.compressed) {
-        return streamReaderReadPassthrough(t, (uint8_t *)buf, len);
+    if (!reader->probe.compressed) {
+        return streamReaderReadPassthrough(reader, (uint8_t *)buf, len);
     }
-    return streamReaderReadCompressed(t, (uint8_t *)buf, len);
+    return streamReaderReadCompressed(reader, (uint8_t *)buf, len);
 }
 
-int streamReaderGetInfo(streamReader *t, streamReaderInfo *info) {
-    if (!t || !info) return -1;
-    if (streamReaderProbe(t) != 0) return -1;
+int streamReaderGetInfo(streamReader *reader, streamReaderInfo *info) {
+    if (streamReaderProbe(reader) != 0) return -1;
 
-    info->compressed = t->probe.compressed;
-    info->codec_checksum_enabled = t->probe.compressed ? t->probe.codec_checksum_enabled : false;
-    info->algo = t->probe.compressed ? t->probe.algo : ALGO_NONE;
-    info->stream_kind = t->probe.stream_kind;
+    info->compressed = reader->probe.compressed;
+    info->codec_checksum_enabled = reader->probe.compressed ? reader->probe.codec_checksum_enabled : false;
+    info->algo = reader->probe.compressed ? reader->probe.algo : ALGO_NONE;
+    info->stream_kind = reader->probe.stream_kind;
     return 0;
 }
 
-streamReaderError streamReaderGetError(const streamReader *t) {
-    return t ? t->error_kind : STREAM_READER_ERROR_IO;
-}
-
-int streamReaderValidateEnd(streamReader *t) {
+int streamReaderValidateEnd(streamReader *reader) {
     uint8_t buf[4096];
 
-    if (!t) return -1;
-    if (streamReaderProbe(t) != 0) return -1;
-    if (!t->probe.compressed) return 0;
-    if (streamReaderDecompressedBufAvail(t) > 0) {
-        streamReaderSetError(t, STREAM_READER_ERROR_CORRUPT);
+    if (streamReaderProbe(reader) != 0) return -1;
+    if (!reader->probe.compressed) return 0;
+    if (streamReaderDecompressedBufAvail(reader) > 0) {
+        streamReaderSetError(reader, STREAM_READER_ERROR_CORRUPT);
         return -1;
     }
 
-    while (!t->decompressor.frame_done) {
-        ssize_t nread = streamReaderRead(t, buf, sizeof(buf));
+    while (!reader->decompressor.frame_done) {
+        ssize_t nread = streamReaderRead(reader, buf, sizeof(buf));
         if (nread < 0) return -1;
         if (nread > 0) {
-            streamReaderSetError(t, STREAM_READER_ERROR_CORRUPT);
+            streamReaderSetError(reader, STREAM_READER_ERROR_CORRUPT);
             return -1;
         }
     }
 
-    if (t->compressed_buf_len > 0) {
-        streamReaderSetError(t, STREAM_READER_ERROR_CORRUPT);
+    if (reader->compressed_buf_len > 0) {
+        streamReaderSetError(reader, STREAM_READER_ERROR_CORRUPT);
         return -1;
     }
 
-    ssize_t got = t->read_cb(t->read_ctx, buf, 1);
+    ssize_t got = reader->read_cb(reader->read_ctx, buf, 1);
     if (got < 0) {
-        streamReaderSetError(t, STREAM_READER_ERROR_IO);
+        streamReaderSetError(reader, STREAM_READER_ERROR_IO);
         return -1;
     }
     if (got > 0) {
-        streamReaderSetError(t, STREAM_READER_ERROR_CORRUPT);
+        streamReaderSetError(reader, STREAM_READER_ERROR_CORRUPT);
         return -1;
     }
     return 0;
 }
 
-void streamReaderFree(streamReader *t) {
-    if (!t) return;
-    streamReaderResetCompressedState(t);
-    zfree(t);
+void streamReaderFree(streamReader *reader) {
+    streamReaderResetCompressedState(reader);
 }

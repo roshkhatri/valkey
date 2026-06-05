@@ -44,11 +44,7 @@
 #define RIO_FLAG_SKIP_RDB_CHECKSUM (1 << 3)
 #define RIO_FLAG_STREAMING_COMPRESSION (1 << 4)   /* Streaming compression active, skip per-string LZF */
 #define RIO_FLAG_STREAMING_DECOMPRESSION (1 << 5) /* rio is a stream decompression adapter */
-
-#define RIO_TYPE_FILE (1 << 0)
-#define RIO_TYPE_BUFFER (1 << 1)
-#define RIO_TYPE_CONN (1 << 2)
-#define RIO_TYPE_FD (1 << 3)
+#define RIO_FLAG_CONN_BACKED (1 << 6)             /* rio reads from or writes to connection-backed transport. */
 
 struct _rio {
     /* Backend functions.
@@ -78,9 +74,6 @@ struct _rio {
 
     /* maximum single read or write chunk size */
     size_t max_processing_chunk;
-
-    /* Transport type (RIO_TYPE_*). Rio decorators preserve the wrapped transport. */
-    uint8_t transport_type;
 
     /* Backend-specific vars. */
     union {
@@ -214,8 +207,7 @@ void rioGenericUpdateChecksum(rio *r, const void *buf, size_t len);
 ssize_t rioReadPartial(rio *r, void *buf, size_t len);
 void rioSetAutoSync(rio *r, off_t bytes);
 void rioSetReclaimCache(rio *r, int enabled);
-uint8_t rioGetTransportType(const rio *r);
-int rioIsConnTransport(const rio *r);
+int rioIsConnBacked(rio *r);
 void rioInitWithConnset(rio *r, connection **conns, int numconns);
 void rioFreeConnset(rio *r);
 #endif

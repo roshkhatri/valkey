@@ -13,14 +13,14 @@
 typedef struct {
     rio base; /* Must be first, allows casting to (rio *). */
     rio *inner;
-    streamWriter *writer;
+    streamWriter writer;
     bool finalized;
 } compressRio;
 
 typedef struct {
     rio base; /* Must be first. */
     rio *inner;
-    streamReader *reader;
+    streamReader reader;
 } decompressRio;
 
 typedef enum {
@@ -29,7 +29,7 @@ typedef enum {
     DECOMPRESS_RIO_INIT_INCOMPATIBLE = 1,
 } decompressRioInitResult;
 
-int rioInitWithCompression(compressRio *cr, rio *inner, const streamWriterConfig *cfg);
+int rioInitWithCompression(compressRio *cr, rio *inner, streamWriterConfig *cfg);
 int compressRioFinish(compressRio *cr);
 void compressRioFree(compressRio *cr);
 
@@ -37,9 +37,9 @@ void compressRioFree(compressRio *cr);
  * compressed, or carrying an envelope this build cannot read. */
 decompressRioInitResult rioInitWithDecompression(decompressRio *dr,
                                                  rio *inner,
-                                                 const streamReaderConfig *cfg,
+                                                 streamReaderConfig *cfg,
                                                  streamReaderInfo *info);
-streamReaderError rioGetDecompressionError(const rio *r);
+streamReaderError decompressRioGetError(decompressRio *dr);
 int decompressRioValidateEnd(decompressRio *dr);
 void decompressRioFree(decompressRio *dr);
 

@@ -32,8 +32,7 @@ static void rioInitBase(rio *base,
                         size_t (*write_fn)(rio *, const void *, size_t),
                         off_t (*tell_fn)(rio *),
                         int (*flush_fn)(rio *),
-                        uint64_t flags,
-                        uint8_t transport_type) {
+                        uint64_t flags) {
     base->read = read_fn;
     base->write = write_fn;
     base->tell = tell_fn;
@@ -44,25 +43,24 @@ static void rioInitBase(rio *base,
     base->flags = flags;
     base->processed_bytes = 0;
     base->max_processing_chunk = 0;
-    base->transport_type = transport_type;
 }
 
 /* ===== compressRio ===== */
 
 static int compressRioEmit(void *ctx, const uint8_t *data, size_t len) {
     compressRio *cr = (compressRio *)ctx;
-    /* Bridge streamWriter's 0/-1 sink contract to rioWrite's nonzero/zero
-     * success contract while keeping streamWriter sink-agnostic. */
+    /* streamWriter sinks return 0 on success and -1 on failure. rioWrite
+     * returns nonzero on success and 0 on failure, so adapt that here. */
     return rioWrite(cr->inner, data, len) == 0 ? -1 : 0;
 }
 
 static size_t compressRioWrite(rio *r, const void *buf, size_t len) {
     compressRio *cr = (compressRio *)r;
-    if (!cr->writer || cr->finalized) {
+    if (cr->finalized) {
         r->flags |= RIO_FLAG_WRITE_ERROR;
         return 0;
     }
-    if (streamWriterWrite(cr->writer, buf, len) < 0) {
+    if (streamWriterWrite(&cr->writer, buf, len) < 0) {
         r->flags |= RIO_FLAG_WRITE_ERROR;
         return 0;
     }
@@ -77,45 +75,38 @@ static off_t compressRioTell(rio *r) {
  * that flush mid-stream don't accidentally close it. */
 static int compressRioFlush(rio *r) {
     compressRio *cr = (compressRio *)r;
-    if (!cr->writer || streamWriterIsErrored(cr->writer)) {
+    if (cr->writer.errored) {
         r->flags |= RIO_FLAG_WRITE_ERROR;
         return 0;
     }
     if (cr->finalized) return 1;
 
-    if (streamWriterFlush(cr->writer) != 0) {
+    if (streamWriterFlush(&cr->writer) != 0) {
         r->flags |= RIO_FLAG_WRITE_ERROR;
         return 0;
     }
     if (cr->inner->flush && cr->inner->flush(cr->inner) == 0) {
-        streamWriterSetError(cr->writer);
+        cr->writer.errored = true;
         r->flags |= RIO_FLAG_WRITE_ERROR;
         return 0;
     }
     return 1;
 }
 
-int rioInitWithCompression(compressRio *cr, rio *inner, const streamWriterConfig *cfg) {
-    if (!cr || !inner || !cfg) return -1;
-
+int rioInitWithCompression(compressRio *cr, rio *inner, streamWriterConfig *cfg) {
     memset(cr, 0, sizeof(*cr));
     rioInitBase(&cr->base, rioReadUnsupported, compressRioWrite, compressRioTell,
-                compressRioFlush, RIO_FLAG_STREAMING_COMPRESSION, rioGetTransportType(inner));
+                compressRioFlush,
+                RIO_FLAG_STREAMING_COMPRESSION | (inner->flags & RIO_FLAG_CONN_BACKED));
 
     cr->inner = inner;
-    cr->writer = streamWriterCreate(cfg, compressRioEmit, cr);
-    return cr->writer ? 0 : -1;
+    return streamWriterInit(&cr->writer, cfg, compressRioEmit, cr);
 }
 
 /* Idempotent: subsequent calls report cached error state. */
 int compressRioFinish(compressRio *cr) {
-    if (!cr) return -1;
-    if (!cr->writer) {
-        cr->base.flags |= RIO_FLAG_WRITE_ERROR;
-        return -1;
-    }
     if (cr->finalized) {
-        if (streamWriterIsErrored(cr->writer)) {
+        if (cr->writer.errored) {
             cr->base.flags |= RIO_FLAG_WRITE_ERROR;
             return -1;
         }
@@ -123,15 +114,15 @@ int compressRioFinish(compressRio *cr) {
     }
     cr->finalized = 1;
 
-    if (streamWriterFinish(cr->writer) != 0) {
+    if (streamWriterFinish(&cr->writer) != 0) {
         cr->base.flags |= RIO_FLAG_WRITE_ERROR;
         return -1;
     }
     if (cr->inner->flush && cr->inner->flush(cr->inner) == 0) {
-        streamWriterSetError(cr->writer);
+        cr->writer.errored = true;
         cr->base.flags |= RIO_FLAG_WRITE_ERROR;
     }
-    if (streamWriterIsErrored(cr->writer)) {
+    if (cr->writer.errored) {
         cr->base.flags |= RIO_FLAG_WRITE_ERROR;
         return -1;
     }
@@ -139,11 +130,7 @@ int compressRioFinish(compressRio *cr) {
 }
 
 void compressRioFree(compressRio *cr) {
-    if (!cr) return;
-    if (cr->writer) {
-        streamWriterFree(cr->writer);
-        cr->writer = NULL;
-    }
+    streamWriterFree(&cr->writer);
 }
 
 /* ===== decompressRio ===== */
@@ -156,15 +143,11 @@ static ssize_t decompressRioReadPartial(void *ctx, void *buf, size_t len) {
 static size_t decompressRioRead(rio *r, void *buf, size_t len) {
     decompressRio *dr = (decompressRio *)r;
     if (dr->base.flags & RIO_FLAG_READ_ERROR) return 0;
-    if (!dr->reader) {
-        dr->base.flags |= RIO_FLAG_READ_ERROR;
-        return 0;
-    }
 
     uint8_t *dst = (uint8_t *)buf;
     size_t remaining = len;
     while (remaining > 0) {
-        ssize_t nread = streamReaderRead(dr->reader, dst, remaining);
+        ssize_t nread = streamReaderRead(&dr->reader, dst, remaining);
         if (nread <= 0) {
             /* rio contract is full-or-fail; partial reads are an error. */
             dr->base.flags |= RIO_FLAG_READ_ERROR;
@@ -183,45 +166,30 @@ static off_t decompressRioTell(rio *r) {
     return (off_t)dr->inner->processed_bytes;
 }
 
-/* Identifies a decompressRio by its read vtable, which is unique to the type. */
-static const decompressRio *rioGetDecompressor(const rio *r) {
-    if (!r || r->read != decompressRioRead) return NULL;
-    return (const decompressRio *)r;
-}
-
-streamReaderError rioGetDecompressionError(const rio *r) {
-    const decompressRio *dr = rioGetDecompressor(r);
-    if (!dr || !dr->reader) return STREAM_READER_ERROR_IO;
-    return streamReaderGetError(dr->reader);
+streamReaderError decompressRioGetError(decompressRio *dr) {
+    return dr->reader.error_kind;
 }
 
 int decompressRioValidateEnd(decompressRio *dr) {
-    if (!dr || !dr->reader) return -1;
-    return streamReaderValidateEnd(dr->reader);
+    return streamReaderValidateEnd(&dr->reader);
 }
 
 decompressRioInitResult rioInitWithDecompression(decompressRio *dr,
                                                  rio *inner,
-                                                 const streamReaderConfig *cfg,
+                                                 streamReaderConfig *cfg,
                                                  streamReaderInfo *info) {
     streamReaderInfo local_info = {0};
-
-    if (!dr || !inner || !cfg) return DECOMPRESS_RIO_INIT_ERROR;
 
     memset(dr, 0, sizeof(*dr));
     rioInitBase(&dr->base, decompressRioRead, rioWriteUnsupported, decompressRioTell,
                 rioFlushNoop,
-                RIO_FLAG_STREAMING_DECOMPRESSION | (inner->flags & RIO_FLAG_SKIP_RDB_CHECKSUM),
-                rioGetTransportType(inner));
+                RIO_FLAG_STREAMING_DECOMPRESSION |
+                    (inner->flags & (RIO_FLAG_SKIP_RDB_CHECKSUM | RIO_FLAG_CONN_BACKED)));
     dr->inner = inner;
 
-    dr->reader = streamReaderCreate(cfg, decompressRioReadPartial, dr);
-    if (!dr->reader) {
-        dr->base.flags |= RIO_FLAG_READ_ERROR;
-        return DECOMPRESS_RIO_INIT_ERROR;
-    }
-    if (streamReaderGetInfo(dr->reader, &local_info) != 0) {
-        streamReaderError error_kind = streamReaderGetError(dr->reader);
+    if (streamReaderInit(&dr->reader, cfg, decompressRioReadPartial, dr) != 0) return DECOMPRESS_RIO_INIT_ERROR;
+    if (streamReaderGetInfo(&dr->reader, &local_info) != 0) {
+        streamReaderError error_kind = dr->reader.error_kind;
         decompressRioFree(dr);
         return error_kind == STREAM_READER_ERROR_INCOMPATIBLE
                    ? DECOMPRESS_RIO_INIT_INCOMPATIBLE
@@ -234,9 +202,5 @@ decompressRioInitResult rioInitWithDecompression(decompressRio *dr,
 }
 
 void decompressRioFree(decompressRio *dr) {
-    if (!dr) return;
-    if (dr->reader) {
-        streamReaderFree(dr->reader);
-        dr->reader = NULL;
-    }
+    streamReaderFree(&dr->reader);
 }

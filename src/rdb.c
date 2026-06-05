@@ -1572,7 +1572,7 @@ static int rdbSaveInternal(int req, const char *filename, rdbSaveInfo *rsi, int 
     char *err_op; /* For a detailed log */
     bool use_streaming_compression = isRdbStreamingCompressionEnabled();
     compressRio cr;
-    bool cr_initialized = false;
+    compressRio *crp = NULL;
 
     FILE *fp = fopen(filename, "w");
     if (!fp) {
@@ -1614,8 +1614,8 @@ static int rdbSaveInternal(int req, const char *filename, rdbSaveInfo *rsi, int 
             err_op = "rioInitWithCompression";
             goto werr;
         }
-        save_rio = (rio *)&cr;
-        cr_initialized = true;
+        crp = &cr;
+        save_rio = (rio *)crp;
     }
     /* Streaming-compressed RDBs use the frame checksum policy recorded in the
      * VKCS envelope instead of the logical RDB CRC64 trailer. */
@@ -1632,16 +1632,16 @@ static int rdbSaveInternal(int req, const char *filename, rdbSaveInfo *rsi, int 
     }
 
     /* Finalize the compression frame before flushing to disk. */
-    if (cr_initialized) {
-        if (compressRioFinish(&cr) != 0) {
+    if (crp) {
+        if (compressRioFinish(crp) != 0) {
             errno = EIO; /* Compression finalization failure */
             err_op = "compressRioFinish";
-            compressRioFree(&cr);
-            cr_initialized = false;
+            compressRioFree(crp);
+            crp = NULL;
             goto werr;
         }
-        compressRioFree(&cr);
-        cr_initialized = false;
+        compressRioFree(crp);
+        crp = NULL;
     }
 
     /* Make sure data will not remain on the OS's output buffers */
@@ -1667,10 +1667,10 @@ static int rdbSaveInternal(int req, const char *filename, rdbSaveInfo *rsi, int 
 werr:
     saved_errno = errno;
     serverLog(LL_WARNING, "Write error while saving DB to the disk(%s): %s", err_op, strerror(errno));
-    if (cr_initialized) {
+    if (crp) {
         /* Skip finish on error, output is being discarded (unlink below).
          * Just release resources. */
-        compressRioFree(&cr);
+        compressRioFree(crp);
     }
     if (fp) fclose(fp);
     unlink(filename);
@@ -3132,7 +3132,7 @@ void rdbLoadProgressCallback(rio *r, const void *buf, size_t len) {
         processEventsWhileBlocked();
         processModuleLoadingProgressEvent(0);
     }
-    if (server.repl_state == REPL_STATE_TRANSFER && rioIsConnTransport(r)) {
+    if (server.repl_state == REPL_STATE_TRANSFER && rioIsConnBacked(r)) {
         server.stat_net_repl_input_bytes += len;
     }
 }
@@ -3152,8 +3152,6 @@ decompressRioInitResult rdbInputStreamPrepare(rdbInputStream *input) {
         .buffer_size = STREAM_READER_BUFFER_SIZE_DEFAULT,
     };
 
-    if (!input || !input->raw_rio) return DECOMPRESS_RIO_INIT_ERROR;
-
     decompressRioInitResult init_rc =
         rioInitWithDecompression(&input->decompressor, input->raw_rio, &reader_cfg, &input->stream_info);
     if (init_rc == DECOMPRESS_RIO_INIT_OK) {
@@ -3167,7 +3165,6 @@ decompressRioInitResult rdbInputStreamPrepare(rdbInputStream *input) {
 }
 
 void rdbInputStreamFree(rdbInputStream *input) {
-    if (!input) return;
     if (input->initialized) {
         decompressRioFree(&input->decompressor);
         input->initialized = false;
@@ -3176,12 +3173,14 @@ void rdbInputStreamFree(rdbInputStream *input) {
 }
 
 int rdbInputStreamValidateEnd(rdbInputStream *input) {
-    if (!input || !input->initialized) return C_OK;
+    serverAssert(input->initialized);
     return decompressRioValidateEnd(&input->decompressor) == 0 ? C_OK : C_ERR;
 }
 
-bool rdbRioHasCorruptCompressedInput(const rio *rdb) {
-    return rioGetDecompressionError(rdb) == STREAM_READER_ERROR_CORRUPT;
+bool rdbRioHasCorruptCompressedInput(rio *rdb) {
+    /* rdbLoadRio also accepts raw rios, for example AOF preamble loads. */
+    if (!(rdb->flags & RIO_FLAG_STREAMING_DECOMPRESSION)) return false;
+    return decompressRioGetError((decompressRio *)rdb) == STREAM_READER_ERROR_CORRUPT;
 }
 
 /* Save the given functions_ctx to the rdb.
