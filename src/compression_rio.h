@@ -29,6 +29,8 @@ typedef enum {
     DECOMPRESS_RIO_INIT_INCOMPATIBLE = 1,
 } decompressRioInitResult;
 
+/* Returns 0 on success. On failure the compressRio is left zeroed and the
+ * caller must not call compressRioFree. */
 int rioInitWithCompression(compressRio *cr, rio *inner, streamWriterConfig *cfg);
 int compressRioFinish(compressRio *cr);
 void compressRioFree(compressRio *cr);

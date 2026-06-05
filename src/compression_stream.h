@@ -14,7 +14,10 @@
  *   [4]    version (currently VKCS_VERSION)
  *   [5]    codec id
  *   [6]    flags (bit 0 = codec checksum enabled; other bits reserved)
- *   [7]    stream kind */
+ *   [7]    stream kind
+ *
+ * All fields are single-byte in version 1. Future multi-byte fields must use
+ * network byte order. */
 #define VKCS_MAGIC_0 0x56 /* 'V' */
 #define VKCS_MAGIC_1 0x4B /* 'K' */
 #define VKCS_MAGIC_2 0x43 /* 'C' */
@@ -24,6 +27,14 @@
 #define VKCS_VERSION 1
 #define VKCS_FLAG_CODEC_CHECKSUM (1 << 0)
 
+/* Byte offsets of each envelope field. */
+#define VKCS_OFFSET_VERSION 4
+#define VKCS_OFFSET_ALGO 5
+#define VKCS_OFFSET_FLAGS 6
+#define VKCS_OFFSET_STREAM_KIND 7
+
+/* Identifies what the compressed bytes decode to. The RDB loader rejects any
+ * stream whose kind is not STREAM_KIND_RDB. */
 typedef enum {
     STREAM_KIND_RDB = 0x00,
 } streamKind;

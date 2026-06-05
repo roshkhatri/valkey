@@ -1605,7 +1605,7 @@ static int rdbSaveInternal(int req, const char *filename, rdbSaveInfo *rsi, int 
     if (use_streaming_compression) {
         streamWriterConfig cfg = {
             .algo = (compressionAlgo)server.rdb_compression_algo,
-            .level = 0,
+            .level = 0, /* Codec default. */
             .stream_kind = STREAM_KIND_RDB,
             .codec_checksum_enabled = server.rdb_checksum != 0,
         };
@@ -1726,8 +1726,9 @@ int rdbSave(int req, char *filename, rdbSaveInfo *rsi, int rdbflags) {
         return C_ERR;
     }
 
-    serverLog(LL_NOTICE, "DB saved on disk with %s compression",
-              compressionAlgoName(server.rdb_compression ? (compressionAlgo)server.rdb_compression_algo : ALGO_NONE));
+    serverLog(LL_NOTICE, "DB saved on disk%s%s",
+              server.rdb_compression ? " with compression: " : "",
+              server.rdb_compression ? compressionAlgoName((compressionAlgo)server.rdb_compression_algo) : "");
     server.dirty = 0;
     server.lastsave = time(NULL);
     server.lastbgsave_status = C_OK;

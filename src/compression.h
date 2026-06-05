@@ -27,7 +27,7 @@ typedef enum {
 
 typedef struct {
     compressionAlgo algo;
-    int level;
+    int level; /* 0 selects the codec default. */
     void *ctx;
     bool stream_started;
     bool codec_checksum;

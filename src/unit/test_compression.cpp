@@ -576,6 +576,61 @@ TEST_F(CompressionTest, streamReaderValidatesCompressedStreamKinds) {
     }
 }
 
+/* --- Test: streamReadEnvelopeInfo rejects envelopes this build cannot accept.
+ * Builds a valid envelope, then flips one field at a time and asserts the
+ * parse fails. Guards the version, codec-id, and reserved-flag-bit branches
+ * that the format relies on for forward compatibility. */
+TEST_F(CompressionTest, streamReadEnvelopeInfoRejectsBadEnvelopes) {
+    DynamicBuf db;
+    dynamicBufInit(&db);
+
+    streamWriterConfig wcfg = makeWriterConfig(ALGO_LZ4, 0, STREAM_KIND_RDB);
+    streamWriter w;
+    ASSERT_EQ(streamWriterInit(&w, &wcfg, emitToDynamicBuf, &db), 0);
+    ASSERT_GE(streamWriterWrite(&w, "negative envelope", 17), 0);
+    ASSERT_EQ(streamWriterFinish(&w), 0);
+    streamWriterFree(&w);
+
+    ASSERT_GE(sdslen((const char *)db.data), (size_t)VKCS_ENVELOPE_SIZE);
+
+    uint8_t good[VKCS_ENVELOPE_SIZE];
+    memcpy(good, db.data, VKCS_ENVELOPE_SIZE);
+    dynamicBufFree(&db);
+
+    streamReaderInfo info;
+
+    /* Sanity: the unmodified envelope parses. */
+    ASSERT_EQ(streamReadEnvelopeInfo(good, VKCS_ENVELOPE_SIZE, STREAM_KIND_RDB, &info), 0);
+
+    /* Unknown version. */
+    uint8_t bad_version[VKCS_ENVELOPE_SIZE];
+    memcpy(bad_version, good, VKCS_ENVELOPE_SIZE);
+    bad_version[VKCS_OFFSET_VERSION] = VKCS_VERSION + 1;
+    ASSERT_EQ(streamReadEnvelopeInfo(bad_version, VKCS_ENVELOPE_SIZE, STREAM_KIND_RDB, &info), -1)
+        << "future version must be rejected";
+
+    /* Unknown / non-streaming codec id. */
+    uint8_t bad_algo[VKCS_ENVELOPE_SIZE];
+    memcpy(bad_algo, good, VKCS_ENVELOPE_SIZE);
+    bad_algo[VKCS_OFFSET_ALGO] = 0x7f;
+    ASSERT_EQ(streamReadEnvelopeInfo(bad_algo, VKCS_ENVELOPE_SIZE, STREAM_KIND_RDB, &info), -1)
+        << "unknown codec id must be rejected";
+
+    /* LZF is a real algorithm but has no streaming codec. */
+    uint8_t lzf_algo[VKCS_ENVELOPE_SIZE];
+    memcpy(lzf_algo, good, VKCS_ENVELOPE_SIZE);
+    lzf_algo[VKCS_OFFSET_ALGO] = (uint8_t)ALGO_LZF;
+    ASSERT_EQ(streamReadEnvelopeInfo(lzf_algo, VKCS_ENVELOPE_SIZE, STREAM_KIND_RDB, &info), -1)
+        << "non-streaming algorithm must be rejected";
+
+    /* Reserved flag bit set. */
+    uint8_t bad_flags[VKCS_ENVELOPE_SIZE];
+    memcpy(bad_flags, good, VKCS_ENVELOPE_SIZE);
+    bad_flags[VKCS_OFFSET_FLAGS] |= (1 << 1);
+    ASSERT_EQ(streamReadEnvelopeInfo(bad_flags, VKCS_ENVELOPE_SIZE, STREAM_KIND_RDB, &info), -1)
+        << "reserved flag bits must be rejected";
+}
+
 /* --- Test: stream_reader marks errored on partial output + read error.
  * Regression for direct-path error accounting (partial bytes were returned
  * without sticky errored state). */

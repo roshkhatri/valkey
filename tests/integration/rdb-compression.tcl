@@ -151,6 +151,16 @@ start_server {overrides {save "" enable-debug-command local}} {
             fail "BGSAVE did not start in time"
         }
 
+        # Wait for the child to actually begin serializing keys before
+        # flipping the config, otherwise the algo read in the child can
+        # race the parent's CONFIG SET.
+        wait_for_condition 200 10 {
+            [s current_save_keys_processed] >= 1
+        } else {
+            r config set rdb-key-save-delay 0
+            fail "BGSAVE child did not begin serializing in time"
+        }
+
         r config set rdb-compression-algo lzf
 
         wait_for_condition 500 10 {
@@ -419,6 +429,10 @@ start_server {tags {"rdb-compression repl external:skip"}} {
 
             $replica replicaof $primary_host $primary_port
             wait_for_sync $replica
+            # wait_for_sync only checks master_link_status; the replica may
+            # still be loading the RDB. Wait until loading completes before
+            # comparing digests.
+            wait_done_loading $replica
 
             wait_for_condition 50 100 {
                 [status $replica master_link_status] eq "up" &&
@@ -449,6 +463,10 @@ start_server {tags {"rdb-compression repl external:skip"}} {
 
             $replica replicaof $primary_host $primary_port
             wait_for_sync $replica
+            # wait_for_sync only checks master_link_status; the replica may
+            # still be loading the RDB. Wait until loading completes before
+            # comparing digests.
+            wait_done_loading $replica
 
             wait_for_condition 50 100 {
                 [status $replica master_link_status] eq "up" &&

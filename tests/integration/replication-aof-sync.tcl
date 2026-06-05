@@ -188,6 +188,10 @@ tags {"repl external:skip"} {
                     fail "Expected streaming-compressed sync RDB fallback log not found"
                 }
 
+                # The positive wait above proves restartAOFWithSyncRdb has run and
+                # taken the fallback branch; only after that ordering is the negative
+                # check below meaningful (otherwise it could pass simply because the
+                # log line hasn't been written yet).
                 assert {![log_file_matches $replica_log "*Reused RDB file from primary sync as AOF base file*"]}
                 waitForBgrewriteaof $replica
                 set manifest_path [get_aof_manifest_path $replica]
