@@ -96,10 +96,6 @@ struct {
 
 static unsigned long long rdbCheckOffset(void) {
     if (!rdbstate.rio) return 0;
-
-    off_t pos = rioTell(rdbstate.rio);
-    if (pos >= 0) return (unsigned long long)pos;
-
     return (unsigned long long)rdbstate.rio->processed_bytes;
 }
 

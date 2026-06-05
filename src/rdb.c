@@ -3114,20 +3114,16 @@ void rdbLoadProgressCallback(rio *r, const void *buf, size_t len) {
     /* Event scheduling uses decoded (logical) bytes so that
      * processEventsWhileBlocked() fires based on actual parsing work, even
      * when the stream reader is draining its internal decompressed buffer
-     * without advancing the transport position.
-     *
-     * Progress reporting uses transport bytes for decompression paths so the
-     * loading percentage stays consistent with the file size passed to
-     * startLoadingFile(). */
+     * without advancing the transport position. */
     off_t decoded_pos = (off_t)(r->processed_bytes + len);
-    off_t report_pos = decoded_pos;
-    if (r->flags & RIO_FLAG_STREAMING_DECOMPRESSION) {
-        report_pos = rioTell(r);
-    }
 
     if (server.loading_process_events_interval_bytes &&
         decoded_pos / server.loading_process_events_interval_bytes >
             (off_t)r->processed_bytes / server.loading_process_events_interval_bytes) {
+        /* Progress reporting uses transport bytes for decompression paths so the
+         * loading percentage stays consistent with the file size passed to
+         * startLoadingFile(); plain paths report decoded bytes. */
+        off_t report_pos = (r->flags & RIO_FLAG_STREAMING_DECOMPRESSION) ? rioTell(r) : decoded_pos;
         if (server.primary_host && server.repl_state == REPL_STATE_TRANSFER) replicationSendNewlineToPrimary();
         loadingAbsProgress(report_pos);
         processEventsWhileBlocked();
