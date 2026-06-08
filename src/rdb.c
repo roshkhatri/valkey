@@ -69,12 +69,6 @@
 /* This macro is called when RDB read failed (possibly a short read) */
 #define rdbReportReadError(...) rdbReportError(0, __LINE__, __VA_ARGS__)
 
-/* Returns true if streaming compression is enabled for RDB saves. */
-static inline bool isRdbStreamingCompressionEnabled(void) {
-    return server.rdb_compression &&
-           compressionAlgoSupportsStreaming((compressionAlgo)server.rdb_compression_algo);
-}
-
 /* This macro tells if we are in the context of a RESTORE command, and not loading an RDB or AOF. */
 #define isRestoreContext() ((server.current_client == NULL || server.current_client->id == CLIENT_ID_AOF) ? 0 : 1)
 
@@ -1570,7 +1564,8 @@ static int rdbSaveInternal(int req, const char *filename, rdbSaveInfo *rsi, int 
     int error = 0;
     int saved_errno;
     char *err_op; /* For a detailed log */
-    bool use_streaming_compression = isRdbStreamingCompressionEnabled();
+    compressionAlgo streaming_algo = server.rdb_compression == RDB_COMPRESSION_LZ4_STREAM ? ALGO_LZ4 : ALGO_NONE;
+    bool use_streaming_compression = streaming_algo != ALGO_NONE;
     compressRio cr;
     compressRio *crp = NULL;
 
@@ -1604,7 +1599,7 @@ static int rdbSaveInternal(int req, const char *filename, rdbSaveInfo *rsi, int 
     rio *save_rio = &rdb;
     if (use_streaming_compression) {
         streamWriterConfig cfg = {
-            .algo = (compressionAlgo)server.rdb_compression_algo,
+            .algo = streaming_algo,
             .level = 0, /* Codec default. */
             .stream_kind = STREAM_KIND_RDB,
             .codec_checksum_enabled = server.rdb_checksum != 0,
@@ -1726,9 +1721,7 @@ int rdbSave(int req, char *filename, rdbSaveInfo *rsi, int rdbflags) {
         return C_ERR;
     }
 
-    serverLog(LL_NOTICE, "DB saved on disk%s%s",
-              server.rdb_compression ? " with compression: " : "",
-              server.rdb_compression ? compressionAlgoName((compressionAlgo)server.rdb_compression_algo) : "");
+    serverLog(LL_NOTICE, "DB saved on disk%s", server.rdb_compression ? " with compression" : "");
     server.dirty = 0;
     server.lastsave = time(NULL);
     server.lastbgsave_status = C_OK;

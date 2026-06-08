@@ -599,6 +599,10 @@ typedef enum { LOG_TIMESTAMP_LEGACY = 0,
 typedef enum { RDB_VERSION_CHECK_STRICT = 0,
                RDB_VERSION_CHECK_RELAXED } rdb_version_check_type;
 
+typedef enum { RDB_COMPRESSION_NO = 0,
+               RDB_COMPRESSION_YES,
+               RDB_COMPRESSION_LZ4_STREAM } rdb_compression_mode;
+
 /* Structure representing a non-owning view of a buffer.
  * A stringRef struct does not manage the underlying memory, so its destruction
  * will not free the buffer. */
@@ -2043,9 +2047,7 @@ struct valkeyServer {
     struct saveparam *saveparams;         /* Save points array for RDB */
     int saveparamslen;                    /* Number of saving points */
     char *rdb_filename;                   /* Name of RDB file */
-    int rdb_compression;                  /* Use compression in RDB? */
-    int rdb_compression_algo;             /* RDB compression algorithm (compressionAlgo):
-                                           * ALGO_LZF (default), ALGO_LZ4 */
+    int rdb_compression;                  /* RDB compression mode */
     int rdb_checksum;                     /* Use RDB checksum? */
     int rdb_del_sync_files;               /* Remove RDB files used only for SYNC if
                                              the instance does not use persistence. */
