@@ -5,6 +5,7 @@
         "group": "hash",
         "since": "9.0.0",
         "arity": -5,
+        "member_key_index": 4,
         "function": "httlCommand",
         "command_flags": [
             "READONLY",
