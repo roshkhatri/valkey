@@ -8,7 +8,6 @@
 #define COMPRESSION_STREAM_H
 
 #include "compression.h"
-#include "sds.h"
 
 /* VCS envelope:
  *   [0..2] magic "VCS"
@@ -124,14 +123,6 @@ typedef struct streamReader {
     uint8_t *decompressed_buf;
     size_t decompressed_buf_pos;
     size_t decompressed_buf_len;
-
-    /* Push-mode (feed) state. Inactive for pull-mode readers created via
-     * streamReaderInit (push_mode=false, feed_queue=NULL). */
-    bool push_mode;
-    sds feed_queue;   /* Buffer of fed-but-unconsumed bytes (push mode only). */
-    size_t feed_head; /* Consumed-up-to cursor within feed_queue. */
-    bool feed_eof;    /* Set by streamReaderFeedEnd. */
-    size_t feed_cap;  /* Max bytes allowed to buffer in feed_queue. */
 } streamReader;
 
 /* The writer pushes compressed bytes to a streamWriterEmitFn sink; the reader
@@ -168,16 +159,5 @@ void streamReaderFree(streamReader *reader);
 /* Approximate scratch/codec memory held by the writer, for client-output-buffer
  * accounting. */
 size_t streamWriterMemUsage(const streamWriter *writer);
-
-/* --- Push-mode (feed) API ---
- * The replica replication link reads from a non-blocking socket in the event
- * loop and cannot use the blocking pull callback. A push-mode reader is fed
- * bytes incrementally via streamReaderFeed and drained opportunistically via
- * streamReaderRead, which returns 0 (not an error) when it needs more input. */
-int streamReaderInitPush(streamReader *reader, streamReaderConfig *cfg, size_t feed_cap);
-int streamReaderFeed(streamReader *reader, const void *src, size_t len);
-void streamReaderFeedEnd(streamReader *reader);
-bool streamReaderNeedsInput(const streamReader *reader);
-bool streamReaderFrameDone(const streamReader *reader);
 
 #endif /* COMPRESSION_STREAM_H */

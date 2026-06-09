@@ -303,10 +303,6 @@ int streamWriterFinish(streamWriter *writer) {
 
 /* ===== Streaming reader ===== */
 
-/* Sentinel returned by the push-mode read callback when the feed queue is empty
- * but more input may still arrive (distinct from 0 = EOF and <0 = error). */
-#define STREAM_READER_READ_WOULD_BLOCK ((ssize_t) - 2)
-
 static void streamReaderSetError(streamReader *reader, streamReaderError error_kind) {
     reader->errored = true;
     if (reader->error_kind == STREAM_READER_ERROR_NONE) reader->error_kind = error_kind;
@@ -381,7 +377,6 @@ int streamReaderProbe(streamReader *reader) {
         ssize_t got = reader->read_cb(reader->read_ctx, buf, need);
         size_t consumed = 0;
 
-        if (got == STREAM_READER_READ_WOULD_BLOCK) return 0; /* push-mode: more input will arrive later */
         if (got < 0 || (size_t)got > need) {
             streamReaderSetError(reader, STREAM_READER_ERROR_IO);
             return -1;
@@ -433,7 +428,6 @@ static ssize_t streamReaderReadPassthrough(streamReader *reader, uint8_t *dst, s
     if (len == 0) return (ssize_t)total;
 
     ssize_t got = reader->read_cb(reader->read_ctx, dst, len);
-    if (got == STREAM_READER_READ_WOULD_BLOCK) return (ssize_t)total; /* push-mode: partial, no error */
     if (got < 0 || (size_t)got > len) return streamReaderFail(reader, total);
     return (ssize_t)(total + (size_t)got);
 }
@@ -502,7 +496,6 @@ static int streamReaderRefillCompressedBuf(streamReader *reader) {
     ssize_t got = reader->read_cb(reader->read_ctx,
                                   reader->compressed_buf + reader->compressed_buf_pos + reader->compressed_buf_len,
                                   read_size);
-    if (got == STREAM_READER_READ_WOULD_BLOCK) return 0; /* push-mode: no more for now, not an error */
     if (got < 0 || (size_t)got > read_size) return -1;
     if (got == 0) return 0;
     reader->compressed_buf_len += (size_t)got;
@@ -574,13 +567,6 @@ static ssize_t streamReaderReadCompressed(streamReader *reader, uint8_t *dst, si
                                                                    : reader->error_kind);
             }
             if (filled == 0 && !reader->decompressor.frame_done) {
-                /* Push-mode: an empty fill with the feed queue drained and no
-                 * FeedEnd means "need more input," not corruption. Pull-mode
-                 * callers still get CORRUPT (their read_cb signaled EOF via 0). */
-                if (reader->push_mode && !reader->feed_eof &&
-                    sdslen(reader->feed_queue) == reader->feed_head) {
-                    break;
-                }
                 return streamReaderFailWithError(reader, total, STREAM_READER_ERROR_CORRUPT);
             }
             if (filled == 0) break;
@@ -599,11 +585,6 @@ ssize_t streamReaderRead(streamReader *reader, void *buf, size_t len) {
     if (len > (size_t)SSIZE_MAX) return -1;
 
     if (!reader->probe.ready && streamReaderProbe(reader) != 0) return -1;
-
-    /* Push-mode: the probe may be incomplete because not enough bytes have been
-     * fed yet. Return 0 ("need more input") rather than leaking partial probe
-     * bytes into the passthrough path. */
-    if (!reader->probe.ready) return 0;
 
     if (!reader->probe.compressed) {
         return streamReaderReadPassthrough(reader, (uint8_t *)buf, len);
@@ -659,10 +640,6 @@ int streamReaderValidateEnd(streamReader *reader) {
 
 void streamReaderFree(streamReader *reader) {
     streamReaderResetCompressedState(reader);
-    if (reader->feed_queue) {
-        sdsfree(reader->feed_queue);
-        reader->feed_queue = NULL;
-    }
 }
 
 /* Approximate scratch memory held by the writer's output buffer, for
@@ -670,66 +647,4 @@ void streamReaderFree(streamReader *reader) {
 size_t streamWriterMemUsage(const streamWriter *writer) {
     if (!writer) return 0;
     return writer->out_buf_size;
-}
-
-/* ===== Push-mode (feed) API ===== */
-
-/* Read callback for push-mode readers: drains the feed queue. Returns
- * WOULD_BLOCK when the queue is empty and FeedEnd has not been signaled. */
-static ssize_t streamReaderPushReadCb(void *ctx, void *buf, size_t len) {
-    streamReader *reader = ctx;
-    size_t avail = sdslen(reader->feed_queue) - reader->feed_head;
-    if (avail == 0) return reader->feed_eof ? 0 : STREAM_READER_READ_WOULD_BLOCK;
-    size_t take = len < avail ? len : avail;
-    memcpy(buf, reader->feed_queue + reader->feed_head, take);
-    reader->feed_head += take;
-    /* Compact only when the consumed cursor has drifted past half the buffer. */
-    if (reader->feed_head > sdslen(reader->feed_queue) / 2) {
-        sdsrange(reader->feed_queue, (ssize_t)reader->feed_head, -1);
-        reader->feed_head = 0;
-    }
-    return (ssize_t)take;
-}
-
-int streamReaderInitPush(streamReader *reader, streamReaderConfig *cfg, size_t feed_cap) {
-    if (feed_cap == 0) return -1;
-    if (cfg->buffer_size == 0) cfg->buffer_size = STREAM_READER_BUFFER_SIZE_DEFAULT;
-    if (streamReaderInit(reader, cfg, streamReaderPushReadCb, reader) != 0) return -1;
-    reader->push_mode = true;
-    reader->feed_queue = sdsempty();
-    reader->feed_cap = feed_cap;
-    return 0;
-}
-
-int streamReaderFeed(streamReader *reader, const void *src, size_t len) {
-    if (!reader || !reader->push_mode) return -1;
-    if (reader->errored) return -1;
-    if (len == 0) return 0;
-    if (!src) return -1;
-    if (reader->feed_eof) return -1;
-    size_t effective_len = sdslen(reader->feed_queue) - reader->feed_head;
-    if (effective_len > reader->feed_cap || len > reader->feed_cap - effective_len) {
-        streamReaderSetError(reader, STREAM_READER_ERROR_IO);
-        return -1;
-    }
-    reader->feed_queue = sdscatlen(reader->feed_queue, src, len);
-    return 0;
-}
-
-void streamReaderFeedEnd(streamReader *reader) {
-    if (!reader) return;
-    reader->feed_eof = true;
-}
-
-bool streamReaderNeedsInput(const streamReader *reader) {
-    if (!reader || !reader->push_mode || reader->errored || reader->feed_eof) return false;
-    if (sdslen(reader->feed_queue) > reader->feed_head) return false;
-    if (reader->compressed_buf_len > 0) return false;
-    if (reader->decompressed_buf && reader->decompressed_buf_pos < reader->decompressed_buf_len) return false;
-    return true;
-}
-
-bool streamReaderFrameDone(const streamReader *reader) {
-    if (!reader || !reader->decompressor_initialized) return false;
-    return reader->decompressor.frame_done;
 }

@@ -78,27 +78,51 @@ size_t replCompressorMemUsage(const replCompressor *rc) {
 
 /* ===== Replica-side decompressor ===== */
 
-replDecompressor *replDecompressorCreate(size_t feed_cap) {
+replDecompressor *replDecompressorCreate(void) {
     replDecompressor *rd = zcalloc(sizeof(*rd));
-
-    streamReaderConfig cfg = {
-        .expected_stream_kind = STREAM_KIND_REPL,
-        .allow_passthrough = true,
-        .buffer_size = 0, /* streamReaderInitPush selects the default. */
-    };
-    if (streamReaderInitPush(&rd->reader, &cfg, feed_cap) != 0) {
-        zfree(rd);
-        return NULL;
-    }
     rd->decode_buf = sdsempty();
     return rd;
 }
 
 void replDecompressorDestroy(replDecompressor *rd) {
     if (!rd) return;
-    streamReaderFree(&rd->reader);
+    if (rd->mode == REPL_DECODE_MODE_COMPRESSED) streamDecompressorFree(&rd->decompressor);
     sdsfree(rd->decode_buf);
     zfree(rd);
+}
+
+/* Append raw bytes to the decode buffer (passthrough), enforcing output_max. */
+static replDecodeResult replDecodeEmit(replDecompressor *rd, const uint8_t *in, size_t len, size_t output_max) {
+    if (len == 0) return REPL_DECODE_OK;
+    if (sdslen(rd->decode_buf) + len > output_max) return REPL_DECODE_OVERFLOW;
+    rd->decode_buf = sdscatlen(rd->decode_buf, in, len);
+    return REPL_DECODE_OK;
+}
+
+/* Drain compressed bytes [in, in+len) through the codec into rd->decode_buf,
+ * bounded by output_max (decompression-bomb guard). */
+static replDecodeResult replDecodeFeed(replDecompressor *rd, const uint8_t *in, size_t len, size_t output_max) {
+    size_t off = 0;
+    while (off < len) {
+        char out_buf[REPL_DECODE_CHUNK];
+        size_t consumed = 0;
+        ssize_t produced = streamDecompressorFeed(&rd->decompressor, (uint8_t *)out_buf, sizeof(out_buf),
+                                                  in + off, len - off, &consumed);
+        if (produced < 0 || consumed > len - off) return REPL_DECODE_ERR;
+        if (produced > 0) {
+            if (sdslen(rd->decode_buf) + (size_t)produced > output_max) return REPL_DECODE_OVERFLOW;
+            rd->decode_buf = sdscatlen(rd->decode_buf, out_buf, (size_t)produced);
+        }
+        off += consumed;
+        /* A long-lived replication stream must never reach a compressed frame
+         * end. If it does, the stream is corrupt or the primary sent an
+         * unexpected terminator: the caller should disconnect. */
+        if (rd->decompressor.frame_done) return REPL_DECODE_FRAME_DONE;
+        /* No progress: the codec has buffered a partial frame and needs more
+         * bytes. Resume on the next read tick. */
+        if (consumed == 0 && produced == 0) break;
+    }
+    return REPL_DECODE_OK;
 }
 
 replDecodeResult replDecompressorDecode(replDecompressor *rd,
@@ -106,24 +130,50 @@ replDecodeResult replDecompressorDecode(replDecompressor *rd,
                                         size_t len,
                                         size_t output_max,
                                         size_t *out_len) {
+    static const uint8_t vcs_magic[VCS_MAGIC_SIZE] = {VCS_MAGIC_0, VCS_MAGIC_1, VCS_MAGIC_2};
+
     if (out_len) *out_len = 0;
     sdsclear(rd->decode_buf);
 
-    if (streamReaderFeed(&rd->reader, src, len) != 0) return REPL_DECODE_ERR;
+    const uint8_t *in = src;
+    size_t off = 0;
 
-    char out_buf[REPL_DECODE_CHUNK];
-    for (;;) {
-        ssize_t got = streamReaderRead(&rd->reader, out_buf, sizeof(out_buf));
-        if (got < 0) return REPL_DECODE_ERR;
-        if (got == 0) {
-            /* A long-lived replication stream must never reach a compressed
-             * frame end. If it does, the stream is corrupt or the primary sent
-             * an unexpected terminator: the caller should disconnect. */
-            if (streamReaderFrameDone(&rd->reader)) return REPL_DECODE_FRAME_DONE;
-            break; /* WOULD_BLOCK: need more bytes, resume next read tick. */
+    /* Probe phase: classify the stream from its leading bytes. The magic may
+     * arrive split across feeds, so accumulate until we can match or rule it
+     * out against the VCS magic. */
+    if (rd->mode == REPL_DECODE_MODE_PROBE) {
+        while (rd->envelope_len < VCS_MAGIC_SIZE && off < len) {
+            if (in[off] != vcs_magic[rd->envelope_len]) {
+                rd->mode = REPL_DECODE_MODE_PASSTHROUGH; /* not a VCS stream */
+                break;
+            }
+            rd->envelope[rd->envelope_len++] = in[off++];
         }
-        if (sdslen(rd->decode_buf) + (size_t)got > output_max) return REPL_DECODE_OVERFLOW;
-        rd->decode_buf = sdscatlen(rd->decode_buf, out_buf, (size_t)got);
+
+        if (rd->mode == REPL_DECODE_MODE_PROBE) {
+            /* Magic matches so far; gather the rest of the envelope. */
+            while (rd->envelope_len < VCS_ENVELOPE_SIZE && off < len) rd->envelope[rd->envelope_len++] = in[off++];
+            if (rd->envelope_len < VCS_ENVELOPE_SIZE) return REPL_DECODE_OK; /* need more header */
+
+            streamReaderInfo info;
+            if (streamReadEnvelopeInfo(rd->envelope, VCS_ENVELOPE_SIZE, STREAM_KIND_REPL, &info) != 0)
+                return REPL_DECODE_ERR;
+            if (!info.compressed) return REPL_DECODE_ERR;
+            if (streamDecompressorInit(&rd->decompressor, info.algo) != 0) return REPL_DECODE_ERR;
+            rd->mode = REPL_DECODE_MODE_COMPRESSED;
+        }
+    }
+
+    if (rd->mode == REPL_DECODE_MODE_PASSTHROUGH) {
+        /* Replay any buffered magic-prefix bytes once, then forward the rest. */
+        replDecodeResult r = replDecodeEmit(rd, rd->envelope, rd->envelope_len, output_max);
+        rd->envelope_len = 0;
+        if (r != REPL_DECODE_OK) return r;
+        r = replDecodeEmit(rd, in + off, len - off, output_max);
+        if (r != REPL_DECODE_OK) return r;
+    } else if (off < len) {
+        replDecodeResult r = replDecodeFeed(rd, in + off, len - off, output_max);
+        if (r != REPL_DECODE_OK) return r;
     }
 
     /* Shrink the scratch buffer if it grew large and is now mostly empty. */

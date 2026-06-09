@@ -14,15 +14,16 @@
  * rio (used for RDB save/load); this file wraps the non-blocking replication
  * transport.
  *
- * Why a separate adapter (and why push-mode for the replica): the RDB path can
- * use the pull-mode streamReader because a file rio blocks until the requested
- * bytes are available. The replica instead reads its primary link from a
- * non-blocking socket inside the event loop, where a read returns whatever
- * bytes happen to be ready. A blocking pull callback cannot work there, so the
- * decoder is driven in push-mode: the event loop feeds incremental bytes and
- * drains whatever decoded output is currently available. This adapter owns that
- * push-mode reader plus its scratch buffer so the buffering lives in one place
- * rather than being spread across networking.c. */
+ * Why a separate adapter: the RDB path uses the pull-mode streamReader because
+ * a file rio blocks until the requested bytes are available. The replica reads
+ * its primary link from a non-blocking socket inside the event loop, where a
+ * read returns whatever bytes happen to be ready and a blocking pull callback
+ * cannot work. The replica advertises the compression capability, but the
+ * primary only compresses if its own config is enabled, so the incoming stream
+ * may be compressed (VCS envelope) or plaintext. This adapter classifies the
+ * stream from its leading bytes: on a VCS envelope it parses the header and
+ * feeds the codec (streamDecompressorFeed) directly (the decoder retains
+ * partial-frame state internally); otherwise it forwards the bytes untouched. */
 
 #include "compression.h"
 #include "compression_stream.h"
@@ -75,16 +76,32 @@ typedef enum {
     REPL_DECODE_OVERFLOW = -3,   /* Decoded output exceeded the bomb-guard cap. */
 } replDecodeResult;
 
-/* Owns the push-mode streamReader and decode scratch buffer for the single
- * primary link. See the file header for why push-mode is required here. */
+/* Decode mode for the single primary link. PROBE until the leading bytes reveal
+ * whether the primary is sending a compressed VCS stream or plaintext; the
+ * replica must tolerate plaintext because the primary compresses only if its own
+ * replcompression is also enabled. */
+typedef enum {
+    REPL_DECODE_MODE_PROBE = 0,  /* Still classifying the stream. */
+    REPL_DECODE_MODE_COMPRESSED, /* VCS envelope seen; decoder initialized. */
+    REPL_DECODE_MODE_PASSTHROUGH /* Non-VCS stream; bytes forwarded as-is. */
+} replDecodeMode;
+
+/* Owns the VCS/LZ4 decoder for the single primary link. The replica negotiated
+ * the compression capability, but the primary only actually compresses if its
+ * own config is enabled, so the stream may be compressed or plaintext. This
+ * adapter accumulates the leading bytes (they may span several non-blocking
+ * reads), classifies the stream, and either parses the VCS envelope and feeds
+ * the codec or forwards plaintext untouched. */
 typedef struct replDecompressor {
-    streamReader reader; /* Push-mode VCS/LZ4 decoder (STREAM_KIND_REPL). */
-    sds decode_buf;      /* Scratch buffer holding the most recent decoded bytes. */
+    streamDecompressor decompressor;     /* VCS/LZ4 decoder (valid once mode==COMPRESSED). */
+    replDecodeMode mode;                 /* PROBE / COMPRESSED / PASSTHROUGH. */
+    uint8_t envelope[VCS_ENVELOPE_SIZE]; /* Accumulates leading bytes during PROBE. */
+    size_t envelope_len;                 /* Leading bytes gathered so far. */
+    sds decode_buf;                      /* Scratch buffer holding the most recent decoded bytes. */
 } replDecompressor;
 
-/* Create a replica-side decompressor with the given feed-queue cap.
- * Returns NULL on error. */
-replDecompressor *replDecompressorCreate(size_t feed_cap);
+/* Create a replica-side decompressor. Returns NULL on error. */
+replDecompressor *replDecompressorCreate(void);
 
 /* Destroy a decompressor created by replDecompressorCreate. NULL-safe. */
 void replDecompressorDestroy(replDecompressor *rd);

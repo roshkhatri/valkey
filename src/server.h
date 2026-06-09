@@ -2082,6 +2082,9 @@ struct valkeyServer {
     char *rdb_filename;                   /* Name of RDB file */
     int rdb_compression;                  /* RDB compression mode */
     int repl_compression;                 /* Use compression for replication? 0=no (default) */
+    int repl_provisional_compression;     /* Replica: compression advertised on the current upstream
+                                           * handshake. Gates decompressor setup (not the live config),
+                                           * so a mid-handshake config flip cannot desync the link. */
     int rdb_checksum;                     /* Use RDB checksum? */
     int rdb_del_sync_files;               /* Remove RDB files used only for SYNC if
                                              the instance does not use persistence. */
@@ -2221,7 +2224,7 @@ struct valkeyServer {
                                             * when it receives an error on the replication stream */
     int repl_ignore_disk_write_error;      /* Configures whether replicas panic when unable to
                                             * persist writes to AOF. */
-    replDecompressor *repl_decompressor;   /* Replica-side compressed replication decoder (push-mode). */
+    replDecompressor *repl_decompressor;   /* Replica-side compressed replication decoder (direct-feed). */
     size_t repl_decompression_errors;      /* Decompression failures (replica side). */
     long long repl_decompression_cpu_usec; /* Cumulative μs spent in replDecompressQueryBuf. */
     size_t repl_decompressed_bytes_total;  /* Total decompressed bytes processed (replica side). */

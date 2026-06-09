@@ -287,6 +287,79 @@ start_server {tags {"repl"} overrides {save ""}} {
         $primary config set replcompression no
     }
 
+    test {Replica with replcompression yes handles a plaintext primary (passthrough)} {
+        # Primary has compression OFF, replica ON: the replica advertises the
+        # capability but the primary sends plaintext, so the replica must pass
+        # the stream through untouched rather than expecting a VCS envelope.
+        $primary config set replcompression no
+        $primary flushall
+
+        start_server {overrides {save "" replcompression yes repl-diskless-load swapdb}} {
+            set replica [srv 0 client]
+            $replica replicaof $primary_host $primary_port
+
+            wait_for_condition 50 100 {
+                [s 0 master_link_status] eq {up}
+            } else {
+                fail "Replication not started (primary plaintext, replica compression on)"
+            }
+
+            # Incremental writes arrive as plaintext; passthrough must deliver them.
+            for {set i 0} {$i < 50} {incr i} {
+                $primary set "pt:$i" [string repeat "payload$i " 20]
+            }
+            wait_for_condition 50 100 {
+                [$replica get pt:49] eq [string repeat "payload49 " 20]
+            } else {
+                fail "Replica did not receive plaintext data via passthrough"
+            }
+            assert_equal [$primary dbsize] [$replica dbsize]
+
+            # Primary never compressed (its config is off).
+            assert_equal 0 [string match {*compression=lz4*} [$primary info replication]]
+
+            $replica replicaof no one
+        }
+    }
+
+    test {Replica replcompression flip renegotiates upstream without manual reconnect} {
+        $primary config set replcompression yes
+
+        start_server {overrides {save "" replcompression yes repl-diskless-load swapdb}} {
+            set replica [srv 0 client]
+            $replica replicaof $primary_host $primary_port
+
+            wait_for_condition 50 200 {
+                [s 0 master_link_status] eq {up} &&
+                [string match {*compression=lz4*} [$primary info replication]]
+            } else {
+                fail "Compressed replication not established"
+            }
+
+            # Flipping compression OFF on the replica must, on its own, drop and
+            # reconnect the upstream link so it re-advertises capa without
+            # compression. No manual replicaof is issued.
+            $replica config set replcompression no
+
+            wait_for_condition 50 200 {
+                [s 0 master_link_status] eq {up} &&
+                ![string match {*compression=lz4*} [$primary info replication]]
+            } else {
+                fail "Replica did not renegotiate to plaintext after flip"
+            }
+
+            # Data still flows after the renegotiation.
+            $primary set flipkey flipval
+            wait_for_condition 50 100 {
+                [$replica get flipkey] eq {flipval}
+            } else {
+                fail "Data not replicated after replica-side flip"
+            }
+
+            $replica replicaof no one
+        }
+    }
+
     test {CONFIG SET replcompression no disconnects compressed replicas} {
         $primary config set replcompression yes
 

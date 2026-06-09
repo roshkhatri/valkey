@@ -128,6 +128,21 @@ void reconcileReplicaCompression(void) {
     if (disconnected > 0) {
         serverLog(LL_NOTICE, "Disconnected %d replicas to reconcile replication compression", disconnected);
     }
+
+    /* If we are ourselves a replica, the compression capability was negotiated
+     * with our primary at handshake time. A config change must renegotiate, so
+     * drop the upstream link; the replication cron reconnects and re-advertises
+     * capa with the new setting. */
+    if (server.primary_host) {
+        if (server.primary) {
+            serverLog(LL_NOTICE, "Disconnecting from primary to renegotiate replication compression (now %s)",
+                      server.repl_compression ? "enabled" : "disabled");
+            freeClientAsync(server.primary);
+        } else if (cancelReplicationHandshake(1)) {
+            serverLog(LL_NOTICE, "Restarting sync with primary to renegotiate replication compression (now %s)",
+                      server.repl_compression ? "enabled" : "disabled");
+        }
+    }
 }
 
 static int shouldEnableReplicaCompression(client *c) {
@@ -136,7 +151,7 @@ static int shouldEnableReplicaCompression(client *c) {
 }
 
 /* Initialize framed transport compression for a replica at PSYNC completion.
- * The stream writer emits the VKCS envelope lazily on its first write. */
+ * The stream writer emits the VCS envelope lazily on its first write. */
 static int replicaInitCompressionOnPsync(client *c) {
     compressionAlgo algo = REPL_COMPRESSION_ALGO;
     int level = REPL_COMPRESSION_LEVEL;
@@ -153,16 +168,9 @@ static int replicaInitCompressionOnPsync(client *c) {
     return C_OK;
 }
 
-/* Push-mode reader feed cap: maximum compressed bytes we'll buffer in the
- * decoder's input queue before declaring back-pressure. 64 MB matches the
- * input cap used by the legacy replStreamDecoder and bounds memory under
- * sustained socket back-pressure (e.g., slow event-loop processing on the
- * replica). Exceeding this triggers a sticky decoder error. */
-#define REPL_STREAM_DECODER_FEED_CAP (64 * 1024 * 1024)
-
 int replInitDecompression(void) {
     replDestroyDecompression();
-    server.repl_decompressor = replDecompressorCreate(REPL_STREAM_DECODER_FEED_CAP);
+    server.repl_decompressor = replDecompressorCreate();
     return server.repl_decompressor ? C_OK : C_ERR;
 }
 
@@ -2480,7 +2488,7 @@ void replicaAfterLoadPrimaryRDB(connection *conn, rdbSaveInfo *rsi, int disk_bas
         /* Send the initial ACK immediately to put this replica in online state. */
         replicationSendAck();
         /* Initialize decompression for the incremental stream if compression is active. */
-        if (server.repl_compression && replRefreshDecompression() == C_ERR)
+        if (server.repl_provisional_compression && replRefreshDecompression() == C_ERR)
             serverLog(LL_WARNING, "Failed to initialize replication decompression; "
                                   "compressed stream from primary cannot be decoded");
     }
@@ -3856,7 +3864,7 @@ int dualChannelReplMainConnRecvPsyncReply(connection *conn, sds *err) {
             serverCommunicateSystemd("STATUS=PRIMARY <-> REPLICA sync: Partial Resynchronization accepted. Ready to "
                                      "accept connections in read-write mode.\n");
         }
-        if (server.repl_compression && replRefreshDecompression() == C_ERR)
+        if (server.repl_provisional_compression && replRefreshDecompression() == C_ERR)
             serverLog(LL_WARNING, "Failed to initialize replication decompression; "
                                   "compressed stream from primary cannot be decoded");
         dualChannelSyncHandlePsync();
@@ -4008,7 +4016,10 @@ int syncWithPrimaryHandleSendHandshakeState(connection *conn) {
         lens[argc] = strlen("dual-channel");
         argc++;
     }
-    if (server.repl_compression) {
+    /* Capture the compression decision for this handshake so the decoder is set
+     * up based on what we advertised, not a config that may change mid-stream. */
+    server.repl_provisional_compression = server.repl_compression;
+    if (server.repl_provisional_compression) {
         argv[argc] = "capa";
         lens[argc] = strlen("capa");
         argc++;
@@ -4385,7 +4396,7 @@ void syncWithPrimary(connection *conn) {
             serverCommunicateSystemd("STATUS=PRIMARY <-> REPLICA sync: Partial Resynchronization accepted. Ready to "
                                      "accept connections in read-write mode.\n");
         }
-        if (server.repl_compression && replRefreshDecompression() == C_ERR)
+        if (server.repl_provisional_compression && replRefreshDecompression() == C_ERR)
             serverLog(LL_WARNING, "Failed to initialize replication decompression; "
                                   "compressed stream from primary cannot be decoded");
         return;
