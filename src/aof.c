@@ -1007,7 +1007,7 @@ int startAppendOnly(void) {
 }
 
 static int rdbFileUsesStreamingCompression(const char *filename) {
-    unsigned char header[VKCS_ENVELOPE_SIZE];
+    unsigned char header[VCS_ENVELOPE_SIZE];
     int fd = open(filename, O_RDONLY);
     if (fd == -1) return -1;
 

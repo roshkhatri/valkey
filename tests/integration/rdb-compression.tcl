@@ -64,7 +64,7 @@ start_server {overrides {save "" enable-debug-command local}} {
         assert_equal 0 [r dbsize]
         assert_equal "OK" [r save]
         r config rewrite
-        assert_equal "VKCS" [string range [read_dump_rdb_header_bytes r] 0 3]
+        assert_equal "VCS" [string range [read_dump_rdb_header_bytes r] 0 2]
 
         restart_server 0 true false
 
@@ -166,7 +166,7 @@ start_server {overrides {save "" enable-debug-command local}} {
         r config set rdb-key-save-delay 0
 
         assert_equal "yes" [lindex [r config get rdbcompression] 1]
-        assert_equal "VKCS" [string range [read_dump_rdb_header_bytes r] 0 3]
+        assert_equal "VCS" [string range [read_dump_rdb_header_bytes r] 0 2]
 
         assert_equal "OK" [r save]
         assert_equal "VALKEY" [string range [read_dump_rdb_header_bytes r] 0 5]
@@ -227,7 +227,7 @@ start_server {overrides {save "" enable-debug-command local}} {
         assert_equal "lz4-stream" [lindex [r config get rdbcompression] 1]
     }
 
-    test {LZ4 compressed RDB with rdbchecksum yes sets the VKCS codec checksum flag} {
+    test {LZ4 compressed RDB with rdbchecksum yes sets the VCS codec checksum flag} {
         r config set rdbcompression lz4-stream
         r flushall
         for {set i 0} {$i < 200} {incr i} {
@@ -236,8 +236,8 @@ start_server {overrides {save "" enable-debug-command local}} {
 
         r save
         set header [read_dump_rdb_header_bytes r]
-        assert_equal "VKCS" [string range $header 0 3]
-        binary scan [string index $header 6] cu flags
+        assert_equal "VCS" [string range $header 0 2]
+        binary scan [string index $header 5] cu flags
         assert {$flags == 1}
 
         set digest [debug_digest]
@@ -247,7 +247,7 @@ start_server {overrides {save "" enable-debug-command local}} {
         assert_equal [string repeat "payload42 " 200] [r get cksum:42]
     }
 
-    test {Truncated VKCS snapshot is rejected on load} {
+    test {Truncated VCS snapshot is rejected on load} {
         r config set rdbcompression lz4-stream
         r flushall
         set noisy_payload ""
@@ -260,7 +260,7 @@ start_server {overrides {save "" enable-debug-command local}} {
 
         assert_equal "OK" [r save]
         set rdbfile [dump_rdb_path r]
-        assert_equal "VKCS" [string range [read_binary_file_prefix $rdbfile 8] 0 3]
+        assert_equal "VCS" [string range [read_binary_file_prefix $rdbfile 8] 0 2]
 
         set truncated [read_binary_file_prefix $rdbfile [expr {[file size $rdbfile] / 2}]]
         set fd [open $rdbfile w]
@@ -303,7 +303,7 @@ start_server {overrides {save "" enable-debug-command local}} {
         set fd [open $rdbfile r+]
         fconfigure $fd -translation binary
         set data [read $fd]
-        set data [string replace $data 7 7 [binary format c 0x01]]
+        set data [string replace $data 6 6 [binary format c 0x01]]
         seek $fd 0
         puts -nonewline $fd $data
         close $fd
@@ -325,7 +325,7 @@ start_server {overrides {save "" enable-debug-command local}} {
         set rdbfile [file join [lindex [r config get dir] 1] dump.rdb]
 
         # Read the file, flip a byte in the compressed payload
-        # (skip the VKCS envelope at offset 0-7, corrupt somewhere in the middle)
+        # (skip the VCS envelope at offset 0-6, corrupt somewhere in the middle)
         set fd [open $rdbfile r+]
         fconfigure $fd -translation binary
         set data [read $fd]
@@ -346,7 +346,7 @@ start_server {overrides {save "" enable-debug-command local}} {
         assert_match "*Error*" $err
     }
 
-    test {Invalid non-VKCS/non-RDB file fails reload} {
+    test {Invalid non-VCS/non-RDB file fails reload} {
         r config set rdbcompression lz4-stream
         r flushall
         r set smoke-key smoke-value
@@ -371,7 +371,7 @@ start_server {config "minimal.conf" args {"--rdbcompression lz4-stream"}} {
 }
 
 start_server {overrides {save "" enable-debug-command local rdbchecksum no}} {
-    test {LZ4 compressed RDB with rdbchecksum no leaves VKCS flags clear and loads correctly} {
+    test {LZ4 compressed RDB with rdbchecksum no leaves VCS flags clear and loads correctly} {
         r config set rdbcompression lz4-stream
         r flushall
         for {set i 0} {$i < 50} {incr i} {
@@ -380,8 +380,8 @@ start_server {overrides {save "" enable-debug-command local rdbchecksum no}} {
 
         r save
         set header [read_dump_rdb_header_bytes r]
-        assert_equal "VKCS" [string range $header 0 3]
-        binary scan [string index $header 6] cu flags
+        assert_equal "VCS" [string range $header 0 2]
+        binary scan [string index $header 5] cu flags
         assert {$flags == 0}
 
         set digest [debug_digest]
@@ -478,7 +478,7 @@ start_server [list tags {"rdb-compression cluster external:skip singledb"} overr
         assert_equal "OK" [r cluster saveconfig]
         r set cluster-rdb-compression value
         assert_equal "OK" [r save]
-        assert_equal "VKCS" [string range [read_dump_rdb_header_bytes r] 0 3]
+        assert_equal "VCS" [string range [read_dump_rdb_header_bytes r] 0 2]
 
         restart_server 0 true false
         wait_for_condition 50 100 {

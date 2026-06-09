@@ -9,29 +9,28 @@
 
 #include "compression.h"
 
-/* VKCS envelope:
- *   [0..3] magic "VKCS"
- *   [4]    version (currently VKCS_VERSION)
- *   [5]    codec id
- *   [6]    flags (bit 0 = codec checksum enabled; other bits reserved)
- *   [7]    stream kind
+/* VCS envelope:
+ *   [0..2] magic "VCS"
+ *   [3]    version (currently VCS_VERSION)
+ *   [4]    codec id
+ *   [5]    flags (bit 0 = codec checksum enabled; other bits reserved)
+ *   [6]    stream kind
  *
  * All fields are single-byte in version 1. Future multi-byte fields must use
  * network byte order. */
-#define VKCS_MAGIC_0 0x56 /* 'V' */
-#define VKCS_MAGIC_1 0x4B /* 'K' */
-#define VKCS_MAGIC_2 0x43 /* 'C' */
-#define VKCS_MAGIC_3 0x53 /* 'S' */
-#define VKCS_MAGIC_SIZE 4
-#define VKCS_ENVELOPE_SIZE 8
-#define VKCS_VERSION 1
-#define VKCS_FLAG_CODEC_CHECKSUM (1 << 0)
+#define VCS_MAGIC_0 0x56 /* 'V' */
+#define VCS_MAGIC_1 0x43 /* 'C' */
+#define VCS_MAGIC_2 0x53 /* 'S' */
+#define VCS_MAGIC_SIZE 3
+#define VCS_ENVELOPE_SIZE 7
+#define VCS_VERSION 1
+#define VCS_FLAG_CODEC_CHECKSUM (1 << 0)
 
 /* Byte offsets of each envelope field. */
-#define VKCS_OFFSET_VERSION 4
-#define VKCS_OFFSET_ALGO 5
-#define VKCS_OFFSET_FLAGS 6
-#define VKCS_OFFSET_STREAM_KIND 7
+#define VCS_OFFSET_VERSION 3
+#define VCS_OFFSET_ALGO 4
+#define VCS_OFFSET_FLAGS 5
+#define VCS_OFFSET_STREAM_KIND 6
 
 /* Identifies what the compressed bytes decode to. The RDB loader rejects any
  * stream whose kind is not STREAM_KIND_RDB. */
@@ -56,7 +55,7 @@ typedef struct {
     bool codec_checksum_enabled;
 } streamWriterConfig;
 
-/* When allow_passthrough is set, non-VKCS input is forwarded as raw bytes;
+/* When allow_passthrough is set, non-VCS input is forwarded as raw bytes;
  * otherwise it is rejected. */
 typedef struct {
     uint8_t expected_stream_kind;
@@ -100,13 +99,13 @@ typedef struct streamReader {
         uint8_t expected_stream_kind;
     } probe_cfg;
     struct {
-        uint8_t header[VKCS_ENVELOPE_SIZE];
+        uint8_t header[VCS_ENVELOPE_SIZE];
+        uint8_t stream_kind;
         size_t header_len;
+        compressionAlgo algo;
         bool ready;
         bool compressed;
         bool codec_checksum_enabled;
-        compressionAlgo algo;
-        uint8_t stream_kind;
     } probe;
     size_t probe_replay_pos; /* Passthrough bytes left to replay from probe. */
     size_t buffer_size;

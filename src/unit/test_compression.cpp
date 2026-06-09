@@ -346,11 +346,10 @@ TEST_F(CompressionTest, streamCompressorFeedErrorRecovery) {
 
 TEST_F(CompressionTest, streamReaderClassifiesProbeInputs) {
     static const uint8_t plain_input[] = {'H', 'E', 'L', 'L', 'O'};
-    static const uint8_t truncated_vkcs[] = {'V', 'K', 'C'};
-    static const uint8_t invalid_vkcs[VKCS_ENVELOPE_SIZE] = {
-        VKCS_MAGIC_0, VKCS_MAGIC_1, VKCS_MAGIC_2, VKCS_MAGIC_3,
-        0, ALGO_LZ4, 0, STREAM_KIND_RDB};
-    static const uint8_t strict_non_vkcs[VKCS_ENVELOPE_SIZE] = {'R', 'E', 'D', 'I', 'S', '0', '0', '1'};
+    static const uint8_t truncated_vcs[] = {'V', 'C'};
+    static const uint8_t invalid_vcs[VCS_ENVELOPE_SIZE] = {
+        VCS_MAGIC_0, VCS_MAGIC_1, VCS_MAGIC_2, 0, ALGO_LZ4, 0, STREAM_KIND_RDB};
+    static const uint8_t strict_non_vcs[VCS_ENVELOPE_SIZE] = {'R', 'E', 'D', 'I', 'S', '0', '0'};
 
     struct {
         const char *name;
@@ -370,25 +369,25 @@ TEST_F(CompressionTest, streamReaderClassifiesProbeInputs) {
          true,
          STREAM_READER_ERROR_NONE,
          sizeof(plain_input)},
-        {"truncated VKCS prefix",
-         truncated_vkcs,
-         sizeof(truncated_vkcs),
+        {"truncated VCS prefix",
+         truncated_vcs,
+         sizeof(truncated_vcs),
          2,
          true,
          false,
          STREAM_READER_ERROR_INCOMPATIBLE,
          0},
-        {"invalid VKCS envelope",
-         invalid_vkcs,
-         sizeof(invalid_vkcs),
+        {"invalid VCS envelope",
+         invalid_vcs,
+         sizeof(invalid_vcs),
          0,
          true,
          false,
          STREAM_READER_ERROR_INCOMPATIBLE,
          0},
-        {"non-VKCS with passthrough disabled",
-         strict_non_vkcs,
-         sizeof(strict_non_vkcs),
+        {"non-VCS with passthrough disabled",
+         strict_non_vcs,
+         sizeof(strict_non_vcs),
          0,
          false,
          false,
@@ -485,7 +484,7 @@ static int emitToDynamicBuf(void *ctx, const uint8_t *data, size_t len) {
     return db->data != nullptr ? 0 : -1;
 }
 
-static int initVkcsRdbDecompressRio(decompressRio *dr, rio *inner) {
+static int initVcsRdbDecompressRio(decompressRio *dr, rio *inner) {
     streamReaderConfig cfg = makeReaderConfig(STREAM_KIND_RDB, false);
     return rioInitWithDecompression(dr, inner, &cfg, nullptr) == DECOMPRESS_RIO_INIT_OK ? 0 : -1;
 }
@@ -591,43 +590,43 @@ TEST_F(CompressionTest, streamReadEnvelopeInfoRejectsBadEnvelopes) {
     ASSERT_EQ(streamWriterFinish(&w), 0);
     streamWriterFree(&w);
 
-    ASSERT_GE(sdslen((const char *)db.data), (size_t)VKCS_ENVELOPE_SIZE);
+    ASSERT_GE(sdslen((const char *)db.data), (size_t)VCS_ENVELOPE_SIZE);
 
-    uint8_t good[VKCS_ENVELOPE_SIZE];
-    memcpy(good, db.data, VKCS_ENVELOPE_SIZE);
+    uint8_t good[VCS_ENVELOPE_SIZE];
+    memcpy(good, db.data, VCS_ENVELOPE_SIZE);
     dynamicBufFree(&db);
 
     streamReaderInfo info;
 
     /* Sanity: the unmodified envelope parses. */
-    ASSERT_EQ(streamReadEnvelopeInfo(good, VKCS_ENVELOPE_SIZE, STREAM_KIND_RDB, &info), 0);
+    ASSERT_EQ(streamReadEnvelopeInfo(good, VCS_ENVELOPE_SIZE, STREAM_KIND_RDB, &info), 0);
 
     /* Unknown version. */
-    uint8_t bad_version[VKCS_ENVELOPE_SIZE];
-    memcpy(bad_version, good, VKCS_ENVELOPE_SIZE);
-    bad_version[VKCS_OFFSET_VERSION] = VKCS_VERSION + 1;
-    ASSERT_EQ(streamReadEnvelopeInfo(bad_version, VKCS_ENVELOPE_SIZE, STREAM_KIND_RDB, &info), -1)
+    uint8_t bad_version[VCS_ENVELOPE_SIZE];
+    memcpy(bad_version, good, VCS_ENVELOPE_SIZE);
+    bad_version[VCS_OFFSET_VERSION] = VCS_VERSION + 1;
+    ASSERT_EQ(streamReadEnvelopeInfo(bad_version, VCS_ENVELOPE_SIZE, STREAM_KIND_RDB, &info), -1)
         << "future version must be rejected";
 
     /* Unknown / non-streaming codec id. */
-    uint8_t bad_algo[VKCS_ENVELOPE_SIZE];
-    memcpy(bad_algo, good, VKCS_ENVELOPE_SIZE);
-    bad_algo[VKCS_OFFSET_ALGO] = 0x7f;
-    ASSERT_EQ(streamReadEnvelopeInfo(bad_algo, VKCS_ENVELOPE_SIZE, STREAM_KIND_RDB, &info), -1)
+    uint8_t bad_algo[VCS_ENVELOPE_SIZE];
+    memcpy(bad_algo, good, VCS_ENVELOPE_SIZE);
+    bad_algo[VCS_OFFSET_ALGO] = 0x7f;
+    ASSERT_EQ(streamReadEnvelopeInfo(bad_algo, VCS_ENVELOPE_SIZE, STREAM_KIND_RDB, &info), -1)
         << "unknown codec id must be rejected";
 
     /* LZF is a real algorithm but has no streaming codec. */
-    uint8_t lzf_algo[VKCS_ENVELOPE_SIZE];
-    memcpy(lzf_algo, good, VKCS_ENVELOPE_SIZE);
-    lzf_algo[VKCS_OFFSET_ALGO] = (uint8_t)ALGO_LZF;
-    ASSERT_EQ(streamReadEnvelopeInfo(lzf_algo, VKCS_ENVELOPE_SIZE, STREAM_KIND_RDB, &info), -1)
+    uint8_t lzf_algo[VCS_ENVELOPE_SIZE];
+    memcpy(lzf_algo, good, VCS_ENVELOPE_SIZE);
+    lzf_algo[VCS_OFFSET_ALGO] = (uint8_t)ALGO_LZF;
+    ASSERT_EQ(streamReadEnvelopeInfo(lzf_algo, VCS_ENVELOPE_SIZE, STREAM_KIND_RDB, &info), -1)
         << "non-streaming algorithm must be rejected";
 
     /* Reserved flag bit set. */
-    uint8_t bad_flags[VKCS_ENVELOPE_SIZE];
-    memcpy(bad_flags, good, VKCS_ENVELOPE_SIZE);
-    bad_flags[VKCS_OFFSET_FLAGS] |= (1 << 1);
-    ASSERT_EQ(streamReadEnvelopeInfo(bad_flags, VKCS_ENVELOPE_SIZE, STREAM_KIND_RDB, &info), -1)
+    uint8_t bad_flags[VCS_ENVELOPE_SIZE];
+    memcpy(bad_flags, good, VCS_ENVELOPE_SIZE);
+    bad_flags[VCS_OFFSET_FLAGS] |= (1 << 1);
+    ASSERT_EQ(streamReadEnvelopeInfo(bad_flags, VCS_ENVELOPE_SIZE, STREAM_KIND_RDB, &info), -1)
         << "reserved flag bits must be rejected";
 }
 
@@ -681,7 +680,7 @@ TEST_F(CompressionTest, streamReaderPartialThenErrorSetsErrored) {
 
     /* Passthrough mode should also preserve partial bytes when source read
      * fails after probe/prefix buffering, then latch sticky error state. */
-    const uint8_t plain[] = "NOTVKCS-passthrough-regression";
+    const uint8_t plain[] = "NOTVCS-passthrough-regression";
     FlakyReader fr_passthrough = {};
     fr_passthrough.data = plain;
     fr_passthrough.len = sizeof(plain) - 1;
@@ -745,23 +744,22 @@ TEST_F(CompressionTest, streamWriterRoundTrip) {
     size_t data_len = strlen(test_data);
     ASSERT_GE(streamWriterWrite(&t, test_data, data_len), 0);
     ASSERT_EQ(t.errored, false) << "should not be errored after write";
-    ASSERT_GE(sdslen((const char *)db.data), (size_t)VKCS_ENVELOPE_SIZE) << "write should emit envelope";
+    ASSERT_GE(sdslen((const char *)db.data), (size_t)VCS_ENVELOPE_SIZE) << "write should emit envelope";
 
     /* Finalize */
     ASSERT_EQ(streamWriterFinish(&t), 0);
     ASSERT_EQ(t.errored, false) << "should not be errored after finish";
 
-    /* Verify output starts with VKCS envelope */
-    ASSERT_GE(sdslen((const char *)db.data), (size_t)VKCS_ENVELOPE_SIZE)
+    /* Verify output starts with VCS envelope */
+    ASSERT_GE(sdslen((const char *)db.data), (size_t)VCS_ENVELOPE_SIZE)
         << "output should have at least envelope size";
-    ASSERT_EQ(db.data[0], VKCS_MAGIC_0) << "magic byte 0";
-    ASSERT_EQ(db.data[1], VKCS_MAGIC_1) << "magic byte 1";
-    ASSERT_EQ(db.data[2], VKCS_MAGIC_2) << "magic byte 2";
-    ASSERT_EQ(db.data[3], VKCS_MAGIC_3) << "magic byte 3";
-    ASSERT_EQ(db.data[4], VKCS_VERSION) << "version";
-    ASSERT_EQ(db.data[5], ALGO_LZ4) << "algo id";
-    ASSERT_EQ(db.data[6], (uint8_t)0) << "flags should be clear when checksum is disabled";
-    ASSERT_EQ(db.data[7], STREAM_KIND_RDB) << "stream_kind RDB";
+    ASSERT_EQ(db.data[0], VCS_MAGIC_0) << "magic byte 0";
+    ASSERT_EQ(db.data[1], VCS_MAGIC_1) << "magic byte 1";
+    ASSERT_EQ(db.data[2], VCS_MAGIC_2) << "magic byte 2";
+    ASSERT_EQ(db.data[3], VCS_VERSION) << "version";
+    ASSERT_EQ(db.data[4], ALGO_LZ4) << "algo id";
+    ASSERT_EQ(db.data[5], (uint8_t)0) << "flags should be clear when checksum is disabled";
+    ASSERT_EQ(db.data[6], STREAM_KIND_RDB) << "stream_kind RDB";
 
     /* Decompress and verify round-trip */
     streamDecompressor sd;
@@ -769,8 +767,8 @@ TEST_F(CompressionTest, streamWriterRoundTrip) {
 
     uint8_t decompressed[256];
     size_t total_decompressed = 0;
-    uint8_t *compressed_data = db.data + VKCS_ENVELOPE_SIZE;
-    size_t compressed_len = sdslen((const char *)db.data) - VKCS_ENVELOPE_SIZE;
+    uint8_t *compressed_data = db.data + VCS_ENVELOPE_SIZE;
+    size_t compressed_len = sdslen((const char *)db.data) - VCS_ENVELOPE_SIZE;
     size_t src_offset = 0;
 
     while (src_offset < compressed_len) {
@@ -902,14 +900,14 @@ TEST_F(CompressionTest, streamWriterFlushBehavior) {
     ASSERT_GE(streamWriterWrite(&t, "second chunk", 12), 0);
     ASSERT_EQ(streamWriterFinish(&t), 0);
 
-    ASSERT_GT(sdslen((const char *)db.data), (size_t)VKCS_ENVELOPE_SIZE);
+    ASSERT_GT(sdslen((const char *)db.data), (size_t)VCS_ENVELOPE_SIZE);
     streamDecompressor sd;
     ASSERT_EQ(streamDecompressorInit(&sd, ALGO_LZ4), 0);
 
     uint8_t decompressed[256];
     size_t total_decompressed = 0;
-    uint8_t *comp_data = db.data + VKCS_ENVELOPE_SIZE;
-    size_t comp_len = sdslen((const char *)db.data) - VKCS_ENVELOPE_SIZE;
+    uint8_t *comp_data = db.data + VCS_ENVELOPE_SIZE;
+    size_t comp_len = sdslen((const char *)db.data) - VCS_ENVELOPE_SIZE;
     size_t src_offset = 0;
 
     while (src_offset < comp_len) {
@@ -966,13 +964,13 @@ TEST_F(CompressionTest, streamWriterCodecChecksumToggle) {
         ASSERT_GE(streamWriterWrite(&t, payload, strlen(payload)), 0);
         ASSERT_EQ(streamWriterFinish(&t), 0);
 
-        ASSERT_GT(sdslen((const char *)db.data), (size_t)VKCS_ENVELOPE_SIZE);
-        ASSERT_EQ(lz4FrameHasBlockChecksum(db.data + VKCS_ENVELOPE_SIZE,
-                                           sdslen((const char *)db.data) - VKCS_ENVELOPE_SIZE),
+        ASSERT_GT(sdslen((const char *)db.data), (size_t)VCS_ENVELOPE_SIZE);
+        ASSERT_EQ(lz4FrameHasBlockChecksum(db.data + VCS_ENVELOPE_SIZE,
+                                           sdslen((const char *)db.data) - VCS_ENVELOPE_SIZE),
                   codec_checksum)
             << "LZ4 block checksum should reflect configured codec checksum setting";
-        ASSERT_EQ(lz4FrameHasContentChecksum(db.data + VKCS_ENVELOPE_SIZE,
-                                             sdslen((const char *)db.data) - VKCS_ENVELOPE_SIZE),
+        ASSERT_EQ(lz4FrameHasContentChecksum(db.data + VCS_ENVELOPE_SIZE,
+                                             sdslen((const char *)db.data) - VCS_ENVELOPE_SIZE),
                   codec_checksum)
             << "LZ4 content checksum should reflect configured codec checksum setting";
 
@@ -1083,13 +1081,13 @@ TEST_F(CompressionTest, compressRioRoundTrip) {
     /* Get the compressed output from the buffer rio */
     sds compressed = buffer_rio.io.buffer.ptr;
     size_t compressed_len = sdslen(compressed);
-    ASSERT_GT(compressed_len, (size_t)VKCS_ENVELOPE_SIZE) << "compressed output should exist";
+    ASSERT_GT(compressed_len, (size_t)VCS_ENVELOPE_SIZE) << "compressed output should exist";
 
-    /* Verify VKCS envelope */
-    ASSERT_EQ(compressed[0], (char)VKCS_MAGIC_0) << "magic V";
-    ASSERT_EQ(compressed[1], (char)VKCS_MAGIC_1) << "magic K";
-    ASSERT_EQ(compressed[2], (char)VKCS_MAGIC_2) << "magic C";
-    ASSERT_EQ(compressed[3], (char)VKCS_MAGIC_3) << "magic S";
+    /* Verify VCS envelope */
+    ASSERT_EQ(compressed[0], (char)VCS_MAGIC_0) << "magic V";
+    ASSERT_EQ(compressed[1], (char)VCS_MAGIC_1) << "magic C";
+    ASSERT_EQ(compressed[2], (char)VCS_MAGIC_2) << "magic S";
+    ASSERT_EQ(compressed[3], (char)VCS_VERSION) << "version";
 
     /* Decompress and verify */
     streamDecompressor sd;
@@ -1097,8 +1095,8 @@ TEST_F(CompressionTest, compressRioRoundTrip) {
 
     uint8_t decompressed[512];
     size_t total_decompressed = 0;
-    uint8_t *comp_data = (uint8_t *)compressed + VKCS_ENVELOPE_SIZE;
-    size_t comp_len = compressed_len - VKCS_ENVELOPE_SIZE;
+    uint8_t *comp_data = (uint8_t *)compressed + VCS_ENVELOPE_SIZE;
+    size_t comp_len = compressed_len - VCS_ENVELOPE_SIZE;
     size_t src_offset = 0;
 
     while (src_offset < comp_len) {
@@ -1274,14 +1272,14 @@ TEST_F(CompressionTest, decompressRioRoundTrip) {
     ASSERT_EQ(streamWriterFinish(&t), 0);
     streamWriterFree(&t);
 
-    /* Create a buffer rio with the full VKCS-wrapped stream. */
+    /* Create a buffer rio with the full VCS-wrapped stream. */
     sds comp_sds = sdsnewlen(db.data, sdslen((const char *)db.data));
     rio buffer_rio;
     rioInitWithBuffer(&buffer_rio, comp_sds);
 
     /* Create decompress rio */
     decompressRio dr;
-    ASSERT_EQ(initVkcsRdbDecompressRio(&dr, &buffer_rio), 0);
+    ASSERT_EQ(initVcsRdbDecompressRio(&dr, &buffer_rio), 0);
 
     /* Read decompressed data */
     char result[256];
@@ -1311,7 +1309,7 @@ TEST_F(CompressionTest, decompressRioTellTracksSourceProgress) {
     rioInitWithBuffer(&buffer_rio, comp_sds);
 
     decompressRio dr;
-    ASSERT_EQ(initVkcsRdbDecompressRio(&dr, &buffer_rio), 0);
+    ASSERT_EQ(initVcsRdbDecompressRio(&dr, &buffer_rio), 0);
 
     char out[2048];
     ASSERT_NE(rioRead((rio *)&dr, out, sizeof(out)), 0u);
@@ -1348,9 +1346,8 @@ TEST_F(CompressionTest, decompressRioClassifiesInput) {
     }
 
     {
-        const uint8_t malformed[VKCS_ENVELOPE_SIZE] = {
-            VKCS_MAGIC_0, VKCS_MAGIC_1, VKCS_MAGIC_2, VKCS_MAGIC_3,
-            0, ALGO_LZ4, 0, STREAM_KIND_RDB};
+        const uint8_t malformed[VCS_ENVELOPE_SIZE] = {
+            VCS_MAGIC_0, VCS_MAGIC_1, VCS_MAGIC_2, 0, ALGO_LZ4, 0, STREAM_KIND_RDB};
         sds buf = sdsnewlen(malformed, sizeof(malformed));
         rio buffer_rio;
         rioInitWithBuffer(&buffer_rio, buf);
@@ -1412,15 +1409,15 @@ TEST_F(CompressionTest, compressRioFlushMidStream) {
     /* Verify the entire stream decompresses correctly */
     sds compressed = buffer_rio.io.buffer.ptr;
     size_t compressed_len = sdslen(compressed);
-    ASSERT_GT(compressed_len, (size_t)VKCS_ENVELOPE_SIZE);
+    ASSERT_GT(compressed_len, (size_t)VCS_ENVELOPE_SIZE);
 
     streamDecompressor sd;
     ASSERT_EQ(streamDecompressorInit(&sd, ALGO_LZ4), 0);
 
     uint8_t decompressed[256];
     size_t total_decompressed = 0;
-    uint8_t *comp_data = (uint8_t *)compressed + VKCS_ENVELOPE_SIZE;
-    size_t comp_len = compressed_len - VKCS_ENVELOPE_SIZE;
+    uint8_t *comp_data = (uint8_t *)compressed + VCS_ENVELOPE_SIZE;
+    size_t comp_len = compressed_len - VCS_ENVELOPE_SIZE;
     size_t src_offset = 0;
 
     while (src_offset < comp_len) {
@@ -1492,13 +1489,13 @@ TEST_F(CompressionTest, decompressRioLargePayload) {
     ASSERT_EQ(streamWriterFinish(&t), 0);
     streamWriterFree(&t);
 
-    /* Decompress via decompress_rio using the full VKCS-wrapped stream. */
+    /* Decompress via decompress_rio using the full VCS-wrapped stream. */
     sds comp_sds = sdsnewlen(db.data, sdslen((const char *)db.data));
     rio buffer_rio;
     rioInitWithBuffer(&buffer_rio, comp_sds);
 
     decompressRio dr;
-    ASSERT_EQ(initVkcsRdbDecompressRio(&dr, &buffer_rio), 0);
+    ASSERT_EQ(initVcsRdbDecompressRio(&dr, &buffer_rio), 0);
 
     /* Read in small chunks (4KB) to force multiple iterations through
      * the decompression state machine. */
@@ -1549,7 +1546,7 @@ TEST_F(CompressionTest, decompressRioDirectPath) {
     rioInitWithBuffer(&buffer_rio, comp_sds);
 
     decompressRio dr;
-    ASSERT_EQ(initVkcsRdbDecompressRio(&dr, &buffer_rio), 0);
+    ASSERT_EQ(initVcsRdbDecompressRio(&dr, &buffer_rio), 0);
 
     uint8_t *result = (uint8_t *)zmalloc(payload_len);
     size_t ret = rioRead((rio *)&dr, result, payload_len);
@@ -1626,7 +1623,7 @@ TEST_F(CompressionTest, streamReaderRejectsTruncatedFrameTrailer) {
     ASSERT_EQ(streamWriterFinish(&w), 0);
     streamWriterFree(&w);
 
-    ASSERT_GT(sdslen((const char *)db.data), (size_t)VKCS_ENVELOPE_SIZE + 1);
+    ASSERT_GT(sdslen((const char *)db.data), (size_t)VCS_ENVELOPE_SIZE + 1);
     MemReader mr = {};
     mr.data = db.data;
     mr.len = sdslen((const char *)db.data) - 1;
@@ -1669,14 +1666,14 @@ TEST_F(CompressionTest, streamWriterWriteAfterFinish) {
     ASSERT_EQ(sdslen((const char *)db.data), len_after_finish) << "second finish should not produce output";
 
     /* Verify the stream is still valid: one envelope + one frame */
-    ASSERT_GT(sdslen((const char *)db.data), (size_t)VKCS_ENVELOPE_SIZE);
+    ASSERT_GT(sdslen((const char *)db.data), (size_t)VCS_ENVELOPE_SIZE);
     streamDecompressor sd;
     ASSERT_EQ(streamDecompressorInit(&sd, ALGO_LZ4), 0);
 
     uint8_t decompressed[64];
     size_t total = 0;
-    uint8_t *cdata = db.data + VKCS_ENVELOPE_SIZE;
-    size_t comp_len = sdslen((const char *)db.data) - VKCS_ENVELOPE_SIZE;
+    uint8_t *cdata = db.data + VCS_ENVELOPE_SIZE;
+    size_t comp_len = sdslen((const char *)db.data) - VCS_ENVELOPE_SIZE;
     size_t off = 0;
     while (off < comp_len) {
         size_t consumed = 0;
@@ -1734,7 +1731,7 @@ TEST_F(CompressionTest, independentStreamsCoexist) {
         rioInitWithBuffer(&buf_rio, comp);
 
         decompressRio dr;
-        ASSERT_EQ(initVkcsRdbDecompressRio(&dr, &buf_rio), 0);
+        ASSERT_EQ(initVcsRdbDecompressRio(&dr, &buf_rio), 0);
 
         char result[256];
         memset(result, 0, sizeof(result));
@@ -1769,8 +1766,8 @@ TEST_F(CompressionTest, streamWriterRepetitivePayloadRoundTrip) {
         ASSERT_GE(streamWriterWrite(&t, pattern, sizeof(pattern)), 0);
     }
     ASSERT_EQ(streamWriterFinish(&t), 0);
-    ASSERT_TRUE(lz4FrameUsesLinkedBlocks(db.data + VKCS_ENVELOPE_SIZE,
-                                         sdslen((const char *)db.data) - VKCS_ENVELOPE_SIZE))
+    ASSERT_TRUE(lz4FrameUsesLinkedBlocks(db.data + VCS_ENVELOPE_SIZE,
+                                         sdslen((const char *)db.data) - VCS_ENVELOPE_SIZE))
         << "stream writer should use linked LZ4 blocks";
 
     sds comp = sdsnewlen(db.data, sdslen((const char *)db.data));
@@ -1778,7 +1775,7 @@ TEST_F(CompressionTest, streamWriterRepetitivePayloadRoundTrip) {
     rioInitWithBuffer(&buf_rio, comp);
 
     decompressRio dr;
-    ASSERT_EQ(initVkcsRdbDecompressRio(&dr, &buf_rio), 0);
+    ASSERT_EQ(initVcsRdbDecompressRio(&dr, &buf_rio), 0);
 
     size_t total_len = sizeof(pattern) * 32;
     char *result = (char *)zmalloc(total_len);
