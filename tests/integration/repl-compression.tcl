@@ -1,4 +1,4 @@
-tags {"repl-compression external:skip"} {
+tags {"repl external:skip"} {
 
 # ============================================================
 # Config CRUD — single-server tests, no replication needed
@@ -76,7 +76,8 @@ start_server {tags {"repl"} overrides {save ""}} {
         }
     }
 
-    test {Replica with replcompression yes but disk-backed load does NOT send capa compression} {
+    test {Replica with replcompression yes and disk-backed load also negotiates compression} {
+        $primary config set replcompression yes
         start_server {overrides {save "" replcompression yes repl-diskless-load disabled}} {
             set replica [srv 0 client]
             $replica replicaof $primary_host $primary_port
@@ -87,11 +88,29 @@ start_server {tags {"repl"} overrides {save ""}} {
                 fail "Replication not started"
             }
 
-            # Full sync completes normally — disk-backed replica does not advertise compression
-            assert_equal {up} [s 0 master_link_status]
+            # Disk-backed full sync completes, then compression activates for the
+            # post-sync incremental stream (the full-sync RDB itself is never
+            # compressed by this capability).
+            wait_for_condition 50 100 {
+                [regexp -all "compression=lz4" [$primary info replication]] >= 1
+            } else {
+                fail "Compression not negotiated for disk-backed replica"
+            }
+
+            # Exercise the compressed incremental stream over a disk-backed link.
+            for {set i 0} {$i < 100} {incr i} {
+                $primary set "diskbacked:$i" [string repeat "v" 50]
+            }
+            wait_for_condition 50 100 {
+                [$replica get "diskbacked:99"] eq [string repeat "v" 50]
+            } else {
+                fail "Disk-backed replica did not receive compressed incremental stream"
+            }
+            assert_equal [$primary debug digest] [$replica debug digest]
 
             $replica replicaof no one
         }
+        $primary config set replcompression no
     }
 
     test {Primary receiving capa compression still completes full sync correctly (no-op)} {
@@ -229,14 +248,24 @@ start_server {tags {"repl"} overrides {save ""}} {
                 fail "Initial replication failed"
             }
 
-            # Simulate disconnect + reconnect (partial resync)
-            $replica replicaof no one
-            $replica replicaof $primary_host $primary_port
+            # Break the replication link from the primary side. The replica keeps
+            # its cached primary + offset and auto-reconnects, which exercises the
+            # compressed *partial* resync path (REPLICAOF NO ONE would force a full
+            # resync instead).
+            set partial_before [status $primary sync_partial_ok]
+            $primary client kill type replica
 
             wait_for_condition 50 100 {
                 [s 0 master_link_status] eq {up}
             } else {
                 fail "Reconnection failed"
+            }
+
+            # Confirm a partial resync actually happened (not a silent full sync)
+            wait_for_condition 50 100 {
+                [status $primary sync_partial_ok] > $partial_before
+            } else {
+                fail "Expected a partial resync after reconnect, but none occurred"
             }
 
             # Write more data after partial resync
@@ -514,77 +543,103 @@ start_server {tags {"repl"} overrides {save ""}} {
 }
 
 # ============================================================
-# Thread Affinity Tests
+# Multi-replica compressed replication tests
 # ============================================================
 
-# Test 1: Affinity config CRUD
-start_server {overrides {save ""}} {
-
-    test {repl-compression-thread-affinity defaults to yes} {
-        assert_equal "yes" [lindex [r config get repl-compression-thread-affinity] 1]
-    }
-
-    test {repl-compression-thread-affinity is runtime-modifiable} {
-        r config set repl-compression-thread-affinity no
-        assert_equal "no" [lindex [r config get repl-compression-thread-affinity] 1]
-        r config set repl-compression-thread-affinity yes
-        assert_equal "yes" [lindex [r config get repl-compression-thread-affinity] 1]
-    }
-}
-
-# Test 1 continued: Toggling affinity off does not break replication
-start_server {tags {"repl"} overrides {save "" io-threads 4 io-threads-always-active yes replcompression yes repl-compression-thread-affinity yes}} {
+# Disabling replcompression at runtime disconnects compressed replicas. The
+# disconnect is deferred until after CONFIG SET commits (so a rolled-back
+# multi-option CONFIG SET drops nothing), then the replica reconnects plaintext.
+start_server {tags {"repl"} overrides {save "" replcompression yes}} {
     set primary [srv 0 client]
     set primary_host [srv 0 host]
     set primary_port [srv 0 port]
 
-    test {Toggling affinity off does not break replication} {
+    test {Disabling replcompression disconnects compressed replicas} {
         start_server {overrides {save "" replcompression yes repl-diskless-load swapdb}} {
             set replica [srv 0 client]
             $replica replicaof $primary_host $primary_port
             wait_for_sync $replica
 
-            # Generate traffic with affinity on
-            for {set i 0} {$i < 100} {incr i} {
-                $primary set "affinity_on:$i" [string repeat "v" 50]
+            wait_for_condition 50 100 {
+                [regexp -all "compression=lz4" [$primary info replication]] >= 1
+            } else {
+                fail "Compression not active before disable"
+            }
+
+            $primary config set replcompression no
+
+            # The compressed replica is dropped, then reconnects as plaintext, so
+            # the link no longer reports compression=lz4.
+            wait_for_condition 50 100 {
+                [regexp -all "compression=lz4" [$primary info replication]] == 0
+            } else {
+                fail "Compressed replica was not disconnected after replcompression no"
             }
             wait_for_condition 50 100 {
-                [$replica get "affinity_on:99"] eq [string repeat "v" 50]
+                [status $replica master_link_status] eq "up"
             } else {
-                fail "Replica did not catch up with affinity on"
+                fail "Replica did not reconnect after compression disabled"
             }
-
-            # Toggle affinity off
-            $primary config set repl-compression-thread-affinity no
-
-            # Generate more traffic with affinity off
-            for {set i 0} {$i < 100} {incr i} {
-                $primary set "affinity_off:$i" [string repeat "w" 50]
-            }
-            wait_for_condition 50 100 {
-                [$replica get "affinity_off:99"] eq [string repeat "w" 50]
-            } else {
-                fail "Replica did not catch up with affinity off"
-            }
-
-            # Verify data integrity via digest
-            assert_equal [$primary debug digest] [$replica debug digest]
 
             $replica replicaof no one
         }
-        $primary config set repl-compression-thread-affinity yes
+        $primary config set replcompression yes
     }
 }
 
-
-
-# Test 4: Multiple replicas distribute across threads and stay in sync
-start_server {tags {"repl"} overrides {save "" io-threads 4 io-threads-always-active yes replcompression yes repl-compression-thread-affinity yes}} {
+# Enabling replcompression at runtime disconnects capable-but-plaintext replicas
+# so they reconnect compressed (symmetric with the disable case; deferred to
+# CONFIG SET commit so a rolled-back command reconnects nothing).
+start_server {tags {"repl"} overrides {save "" replcompression no}} {
     set primary [srv 0 client]
     set primary_host [srv 0 host]
     set primary_port [srv 0 port]
 
-    test {Multiple replicas with affinity all stay in sync under load} {
+    test {Enabling replcompression reconnects capable replicas compressed} {
+        start_server {overrides {save "" replcompression yes repl-diskless-load swapdb}} {
+            set replica [srv 0 client]
+            $replica replicaof $primary_host $primary_port
+            wait_for_sync $replica
+
+            # Primary compression is off, so although the replica advertised the
+            # capability the negotiated link is plaintext.
+            wait_for_condition 50 100 {
+                [status $replica master_link_status] eq "up"
+            } else {
+                fail "Replica did not sync"
+            }
+            assert_equal 0 [regexp -all "compression=lz4" [$primary info replication]]
+
+            # Enable on the primary: the capable replica is dropped and reconnects
+            # over a compressed stream.
+            $primary config set replcompression yes
+            wait_for_condition 50 100 {
+                [regexp -all "compression=lz4" [$primary info replication]] >= 1
+            } else {
+                fail "Capable replica did not reconnect compressed after enable"
+            }
+
+            # Data flows correctly over the new compressed link.
+            $primary set enabled_key enabled_val
+            wait_for_condition 50 100 {
+                [$replica get enabled_key] eq "enabled_val"
+            } else {
+                fail "Compressed replication did not deliver after enable"
+            }
+            assert_equal [$primary debug digest] [$replica debug digest]
+
+            $replica replicaof no one
+        }
+    }
+}
+
+# Test 4: Multiple replicas distribute across threads and stay in sync
+start_server {tags {"repl"} overrides {save "" io-threads 4 io-threads-always-active yes replcompression yes}} {
+    set primary [srv 0 client]
+    set primary_host [srv 0 host]
+    set primary_port [srv 0 port]
+
+    test {Multiple replicas all stay in sync under load} {
         start_server {overrides {save "" replcompression yes repl-diskless-load swapdb}} {
             set replica1 [srv 0 client]
             $replica1 replicaof $primary_host $primary_port
@@ -636,13 +691,13 @@ start_server {tags {"repl"} overrides {save "" io-threads 4 io-threads-always-ac
     }
 }
 
-# Test 5: Affinity survives replica disconnect/reconnect
-start_server {tags {"repl"} overrides {save "" io-threads 4 io-threads-always-active yes replcompression yes repl-compression-thread-affinity yes}} {
+# Test 5: Compressed replication survives replica disconnect/reconnect
+start_server {tags {"repl"} overrides {save "" io-threads 4 io-threads-always-active yes replcompression yes}} {
     set primary [srv 0 client]
     set primary_host [srv 0 host]
     set primary_port [srv 0 port]
 
-    test {Affinity survives replica disconnect and reconnect} {
+    test {Compressed replication survives replica disconnect and reconnect} {
         start_server {overrides {save "" replcompression yes repl-diskless-load swapdb}} {
             set replica1 [srv 0 client]
             $replica1 replicaof $primary_host $primary_port

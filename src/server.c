@@ -6676,24 +6676,25 @@ sds genValkeyInfoString(dict *section_dict, int all_sections, int everything) {
                 if (replica->repl_data->repl_compressor) {
                     info = sdscatprintf(info,
                                         ",compression=%s"
-                                        ",compressed_bytes=%zu"
-                                        ",uncompressed_bytes=%zu"
+                                        ",compressed_bytes=%lld"
+                                        ",uncompressed_bytes=%lld"
                                         ",compression_ratio=%.2f"
-                                        ",compression_errors=%zu"
+                                        ",compression_errors=%lld"
                                         ",compression_cpu_usec=%lld"
-                                        ",debug_compression_pending_drains=%zu"
-                                        ",debug_thread_switches=%zu",
+                                        ",debug_compression_pending_drains=%lld",
                                         compressionAlgoName(REPL_COMPRESSION_ALGO),
                                         replica->repl_data->repl_compressed_bytes_total,
                                         replica->repl_data->repl_uncompressed_bytes_total,
-                                        replica->repl_data->repl_compressed_bytes_total > 0
-                                            ? (double)replica->repl_data->repl_uncompressed_bytes_total /
-                                                  (double)replica->repl_data->repl_compressed_bytes_total
+                                        replica->repl_data->repl_uncompressed_bytes_total > 0
+                                            ? (double)replica->repl_data->repl_compressed_bytes_total /
+                                                  (double)replica->repl_data->repl_uncompressed_bytes_total
                                             : 0.0,
-                                        replica->repl_data->repl_compression_errors,
-                                        replica->repl_data->repl_compression_cpu_usec,
-                                        replica->repl_data->repl_compression_pending_drains,
-                                        replica->repl_data->repl_compression_thread_switches);
+                                        atomic_load_explicit(&replica->repl_data->repl_compression_errors,
+                                                             memory_order_relaxed),
+                                        atomic_load_explicit(&replica->repl_data->repl_compression_cpu_usec,
+                                                             memory_order_relaxed),
+                                        atomic_load_explicit(&replica->repl_data->repl_compression_pending_drains,
+                                                             memory_order_relaxed));
                 }
                 info = sdscat(info, "\r\n");
                 replica_id++;

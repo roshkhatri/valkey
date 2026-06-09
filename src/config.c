@@ -454,8 +454,6 @@ static int updateClientOutputBufferLimit(sds *args, int arg_len, const char **er
  * within conf file parsing. This is only needed to support the deprecated
  * abnormal aggregate `save T C` functionality. Remove in the future. */
 static int reading_config_file;
-/* Tracks nested config parsing depth (top-level + includes). */
-static int config_parse_depth;
 
 void loadServerConfigFromString(sds config) {
     deprecatedConfig deprecated_configs[] = {
@@ -476,7 +474,6 @@ void loadServerConfigFromString(sds config) {
     int argc;
 
     reading_config_file = 1;
-    config_parse_depth++;
     lines = sdssplitlen(config, sdslen(config), "\n", 1, &totlines);
 
     for (i = 0; i < totlines; i++) {
@@ -635,13 +632,10 @@ void loadServerConfigFromString(sds config) {
     if (server.hz > CONFIG_MAX_HZ) server.hz = CONFIG_MAX_HZ;
 
     sdsfreesplitres(lines, totlines);
-    config_parse_depth--;
-    reading_config_file = config_parse_depth > 0;
+    reading_config_file = 0;
     return;
 
 loaderr:
-    config_parse_depth--;
-    reading_config_file = config_parse_depth > 0;
     if (argv) sdsfreesplitres(argv, argc);
     fprintf(stderr, "\n*** FATAL CONFIG FILE ERROR (Version %s) ***\n", VALKEY_VERSION);
     if (i < totlines) {
@@ -800,6 +794,13 @@ static void restoreBackupConfig(standardConfig **set_configs,
  * CONFIG SET implementation
  *----------------------------------------------------------------------------*/
 
+/* Set by the replcompression apply callback when the setting changes. Switching
+ * a live link between plaintext and compressed requires a reconnect, which is
+ * irreversible, so the reconcile is deferred until after the whole CONFIG SET
+ * commits (see configSetCommand); a mid-apply rollback re-runs the apply, and
+ * the reconcile is simply never executed on the error path. */
+static int repl_compression_reconcile_pending = 0;
+
 void configSetCommand(client *c) {
     const char *errstr = NULL;
     const char *invalid_arg_name = NULL;
@@ -917,6 +918,10 @@ void configSetCommand(client *c) {
         }
     }
 
+    /* Reset deferred side-effect state before applies run; apply callbacks set
+     * it, and it is consumed only on a successful commit below. */
+    repl_compression_reconcile_pending = 0;
+
     /* Apply all configs after being set */
     for (i = 0; i < config_count && apply_fns[i] != NULL; i++) {
         if (!apply_fns[i](&errstr)) {
@@ -939,6 +944,11 @@ void configSetCommand(client *c) {
     ValkeyModuleConfigChangeV1 cc = {.num_changes = config_count, .config_names = config_names};
     moduleFireServerEvent(VALKEYMODULE_EVENT_CONFIG, VALKEYMODULE_SUBEVENT_CONFIG_CHANGE, &cc);
     addReply(c, shared.ok);
+    /* CONFIG SET committed: now safe to run deferred irreversible side effects. */
+    if (repl_compression_reconcile_pending) {
+        repl_compression_reconcile_pending = 0;
+        reconcileReplicaCompression();
+    }
     goto end;
 
 err:
@@ -2470,6 +2480,18 @@ static int isValidAnnouncedNodename(char *val, const char **err) {
     return 1;
 }
 
+static int isValidAnnouncedIp(char *val, const char **err) {
+    if (sdslen(val) >= NET_IP_STR_LEN) {
+        *err = "cluster-announce-ip is too long";
+        return 0;
+    }
+    if (!(isValidAuxString(val, sdslen(val)))) {
+        *err = "cluster-announce-ip contains invalid character";
+        return 0;
+    }
+    return 1;
+}
+
 static int isValidAnnouncedHostname(char *val, const char **err) {
     if (strlen(val) >= NET_HOST_STR_LEN) {
         *err = "Hostnames must be less than " STRINGIFY(NET_HOST_STR_LEN) " characters";
@@ -2584,9 +2606,11 @@ static int updateJemallocBgThread(const char **err) {
 
 static int updateReplCompression(const char **err) {
     UNUSED(err);
-    if (!server.repl_compression) {
-        markCompressedReplicasForDisconnect();
-    }
+    /* Switching existing replicas between plaintext and compressed requires a
+     * reconnect, which is irreversible. Only record intent here; configSetCommand
+     * runs the reconcile after the command commits, so a rolled-back CONFIG SET
+     * disconnects nothing. */
+    repl_compression_reconcile_pending = 1;
     return 1;
 }
 
@@ -3282,7 +3306,6 @@ standardConfig static_configs[] = {
     createBoolConfig("protected-mode", NULL, MODIFIABLE_CONFIG, server.protected_mode, 1, NULL, NULL),
     createBoolConfig("rdbcompression", NULL, MODIFIABLE_CONFIG, server.rdb_compression, 1, NULL, NULL),
     createBoolConfig("replcompression", NULL, MODIFIABLE_CONFIG, server.repl_compression, 0, NULL, updateReplCompression),
-    createBoolConfig("repl-compression-thread-affinity", NULL, MODIFIABLE_CONFIG, server.repl_compression_thread_affinity, 1, NULL, NULL),
     createBoolConfig("rdb-del-sync-files", NULL, MODIFIABLE_CONFIG, server.rdb_del_sync_files, 0, NULL, NULL),
     createBoolConfig("activerehashing", NULL, MODIFIABLE_CONFIG, server.activerehashing, 1, NULL, NULL),
     createBoolConfig("stop-writes-on-bgsave-error", NULL, MODIFIABLE_CONFIG, server.stop_writes_on_bgsave_err, 1, NULL, NULL),
@@ -3339,7 +3362,7 @@ standardConfig static_configs[] = {
     createStringConfig("pidfile", NULL, IMMUTABLE_CONFIG, EMPTY_STRING_IS_NULL, server.pidfile, NULL, NULL, NULL),
     createStringConfig("replica-announce-ip", "slave-announce-ip", MODIFIABLE_CONFIG, EMPTY_STRING_IS_NULL, server.replica_announce_ip, NULL, NULL, NULL),
     createStringConfig("primaryuser", "masteruser", MODIFIABLE_CONFIG | SENSITIVE_CONFIG, EMPTY_STRING_IS_NULL, server.primary_user, NULL, NULL, NULL),
-    createStringConfig("cluster-announce-ip", NULL, MODIFIABLE_CONFIG, EMPTY_STRING_IS_NULL, server.cluster_announce_ip, NULL, NULL, updateClusterIp),
+    createStringConfig("cluster-announce-ip", NULL, MODIFIABLE_CONFIG, EMPTY_STRING_IS_NULL, server.cluster_announce_ip, NULL, isValidAnnouncedIp, updateClusterIp),
     createStringConfig("cluster-announce-client-ipv4", NULL, MODIFIABLE_CONFIG, EMPTY_STRING_IS_NULL, server.cluster_announce_client_ipv4, NULL, isValidIpV4, updateClusterClientIpV4),
     createStringConfig("cluster-announce-client-ipv6", NULL, MODIFIABLE_CONFIG, EMPTY_STRING_IS_NULL, server.cluster_announce_client_ipv6, NULL, isValidIpV6, updateClusterClientIpV6),
     createStringConfig("cluster-config-file", NULL, IMMUTABLE_CONFIG, ALLOW_EMPTY_STRING, server.cluster_configfile, "nodes.conf", isValidClusterConfigFile, NULL),

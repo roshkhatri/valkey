@@ -11,16 +11,16 @@
 #include "rio.h"
 
 typedef struct {
-    rio base; /* Must be first — allows casting to (rio *). */
+    rio base; /* Must be first, allows casting to (rio *). */
     rio *inner;
-    streamWriter *writer;
+    streamWriter writer;
     bool finalized;
 } compressRio;
 
 typedef struct {
     rio base; /* Must be first. */
     rio *inner;
-    streamReader *reader;
+    streamReader reader;
 } decompressRio;
 
 typedef enum {
@@ -29,18 +29,20 @@ typedef enum {
     DECOMPRESS_RIO_INIT_INCOMPATIBLE = 1,
 } decompressRioInitResult;
 
-int rioInitWithCompress(compressRio *cr, rio *inner, const streamWriterConfig *cfg);
+/* Returns 0 on success. On failure the compressRio is left zeroed and the
+ * caller must not call compressRioFree. */
+int rioInitWithCompression(compressRio *cr, rio *inner, streamWriterConfig *cfg);
 int compressRioFinish(compressRio *cr);
-void compressRioDestroy(compressRio *cr);
+void compressRioFree(compressRio *cr);
 
 /* Probes the wrapped rio so the caller learns up front whether it is plain,
  * compressed, or carrying an envelope this build cannot read. */
-decompressRioInitResult rioInitWithDecompress(decompressRio *dr,
-                                              rio *inner,
-                                              const streamReaderConfig *cfg,
-                                              streamReaderInfo *info);
-streamReaderError decompressRioGetError(const decompressRio *dr);
+decompressRioInitResult rioInitWithDecompression(decompressRio *dr,
+                                                 rio *inner,
+                                                 streamReaderConfig *cfg,
+                                                 streamReaderInfo *info);
+streamReaderError decompressRioGetError(decompressRio *dr);
 int decompressRioValidateEnd(decompressRio *dr);
-void decompressRioDestroy(decompressRio *dr);
+void decompressRioFree(decompressRio *dr);
 
 #endif /* COMPRESSION_RIO_H */

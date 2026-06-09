@@ -2,7 +2,7 @@
 # two replicas don't make replication buffer size double, and when there is no replica,
 # replica buffer will shrink.
 foreach dualchannel {"yes" "no"} {
-start_server {tags {"repl external:skip"}} {
+start_server {tags {"repl external:skip" repl-compression}} {
 start_server {} {
 start_server {} {
 start_server {} {
@@ -109,7 +109,7 @@ start_server {} {
 # become smaller when master disconnects with slow replicas since output buffer
 # limit is reached.
 foreach dualchannel {yes no} {
-start_server {tags {"repl external:skip"}} {
+start_server {tags {"repl external:skip" repl-compression}} {
 start_server {} {
 start_server {} {
     set replica1 [srv -2 client]

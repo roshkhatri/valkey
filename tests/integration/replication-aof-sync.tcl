@@ -17,7 +17,7 @@ proc get_aof_manifest_path {r} {
     return [file join $dir $appenddirname $appendfilename$::manifest_suffix]
 }
 
-tags {"repl external:skip"} {
+tags {"repl external:skip" repl-compression} {
 
     # Test 1: Disk-based full sync with aof-use-rdb-preamble yes should
     # reuse the RDB file as AOF base file
@@ -188,6 +188,10 @@ tags {"repl external:skip"} {
                     fail "Expected streaming-compressed sync RDB fallback log not found"
                 }
 
+                # The positive wait above proves restartAOFWithSyncRdb has run and
+                # taken the fallback branch; only after that ordering is the negative
+                # check below meaningful (otherwise it could pass simply because the
+                # log line hasn't been written yet).
                 assert {![log_file_matches $replica_log "*Reused RDB file from primary sync as AOF base file*"]}
                 waitForBgrewriteaof $replica
                 set manifest_path [get_aof_manifest_path $replica]

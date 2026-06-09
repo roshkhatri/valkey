@@ -1227,6 +1227,8 @@ typedef struct ClientPubSubData {
 
 typedef struct streamWriter streamWriter;
 typedef struct streamReader streamReader;
+typedef struct replCompressor replCompressor;
+typedef struct replDecompressor replDecompressor;
 
 typedef struct ClientReplicationData {
     int repl_state;                      /* Replication state if this is a replica. */
@@ -1260,23 +1262,21 @@ typedef struct ClientReplicationData {
                                            i.e. the next offset to send. */
     sds replica_nodeid;                  /* Node id in cluster mode. */
     /* Incremental replication compression state (primary-side, per-replica) */
-    streamWriter *repl_compressor;  /* Per-replica replication compressor. */
-    sds compressed_buf;             /* Pending compressed bytes for this replica. */
-    size_t compressed_buf_pos;      /* Next byte to write from compressed_buf. */
-    size_t compressed_raw_bytes;    /* Raw bytes represented by compressed_buf. */
-    _Atomic(int) compression_error; /* Async compression error flag.
-                                     * Set by IO thread inside writeToReplicaCompressed,
-                                     * read by main thread in postWriteToReplica.
-                                     * Atomic to make the cross-thread ordering explicit. */
+    replCompressor *repl_compressor; /* Per-replica replication compressor (NULL if uncompressed). */
+    _Atomic(int) compression_error;  /* Async compression error flag.
+                                      * Set by IO thread inside writeToReplicaCompressed,
+                                      * read by main thread in postWriteToReplica.
+                                      * Atomic to make the cross-thread ordering explicit. */
     /* Compression metrics (primary side, per-replica) */
-    size_t repl_compressed_bytes_total;      /* Total compressed bytes sent */
-    size_t repl_uncompressed_bytes_total;    /* Total raw bytes before compression */
-    size_t repl_compression_errors;          /* Compression failure count */
-    long long repl_compression_cpu_usec;     /* Cumulative CPU time in compression (microseconds) */
-    size_t repl_compression_pending_drains;  /* Times the resume-pending path ran (backpressure indicator) */
-    int last_processed_tid;                  /* Last thread (0=main, 1..N=IO) that processed a compressed write. -1=uninit. */
-    int affinity_tid;                        /* Sticky IO thread ID for compressed replica writes. -1 = no owner. */
-    size_t repl_compression_thread_switches; /* Times the processing thread changed for this replica. */
+    long long repl_compressed_bytes_total;   /* Total compressed bytes sent (main thread only). */
+    long long repl_uncompressed_bytes_total; /* Total raw bytes before compression (main thread only). */
+    /* The next three are updated on IO threads (writeToReplicaCompressed) and
+     * read by INFO on the main thread, so they are atomic. Relaxed ordering is
+     * sufficient: they are best-effort diagnostic counters with no dependency on
+     * other memory. */
+    _Atomic(long long) repl_compression_errors;         /* Compression failure count. */
+    _Atomic(long long) repl_compression_cpu_usec;       /* Cumulative CPU time in compression (microseconds). */
+    _Atomic(long long) repl_compression_pending_drains; /* Times the resume-pending path ran (backpressure indicator). */
 } ClientReplicationData;
 
 typedef struct ClientModuleData {
@@ -2080,7 +2080,6 @@ struct valkeyServer {
     int rdb_compression_algo;             /* RDB compression algorithm (compressionAlgo):
                                            * ALGO_LZF (default), ALGO_LZ4 */
     int repl_compression;                 /* Use compression for replication? 0=no (default) */
-    int repl_compression_thread_affinity; /* Pin compressed replicas to one IO thread. 1=yes (default) */
     int rdb_checksum;                     /* Use RDB checksum? */
     int rdb_del_sync_files;               /* Remove RDB files used only for SYNC if
                                              the instance does not use persistence. */
@@ -2220,8 +2219,7 @@ struct valkeyServer {
                                             * when it receives an error on the replication stream */
     int repl_ignore_disk_write_error;      /* Configures whether replicas panic when unable to
                                             * persist writes to AOF. */
-    streamReader *repl_stream_decoder;     /* Replica-side compressed replication decoder (push-mode). */
-    sds repl_stream_decode_buf;            /* Scratch buffer for decoded replication bytes. */
+    replDecompressor *repl_decompressor;   /* Replica-side compressed replication decoder (push-mode). */
     size_t repl_decompression_errors;      /* Decompression failures (replica side). */
     long long repl_decompression_cpu_usec; /* Cumulative μs spent in replDecompressQueryBuf. */
     size_t repl_decompressed_bytes_total;  /* Total decompressed bytes processed (replica side). */
@@ -3036,14 +3034,13 @@ int getClientTypeByName(char *name);
 char *getClientTypeName(int client_class);
 void flushReplicasOutputBuffers(void);
 void disconnectReplicas(void);
-void markCompressedReplicasForDisconnect(void);
+void reconcileReplicaCompression(void);
 int replInitCompression(client *c, compressionAlgo algo, int level);
 void replDestroyCompression(client *c);
-void replBalanceAffinity(void);
 int replDecompressQueryBuf(client *c, size_t new_data_start);
 int replInitDecompression(void);
 void replDestroyDecompression(void);
-void replRefreshDecompression(void);
+int replRefreshDecompression(void);
 void evictClients(void);
 int listenToPort(connListener *fds);
 void pauseActions(pause_purpose purpose, mstime_t end, uint32_t actions);
@@ -4178,7 +4175,6 @@ void watchCommand(client *c);
 void unwatchCommand(client *c);
 void clusterCommand(client *c);
 void clusterKeySlotCommand(client *c);
-void clusterFlushslotCommand(client *c);
 void clusterSlotStatsCommand(client *c);
 void clusterscanCommand(client *c);
 void restoreCommand(client *c);

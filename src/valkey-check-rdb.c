@@ -96,10 +96,6 @@ struct {
 
 static unsigned long long rdbCheckOffset(void) {
     if (!rdbstate.rio) return 0;
-
-    off_t pos = rioTell(rdbstate.rio);
-    if (pos >= 0) return (unsigned long long)pos;
-
     return (unsigned long long)rdbstate.rio->processed_bytes;
 }
 
@@ -860,7 +856,7 @@ int redis_check_rdb(char *rdbfilename, FILE *fp) {
         goto err;
     }
 
-    rdbInputStreamDestroy(&input);
+    rdbInputStreamFree(&input);
     rdbstate.rio = &file_rdb;
     if (closefile) fclose(fp);
     stopLoading(1);
@@ -875,7 +871,7 @@ eoferr: /* unexpected end of file is handled here with a fatal exit */
         rdbCheckError("Unexpected EOF reading RDB file");
     }
 err:
-    rdbInputStreamDestroy(&input);
+    rdbInputStreamFree(&input);
     rdbstate.rio = &file_rdb;
     if (closefile) fclose(fp);
     stopLoading(0);

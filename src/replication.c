@@ -43,6 +43,7 @@
 #include "cluster_migrateslots.h"
 #include "io_threads.h"
 #include "compression_stream.h"
+#include "compression_repl.h"
 
 #include <memory.h>
 #include <sys/time.h>
@@ -87,11 +88,18 @@ ConnectionType *connTypeOfReplication(void) {
  * IP address and its listening port which is more clear for the user, for
  * example: "Closing connection with replica 10.1.2.3:6380". */
 
-/* Mark all compressed replicas for asynchronous disconnect. Called from the
- * replcompression config-apply callback; we can't transition existing replicas
- * off compression mid-link, so disconnect and let them reconnect plaintext.
- * Async because the callback runs inside the main event loop. */
-void markCompressedReplicasForDisconnect(void) {
+/* Reconcile each replica's transport with the current replcompression setting
+ * after a runtime change. A live link cannot switch between plaintext and a
+ * compressed VKCS/LZ4 frame mid-stream, so a mismatched replica is dropped and
+ * reconnects to renegotiate:
+ *   - compression disabled: drop replicas still on a compressed stream;
+ *   - compression enabled:  drop online replicas that advertised the capability
+ *     but are still plaintext, so they come back compressed.
+ * Disconnect is async because we run inside the main event loop; the iteration
+ * is safe since freeClientAsync does not remove from server.replicas
+ * synchronously. Replicas still syncing are left alone: they pick up the current
+ * setting when they go online. */
+void reconcileReplicaCompression(void) {
     listIter li;
     listNode *ln;
     int disconnected = 0;
@@ -99,62 +107,26 @@ void markCompressedReplicasForDisconnect(void) {
     listRewind(server.replicas, &li);
     while ((ln = listNext(&li))) {
         client *replica = ln->value;
-        if (replica->repl_data && replica->repl_data->repl_compressor) {
-            serverLog(LL_NOTICE,
-                      "Disconnecting compressed replica %s due to replication compression config change",
-                      replicationGetReplicaName(replica));
-            freeClientAsync(replica);
-            disconnected++;
+        if (!replica->repl_data) continue;
+
+        int has_compressor = replica->repl_data->repl_compressor != NULL;
+        int mismatch;
+        if (server.repl_compression) {
+            mismatch = (replica->repl_data->repl_state == REPLICA_STATE_ONLINE &&
+                        (replica->repl_data->replica_capa & REPLICA_CAPA_COMPRESSION) && !has_compressor);
+        } else {
+            mismatch = has_compressor;
         }
+        if (!mismatch) continue;
+
+        serverLog(LL_NOTICE, "Disconnecting replica %s to renegotiate replication compression (now %s)",
+                  replicationGetReplicaName(replica), server.repl_compression ? "enabled" : "disabled");
+        freeClientAsync(replica);
+        disconnected++;
     }
 
     if (disconnected > 0) {
-        serverLog(LL_NOTICE, "Disconnected %d compressed replicas", disconnected);
-    }
-}
-
-/* Rebalance compressed replica owner threads when distribution becomes skewed.
- * Counts owners per active IO thread; if max - min > 1, evicts replicas from
- * over-loaded threads (sets affinity_tid = -1 so they re-establish on idler
- * threads via shared-inbox dispatch on their next write). */
-void replBalanceAffinity(void) {
-    if (!server.repl_compression_thread_affinity) return;
-    int active = server.active_io_threads_num;
-    if (active <= 2) return; /* nothing to balance with 0 or 1 IO thread */
-
-    int counts[IO_THREADS_MAX_NUM] = {0};
-    listIter li;
-    listNode *ln;
-    listRewind(server.replicas, &li);
-    while ((ln = listNext(&li))) {
-        client *r = listNodeValue(ln);
-        if (!r->repl_data || !r->repl_data->repl_compressor) continue;
-        int tid = r->repl_data->affinity_tid;
-        if (tid > 0 && tid < active) counts[tid]++;
-    }
-
-    int max_c = 0, min_c = INT_MAX;
-    for (int i = 1; i < active; i++) {
-        if (counts[i] > max_c) max_c = counts[i];
-        if (counts[i] < min_c) min_c = counts[i];
-    }
-    if (max_c - min_c <= 1) return; /* balanced enough */
-
-    /* Evict from over-loaded threads */
-    listRewind(server.replicas, &li);
-    while ((ln = listNext(&li))) {
-        client *r = listNodeValue(ln);
-        if (!r->repl_data || !r->repl_data->repl_compressor) continue;
-        int tid = r->repl_data->affinity_tid;
-        if (tid > 0 && tid < active && counts[tid] == max_c) {
-            r->repl_data->affinity_tid = -1;
-            counts[tid]--;
-            /* recompute max */
-            max_c = 0;
-            for (int i = 1; i < active; i++)
-                if (counts[i] > max_c) max_c = counts[i];
-            if (max_c - min_c <= 1) break;
-        }
+        serverLog(LL_NOTICE, "Disconnected %d replicas to reconcile replication compression", disconnected);
     }
 }
 
@@ -190,32 +162,20 @@ static int replicaInitCompressionOnPsync(client *c) {
 
 int replInitDecompression(void) {
     replDestroyDecompression();
-    streamReaderConfig cfg = {
-        .expected_stream_kind = STREAM_KIND_REPL,
-        .allow_passthrough = true,
-        .buffer_size = 0,
-        .push_feed_cap = REPL_STREAM_DECODER_FEED_CAP,
-    };
-    server.repl_stream_decoder = streamReaderCreatePush(&cfg);
-    if (!server.repl_stream_decoder) return C_ERR;
-    server.repl_stream_decode_buf = sdsempty();
-    return C_OK;
+    server.repl_decompressor = replDecompressorCreate(REPL_STREAM_DECODER_FEED_CAP);
+    return server.repl_decompressor ? C_OK : C_ERR;
 }
 
 void replDestroyDecompression(void) {
-    if (server.repl_stream_decoder) {
-        streamReaderDestroy(server.repl_stream_decoder);
-        server.repl_stream_decoder = NULL;
-    }
-    if (server.repl_stream_decode_buf) {
-        sdsfree(server.repl_stream_decode_buf);
-        server.repl_stream_decode_buf = NULL;
+    if (server.repl_decompressor) {
+        replDecompressorDestroy(server.repl_decompressor);
+        server.repl_decompressor = NULL;
     }
 }
 
-void replRefreshDecompression(void) {
+int replRefreshDecompression(void) {
     replDestroyDecompression();
-    replInitDecompression();
+    return replInitDecompression();
 }
 
 char *replicationGetReplicaName(client *c) {
@@ -1590,6 +1550,11 @@ void replconfCommand(client *c) {
                 }
             } else if (!strcasecmp(objectGetVal(c->argv[j + 1]), REPLICA_CAPA_SKIP_RDB_CHECKSUM_STR))
                 c->repl_data->replica_capa |= REPLICA_CAPA_SKIP_RDB_CHECKSUM;
+            /* "compression" (REPLICA_CAPA_COMPRESSION): the replica can decode a
+             * compressed incremental replication stream. Advertised when the
+             * replica has replcompression enabled; the primary compresses only
+             * if it also has replcompression enabled. Optional and backward
+             * compatible: a primary that doesn't understand it just ignores it. */
             else if (!strcasecmp(objectGetVal(c->argv[j + 1]), REPLICA_CAPA_COMPRESSION_STR))
                 c->repl_data->replica_capa |= REPLICA_CAPA_COMPRESSION;
         } else if (!strcasecmp(objectGetVal(c->argv[j]), "ack")) {
@@ -2515,7 +2480,9 @@ void replicaAfterLoadPrimaryRDB(connection *conn, rdbSaveInfo *rsi, int disk_bas
         /* Send the initial ACK immediately to put this replica in online state. */
         replicationSendAck();
         /* Initialize decompression for the incremental stream if compression is active. */
-        if (server.repl_compression) replRefreshDecompression();
+        if (server.repl_compression && replRefreshDecompression() == C_ERR)
+            serverLog(LL_WARNING, "Failed to initialize replication decompression; "
+                                  "compressed stream from primary cannot be decoded");
     }
 
     /* Fire the primary link modules event. */
@@ -3526,7 +3493,7 @@ int streamReplDataBufToDb(client *c) {
         size_t qblen_before = sdslen(c->querybuf);
         c->querybuf = sdscatlen(c->querybuf, o->buf, used);
         c->repl_data->read_reploff += used;
-        if (server.repl_stream_decoder &&
+        if (server.repl_decompressor &&
             replDecompressQueryBuf(c, qblen_before) == C_ERR) {
             serverLog(LL_WARNING, "Dual-channel replication stream decompression failure");
             blockingOperationEnds();
@@ -3889,7 +3856,9 @@ int dualChannelReplMainConnRecvPsyncReply(connection *conn, sds *err) {
             serverCommunicateSystemd("STATUS=PRIMARY <-> REPLICA sync: Partial Resynchronization accepted. Ready to "
                                      "accept connections in read-write mode.\n");
         }
-        if (server.repl_compression) replRefreshDecompression();
+        if (server.repl_compression && replRefreshDecompression() == C_ERR)
+            serverLog(LL_WARNING, "Failed to initialize replication decompression; "
+                                  "compressed stream from primary cannot be decoded");
         dualChannelSyncHandlePsync();
         return C_OK;
     }
@@ -4039,7 +4008,7 @@ int syncWithPrimaryHandleSendHandshakeState(connection *conn) {
         lens[argc] = strlen("dual-channel");
         argc++;
     }
-    if (server.repl_compression && use_diskless_load) {
+    if (server.repl_compression) {
         argv[argc] = "capa";
         lens[argc] = strlen("capa");
         argc++;
@@ -4416,7 +4385,9 @@ void syncWithPrimary(connection *conn) {
             serverCommunicateSystemd("STATUS=PRIMARY <-> REPLICA sync: Partial Resynchronization accepted. Ready to "
                                      "accept connections in read-write mode.\n");
         }
-        if (server.repl_compression) replRefreshDecompression();
+        if (server.repl_compression && replRefreshDecompression() == C_ERR)
+            serverLog(LL_WARNING, "Failed to initialize replication decompression; "
+                                  "compressed stream from primary cannot be decoded");
         return;
     }
 
