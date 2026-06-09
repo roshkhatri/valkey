@@ -5,6 +5,7 @@
         "group": "sorted_set",
         "since": "1.2.0",
         "arity": 3,
+        "member_key_index": 2,
         "function": "zscoreCommand",
         "command_flags": [
             "READONLY",

@@ -5,6 +5,8 @@
         "group": "sorted_set",
         "since": "1.2.0",
         "arity": 4,
+        "member_key_index": 3,
+        "member_key_count": 1,
         "function": "zincrbyCommand",
         "command_flags": [
             "WRITE",

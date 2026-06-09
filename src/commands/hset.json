@@ -5,6 +5,8 @@
         "group": "hash",
         "since": "2.0.0",
         "arity": -4,
+        "member_key_index": 2,
+        "member_key_step": 2,
         "function": "hsetCommand",
         "history": [
             [

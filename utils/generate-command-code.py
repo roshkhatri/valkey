@@ -496,6 +496,13 @@ class Command(object):
         if self.args:
             s += ".args=%s," % self.arg_table_name()
 
+        if self.desc.get("member_key_index"):
+            s += ".member_key_index=%d," % self.desc["member_key_index"]
+            if self.desc.get("member_key_step"):
+                s += ".member_key_step=%d," % self.desc["member_key_step"]
+            if self.desc.get("member_key_count"):
+                s += ".member_key_count=%d," % self.desc["member_key_count"]
+
         if self.reply_schema and args.with_reply_schema:
             s += ".reply_schema=&%s," % self.reply_schema_name()
 

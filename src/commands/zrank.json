@@ -5,6 +5,8 @@
         "group": "sorted_set",
         "since": "2.0.0",
         "arity": -3,
+        "member_key_index": 2,
+        "member_key_count": 1,
         "function": "zrankCommand",
         "history": [
             [

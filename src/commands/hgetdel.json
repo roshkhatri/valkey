@@ -5,6 +5,7 @@
         "group": "hash",
         "since": "9.1.0",
         "arity": -5,
+        "member_key_index": 4,
         "function": "hgetdelCommand",
         "command_flags": [
             "WRITE",

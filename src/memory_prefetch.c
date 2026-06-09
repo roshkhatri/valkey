@@ -29,7 +29,13 @@ typedef struct KeyPrefetchInfo {
     PrefetchState state; /* Current state of the prefetch operation */
     hashtableIncrementalFindState hashtab_state;
     /* Fields for deep prefetching of inner hashtables (hash/zset) */
-    client *client;
+    robj **argv;           /* argv of the command that owns this key */
+    int argc;              /* argc of the command that owns this key */
+    int member_key_index;  /* argv index of the first field/member */
+    int member_key_step;   /* stride between fields (1 = consecutive, 2 = interleaved) */
+    int member_key_count;  /* max fields to prefetch (-1 = all remaining) */
+    int current_field_idx; /* current argv index being prefetched */
+    hashtable *inner_ht;   /* cached inner hashtable pointer */
     DeepPrefetchPhase deep_phase;
     hashtableIncrementalFindState inner_hashtab_state;
 } KeyPrefetchInfo;
@@ -45,7 +51,11 @@ typedef struct PrefetchCommandsBatch {
     int *slots;                     /* Array of slots for each key */
     void **keys;                    /* Array of keys to prefetch in the current batch */
     client **clients;               /* Array of clients in the current batch */
-    client **key_clients;           /* Client that owns each key (for deep prefetch argv[2] access) */
+    robj ***key_argv;               /* Per-key argv pointer (correct for queued commands) */
+    int *key_argc;                  /* Per-key argc (correct for queued commands) */
+    int *key_member_indices;        /* member_key_index from cmd for each key (0 = no deep prefetch) */
+    int *key_member_steps;          /* member_key_step from cmd for each key */
+    int *key_member_counts;         /* member_key_count from cmd for each key */
     hashtable **keys_tables;        /* Main table for each key */
     KeyPrefetchInfo *prefetch_info; /* Prefetch info for each key */
 } PrefetchCommandsBatch;
@@ -58,7 +68,11 @@ void freePrefetchCommandsBatch(void) {
     }
 
     zfree(batch->clients);
-    zfree(batch->key_clients);
+    zfree(batch->key_argv);
+    zfree(batch->key_argc);
+    zfree(batch->key_member_indices);
+    zfree(batch->key_member_steps);
+    zfree(batch->key_member_counts);
     zfree(batch->keys);
     zfree(batch->keys_tables);
     zfree(batch->slots);
@@ -78,7 +92,11 @@ void prefetchCommandsBatchInit(void) {
     batch = zcalloc(sizeof(PrefetchCommandsBatch));
     batch->max_prefetch_size = max_prefetch_size;
     batch->clients = zcalloc(max_prefetch_size * sizeof(client *));
-    batch->key_clients = zcalloc(max_prefetch_size * sizeof(client *));
+    batch->key_argv = zcalloc(max_prefetch_size * sizeof(robj **));
+    batch->key_argc = zcalloc(max_prefetch_size * sizeof(int));
+    batch->key_member_indices = zcalloc(max_prefetch_size * sizeof(int));
+    batch->key_member_steps = zcalloc(max_prefetch_size * sizeof(int));
+    batch->key_member_counts = zcalloc(max_prefetch_size * sizeof(int));
     batch->keys = zcalloc(max_prefetch_size * sizeof(void *));
     batch->keys_tables = zcalloc(max_prefetch_size * sizeof(hashtable *));
     batch->slots = zcalloc(max_prefetch_size * sizeof(int));
@@ -129,7 +147,13 @@ static void initBatchInfo(hashtable **tables) {
             continue;
         }
         info->state = PREFETCH_ENTRY;
-        info->client = batch->key_clients[i];
+        info->argv = batch->key_argv[i];
+        info->argc = batch->key_argc[i];
+        info->member_key_index = batch->key_member_indices[i];
+        info->member_key_step = batch->key_member_steps[i];
+        info->member_key_count = batch->key_member_counts[i];
+        info->current_field_idx = 0;
+        info->inner_ht = NULL;
         info->deep_phase = DEEP_PREFETCH_HEADER;
         hashtableIncrementalFindInit(&info->hashtab_state, tables[i], batch->keys[i]);
     }
@@ -149,7 +173,8 @@ static void prefetchEntry(KeyPrefetchInfo *info) {
          * deep prefetch for hash/zset inner hashtables. Check if applicable. */
         void *entry;
         if (hashtableIncrementalFindGetResult(&info->hashtab_state, &entry) &&
-            info->client && info->client->argc >= 3 && canDeepPrefetch(entry)) {
+            info->member_key_index > 0 &&
+            info->argc > info->member_key_index && canDeepPrefetch(entry)) {
             info->state = PREFETCH_VALUE_DEEP;
         } else {
             markKeyAsdone(info);
@@ -168,7 +193,8 @@ static void prefetchValue(KeyPrefetchInfo *info) {
             valkey_prefetch(objectGetVal(val));
         }
         /* For types with inner hashtables, transition to deep prefetch */
-        if (info->client && info->client->argc >= 3 && canDeepPrefetch(val)) {
+        if (info->member_key_index > 0 &&
+            info->argc > info->member_key_index && canDeepPrefetch(val)) {
             info->state = PREFETCH_VALUE_DEEP;
             return;
         }
@@ -179,7 +205,8 @@ static void prefetchValue(KeyPrefetchInfo *info) {
 
 /* Deep prefetch: walk the inner hashtable for hash/zset types.
  * Uses a 3-phase approach (HEADER -> INIT -> STEP) to amortize cache misses
- * across multiple commands in the batch. */
+ * across multiple commands in the batch. Supports multiple fields per command
+ * using member_key_step and member_key_count. */
 static void prefetchValueDeep(KeyPrefetchInfo *info) {
     void *entry;
     if (!hashtableIncrementalFindGetResult(&info->hashtab_state, &entry)) {
@@ -193,24 +220,26 @@ static void prefetchValueDeep(KeyPrefetchInfo *info) {
         /* Phase 1: Prefetch the data structure header (val->ptr) */
         valkey_prefetch(objectGetVal(val));
         info->deep_phase = DEEP_PREFETCH_INIT;
+        info->current_field_idx = info->member_key_index;
         moveToNextKey();
         return;
 
     case DEEP_PREFETCH_INIT: {
         /* Phase 2: Header is warm. Get inner hashtable and init incremental find. */
-        hashtable *ht = NULL;
-        if (val->encoding == OBJ_ENCODING_HASHTABLE) {
-            ht = objectGetVal(val);
-        } else if (val->encoding == OBJ_ENCODING_SKIPLIST) {
-            zset *zs = objectGetVal(val);
-            ht = zs->ht;
+        if (!info->inner_ht) {
+            if (val->encoding == OBJ_ENCODING_HASHTABLE) {
+                info->inner_ht = objectGetVal(val);
+            } else if (val->encoding == OBJ_ENCODING_SKIPLIST) {
+                zset *zs = objectGetVal(val);
+                info->inner_ht = zs->ht;
+            }
+            if (!info->inner_ht || hashtableSize(info->inner_ht) == 0) {
+                markKeyAsdone(info);
+                return;
+            }
         }
-        if (!ht || hashtableSize(ht) == 0) {
-            markKeyAsdone(info);
-            return;
-        }
-        hashtableIncrementalFindInit(&info->inner_hashtab_state, ht,
-                                     objectGetVal(info->client->argv[2]));
+        hashtableIncrementalFindInit(&info->inner_hashtab_state, info->inner_ht,
+                                     objectGetVal(info->argv[info->current_field_idx]));
         info->deep_phase = DEEP_PREFETCH_STEP;
         moveToNextKey();
         return;
@@ -222,12 +251,20 @@ static void prefetchValueDeep(KeyPrefetchInfo *info) {
             moveToNextKey();
             return;
         }
-        /* Done - inner entry is now prefetched */
+        /* Current field done. Check if there are more fields to prefetch. */
+        int next_idx = info->current_field_idx + info->member_key_step;
+        int fields_done = (next_idx - info->member_key_index) / info->member_key_step;
+        if (next_idx < info->argc &&
+            (info->member_key_count < 0 || fields_done < info->member_key_count)) {
+            /* More fields to prefetch - loop back to INIT */
+            info->current_field_idx = next_idx;
+            info->deep_phase = DEEP_PREFETCH_INIT;
+            moveToNextKey();
+            return;
+        }
         markKeyAsdone(info);
         return;
     }
-
-    markKeyAsdone(info);
 }
 
 /* Prefetch hashtable data for an array of keys.
@@ -329,7 +366,7 @@ void processClientsCommandsBatch(void) {
 }
 
 /* Get a command's keys and add them to the current prefetching batch. */
-static void addCommandToBatch(client *c, struct serverCommand *cmd, robj **argv, int argc, serverDb *db, int slot) {
+static void addCommandToBatch(struct serverCommand *cmd, robj **argv, int argc, serverDb *db, int slot) {
     getKeysResult result;
     initGetKeysResult(&result);
     int num_keys = getKeysFromCommand(cmd, argv, argc, &result);
@@ -337,7 +374,11 @@ static void addCommandToBatch(client *c, struct serverCommand *cmd, robj **argv,
         batch->keys[batch->key_count] = argv[result.keys[i].pos];
         batch->slots[batch->key_count] = slot >= 0 ? slot : 0;
         batch->keys_tables[batch->key_count] = kvstoreGetHashtable(db->keys, batch->slots[batch->key_count]);
-        batch->key_clients[batch->key_count] = c;
+        batch->key_argv[batch->key_count] = argv;
+        batch->key_argc[batch->key_count] = argc;
+        batch->key_member_indices[batch->key_count] = cmd->member_key_index;
+        batch->key_member_steps[batch->key_count] = cmd->member_key_step ? cmd->member_key_step : 1;
+        batch->key_member_counts[batch->key_count] = cmd->member_key_count ? cmd->member_key_count : -1;
         batch->key_count++;
     }
     getKeysFreeResult(&result);
@@ -355,7 +396,7 @@ int addCommandToBatchAndProcessIfFull(client *c) {
     /* Client's next command */
     if (c->parsed_cmd && !(c->read_flags & READ_FLAGS_BAD_ARITY)) {
         c->read_flags |= READ_FLAGS_PREFETCHED;
-        addCommandToBatch(c, c->parsed_cmd, c->argv, c->argc, c->db, c->slot);
+        addCommandToBatch(c->parsed_cmd, c->argv, c->argc, c->db, c->slot);
     }
 
     /* Commands in the queue. */
@@ -363,7 +404,7 @@ int addCommandToBatchAndProcessIfFull(client *c) {
         parsedCommand *p = &c->cmd_queue.cmds[j];
         if (!p->cmd) continue; /* Error or incomplete command. */
         p->read_flags |= READ_FLAGS_PREFETCHED;
-        addCommandToBatch(c, p->cmd, p->argv, p->argc, c->db, p->slot);
+        addCommandToBatch(p->cmd, p->argv, p->argc, c->db, p->slot);
     }
 
     /* If the batch is full, process it.

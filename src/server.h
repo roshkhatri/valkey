@@ -2696,6 +2696,11 @@ struct serverCommand {
      * Used for Cluster redirect (may be NULL) */
     serverGetKeysProc *getkeys_proc;
     int num_args; /* Length of args array. */
+    /* Deep prefetch: argv index of the first field/member for inner hashtable lookup.
+     * 0 means disabled. Used by the prefetch system to find the lookup key. */
+    int member_key_index;
+    int member_key_step;  /* stride between fields (default 1) */
+    int member_key_count; /* max fields to prefetch (-1 = all remaining, 0 = use default) */
     /* Array of subcommands (may be NULL) */
     struct serverCommand *subcommands;
     /* Array of arguments (may be NULL) */
