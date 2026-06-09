@@ -51,8 +51,7 @@ tags {"check-rdb network external:skip logreqres:skip"} {
     start_server {} {
         test "test valkey-check-rdb validates LZ4-compressed RDB frame" {
             r flushall
-            r config set rdbcompression yes
-            r config set rdb-compression-algo lz4
+            r config set rdbcompression lz4-stream
             r set lz4:key [string repeat "payload " 200]
             r save
 
@@ -65,7 +64,7 @@ tags {"check-rdb network external:skip logreqres:skip"} {
             assert_no_match {*Checksum OK*} $result
 
             # Keep subsequent tests on default path unless they explicitly change it.
-            r config set rdb-compression-algo lzf
+            r config set rdbcompression yes
         }
 
         test "test valkey-check-rdb stats with empty RDB" {
@@ -166,8 +165,7 @@ tags {"check-rdb network external:skip logreqres:skip"} {
     start_server {overrides {save "" rdbchecksum no}} {
         test "test valkey-check-rdb reports checksum-disabled compressed RDBs accurately" {
             r flushall
-            r config set rdbcompression yes
-            r config set rdb-compression-algo lz4
+            r config set rdbcompression lz4-stream
             r set lz4:no-cksum [string repeat "payload " 200]
             r save
 

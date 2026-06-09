@@ -90,7 +90,7 @@ ConnectionType *connTypeOfReplication(void) {
 
 /* Reconcile each replica's transport with the current replcompression setting
  * after a runtime change. A live link cannot switch between plaintext and a
- * compressed VKCS/LZ4 frame mid-stream, so a mismatched replica is dropped and
+ * compressed VCS/LZ4 frame mid-stream, so a mismatched replica is dropped and
  * reconnects to renegotiate:
  *   - compression disabled: drop replicas still on a compressed stream;
  *   - compression enabled:  drop online replicas that advertised the capability

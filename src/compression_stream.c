@@ -10,32 +10,31 @@
 #include <limits.h>
 #include <string.h>
 
-/* ===== VKCS envelope ===== */
+/* ===== VCS envelope ===== */
 
-static const uint8_t VKCS_MAGIC[VKCS_MAGIC_SIZE] = {
-    VKCS_MAGIC_0,
-    VKCS_MAGIC_1,
-    VKCS_MAGIC_2,
-    VKCS_MAGIC_3,
+static const uint8_t VCS_MAGIC[VCS_MAGIC_SIZE] = {
+    VCS_MAGIC_0,
+    VCS_MAGIC_1,
+    VCS_MAGIC_2,
 };
 
-/* True when the first len bytes of buf match the VKCS magic. When len is below
- * VKCS_MAGIC_SIZE this only compares that prefix. */
-static bool vkcsHasMagicPrefix(const uint8_t *buf, size_t len) {
-    size_t n = len < VKCS_MAGIC_SIZE ? len : VKCS_MAGIC_SIZE;
-    return memcmp(buf, VKCS_MAGIC, n) == 0;
+/* True when the first len bytes of buf match the VCS magic. When len is below
+ * VCS_MAGIC_SIZE this only compares that prefix. */
+static bool vcsHasMagicPrefix(const uint8_t *buf, size_t len) {
+    size_t n = len < VCS_MAGIC_SIZE ? len : VCS_MAGIC_SIZE;
+    return memcmp(buf, VCS_MAGIC, n) == 0;
 }
 
 typedef enum {
-    VKCS_PROBE_NEED_INPUT = 0,
-    VKCS_PROBE_PASSTHROUGH = 1,
-    VKCS_PROBE_COMPRESSED = 2,
-    VKCS_PROBE_ERROR = 3,
-} vkcsProbeResult;
+    VCS_PROBE_NEED_INPUT = 0,
+    VCS_PROBE_PASSTHROUGH = 1,
+    VCS_PROBE_COMPRESSED = 2,
+    VCS_PROBE_ERROR = 3,
+} vcsProbeResult;
 
 static bool streamReaderProbeHasMagicPrefix(streamReader *reader) {
     if (reader->probe.header_len == 0) return false;
-    return vkcsHasMagicPrefix(reader->probe.header, reader->probe.header_len);
+    return vcsHasMagicPrefix(reader->probe.header, reader->probe.header_len);
 }
 
 static void streamReaderProbeSetPassthrough(streamReader *reader) {
@@ -57,47 +56,46 @@ static void streamReaderProbeSetCompressed(streamReader *reader,
     reader->probe.stream_kind = stream_kind;
 }
 
-static int writeVkcsEnvelope(streamWriterEmitFn emit_fn,
-                             void *ctx,
-                             compressionAlgo algo,
-                             uint8_t stream_kind,
-                             bool codec_checksum_enabled) {
+static int writeVcsEnvelope(streamWriterEmitFn emit_fn,
+                            void *ctx,
+                            compressionAlgo algo,
+                            uint8_t stream_kind,
+                            bool codec_checksum_enabled) {
     if (!compressionAlgoSupportsStreaming(algo)) return -1;
 
-    uint8_t envelope[VKCS_ENVELOPE_SIZE] = {
-        VKCS_MAGIC_0,
-        VKCS_MAGIC_1,
-        VKCS_MAGIC_2,
-        VKCS_MAGIC_3,
-        [VKCS_OFFSET_VERSION] = VKCS_VERSION,
-        [VKCS_OFFSET_ALGO] = (uint8_t)algo,
-        [VKCS_OFFSET_FLAGS] = codec_checksum_enabled ? VKCS_FLAG_CODEC_CHECKSUM : 0,
-        [VKCS_OFFSET_STREAM_KIND] = stream_kind,
+    uint8_t envelope[VCS_ENVELOPE_SIZE] = {
+        VCS_MAGIC_0,
+        VCS_MAGIC_1,
+        VCS_MAGIC_2,
+        [VCS_OFFSET_VERSION] = VCS_VERSION,
+        [VCS_OFFSET_ALGO] = (uint8_t)algo,
+        [VCS_OFFSET_FLAGS] = codec_checksum_enabled ? VCS_FLAG_CODEC_CHECKSUM : 0,
+        [VCS_OFFSET_STREAM_KIND] = stream_kind,
     };
-    return emit_fn(ctx, envelope, VKCS_ENVELOPE_SIZE) == 0 ? 0 : -1;
+    return emit_fn(ctx, envelope, VCS_ENVELOPE_SIZE) == 0 ? 0 : -1;
 }
 
 /* Rejects unknown flag bits so a future format extension fails loud rather
  * than silently corrupting load. */
-static int readVkcsEnvelope(const uint8_t *buf,
-                            size_t len,
-                            compressionAlgo *algo,
-                            uint8_t *stream_kind,
-                            bool *codec_checksum_enabled) {
-    if (len < VKCS_ENVELOPE_SIZE) return -1;
+static int readVcsEnvelope(const uint8_t *buf,
+                           size_t len,
+                           compressionAlgo *algo,
+                           uint8_t *stream_kind,
+                           bool *codec_checksum_enabled) {
+    if (len < VCS_ENVELOPE_SIZE) return -1;
 
-    if (!vkcsHasMagicPrefix(buf, VKCS_MAGIC_SIZE)) return -1;
-    if (buf[VKCS_OFFSET_VERSION] != VKCS_VERSION) return -1;
+    if (!vcsHasMagicPrefix(buf, VCS_MAGIC_SIZE)) return -1;
+    if (buf[VCS_OFFSET_VERSION] != VCS_VERSION) return -1;
 
-    compressionAlgo parsed_algo = (compressionAlgo)buf[VKCS_OFFSET_ALGO];
+    compressionAlgo parsed_algo = (compressionAlgo)buf[VCS_OFFSET_ALGO];
     if (!compressionAlgoSupportsStreaming(parsed_algo)) return -1;
 
-    uint8_t flags = buf[VKCS_OFFSET_FLAGS];
-    if (flags & ~VKCS_FLAG_CODEC_CHECKSUM) return -1;
+    uint8_t flags = buf[VCS_OFFSET_FLAGS];
+    if (flags & ~VCS_FLAG_CODEC_CHECKSUM) return -1;
 
     if (algo) *algo = parsed_algo;
-    if (stream_kind) *stream_kind = buf[VKCS_OFFSET_STREAM_KIND];
-    if (codec_checksum_enabled) *codec_checksum_enabled = (flags & VKCS_FLAG_CODEC_CHECKSUM) != 0;
+    if (stream_kind) *stream_kind = buf[VCS_OFFSET_STREAM_KIND];
+    if (codec_checksum_enabled) *codec_checksum_enabled = (flags & VCS_FLAG_CODEC_CHECKSUM) != 0;
     return 0;
 }
 
@@ -109,8 +107,8 @@ int streamReadEnvelopeInfo(const uint8_t *buf,
     bool codec_checksum_enabled = false;
     compressionAlgo algo = ALGO_NONE;
 
-    if (len < VKCS_ENVELOPE_SIZE ||
-        readVkcsEnvelope(buf, len, &algo, &stream_kind, &codec_checksum_enabled) != 0 ||
+    if (len < VCS_ENVELOPE_SIZE ||
+        readVcsEnvelope(buf, len, &algo, &stream_kind, &codec_checksum_enabled) != 0 ||
         stream_kind != expected_stream_kind) {
         return -1;
     }
@@ -122,22 +120,22 @@ int streamReadEnvelopeInfo(const uint8_t *buf,
     return 0;
 }
 
-/* Incremental: wrapped rios may legally return fewer than VKCS_ENVELOPE_SIZE
+/* Incremental: wrapped rios may legally return fewer than VCS_ENVELOPE_SIZE
  * bytes per read. Consumed bytes are retained in probe->header so passthrough
  * can replay them exactly. */
-static vkcsProbeResult streamReaderProbeFeed(streamReader *reader,
-                                             const uint8_t *src,
-                                             size_t src_len,
-                                             bool input_eof,
-                                             size_t *src_consumed) {
+static vcsProbeResult streamReaderProbeFeed(streamReader *reader,
+                                            const uint8_t *src,
+                                            size_t src_len,
+                                            bool input_eof,
+                                            size_t *src_consumed) {
     size_t consumed = 0;
     *src_consumed = 0;
     if (reader->probe.ready) {
-        return reader->probe.compressed ? VKCS_PROBE_COMPRESSED : VKCS_PROBE_PASSTHROUGH;
+        return reader->probe.compressed ? VCS_PROBE_COMPRESSED : VCS_PROBE_PASSTHROUGH;
     }
 
     while (consumed < src_len) {
-        size_t target = reader->probe.header_len < VKCS_MAGIC_SIZE ? VKCS_MAGIC_SIZE : VKCS_ENVELOPE_SIZE;
+        size_t target = reader->probe.header_len < VCS_MAGIC_SIZE ? VCS_MAGIC_SIZE : VCS_ENVELOPE_SIZE;
         size_t need = target - reader->probe.header_len;
         size_t take = src_len - consumed < need ? src_len - consumed : need;
 
@@ -145,38 +143,38 @@ static vkcsProbeResult streamReaderProbeFeed(streamReader *reader,
         reader->probe.header_len += take;
         consumed += take;
 
-        if (reader->probe.header_len >= VKCS_MAGIC_SIZE && !vkcsHasMagicPrefix(reader->probe.header, VKCS_MAGIC_SIZE)) {
+        if (reader->probe.header_len >= VCS_MAGIC_SIZE && !vcsHasMagicPrefix(reader->probe.header, VCS_MAGIC_SIZE)) {
             *src_consumed = consumed;
-            if (!reader->probe_cfg.allow_passthrough) return VKCS_PROBE_ERROR;
+            if (!reader->probe_cfg.allow_passthrough) return VCS_PROBE_ERROR;
             streamReaderProbeSetPassthrough(reader);
-            return VKCS_PROBE_PASSTHROUGH;
+            return VCS_PROBE_PASSTHROUGH;
         }
 
-        if (reader->probe.header_len == VKCS_ENVELOPE_SIZE) {
+        if (reader->probe.header_len == VCS_ENVELOPE_SIZE) {
             streamReaderInfo info = {0};
-            if (streamReadEnvelopeInfo(reader->probe.header, VKCS_ENVELOPE_SIZE,
+            if (streamReadEnvelopeInfo(reader->probe.header, VCS_ENVELOPE_SIZE,
                                        reader->probe_cfg.expected_stream_kind, &info) != 0) {
                 *src_consumed = consumed;
-                return VKCS_PROBE_ERROR;
+                return VCS_PROBE_ERROR;
             }
             streamReaderProbeSetCompressed(reader, info.algo, info.stream_kind,
                                            info.codec_checksum_enabled);
             *src_consumed = consumed;
-            return VKCS_PROBE_COMPRESSED;
+            return VCS_PROBE_COMPRESSED;
         }
     }
 
     if (input_eof) {
         *src_consumed = consumed;
-        /* EOF mid-magic looks like a truncated VKCS, not a valid passthrough. */
-        if (streamReaderProbeHasMagicPrefix(reader)) return VKCS_PROBE_ERROR;
-        if (!reader->probe_cfg.allow_passthrough) return VKCS_PROBE_ERROR;
+        /* EOF mid-magic looks like a truncated VCS, not a valid passthrough. */
+        if (streamReaderProbeHasMagicPrefix(reader)) return VCS_PROBE_ERROR;
+        if (!reader->probe_cfg.allow_passthrough) return VCS_PROBE_ERROR;
         streamReaderProbeSetPassthrough(reader);
-        return VKCS_PROBE_PASSTHROUGH;
+        return VCS_PROBE_PASSTHROUGH;
     }
 
     *src_consumed = consumed;
-    return VKCS_PROBE_NEED_INPUT;
+    return VCS_PROBE_NEED_INPUT;
 }
 
 /* ===== Streaming writer ===== */
@@ -200,12 +198,12 @@ int streamWriterInit(streamWriter *writer, streamWriterConfig *cfg, streamWriter
  * doesn't leave a stub envelope on the sink. */
 static int streamWriterEnsureEnvelope(streamWriter *writer) {
     if (writer->envelope_written) return 0;
-    if (writeVkcsEnvelope(writer->emit_fn, writer->emit_ctx, writer->compressor.algo,
-                          writer->stream_kind, writer->compressor.codec_checksum) != 0) {
+    if (writeVcsEnvelope(writer->emit_fn, writer->emit_ctx, writer->compressor.algo,
+                         writer->stream_kind, writer->compressor.codec_checksum) != 0) {
         writer->errored = true;
         return -1;
     }
-    writer->bytes_emitted += VKCS_ENVELOPE_SIZE;
+    writer->bytes_emitted += VCS_ENVELOPE_SIZE;
     writer->envelope_written = true;
     return 0;
 }
@@ -369,8 +367,8 @@ int streamReaderInit(streamReader *reader, streamReaderConfig *cfg, streamReader
 }
 
 static size_t streamReaderProbeBytesNeeded(streamReader *reader) {
-    if (reader->probe.header_len < VKCS_MAGIC_SIZE) return VKCS_MAGIC_SIZE - reader->probe.header_len;
-    return VKCS_ENVELOPE_SIZE - reader->probe.header_len;
+    if (reader->probe.header_len < VCS_MAGIC_SIZE) return VCS_MAGIC_SIZE - reader->probe.header_len;
+    return VCS_ENVELOPE_SIZE - reader->probe.header_len;
 }
 
 int streamReaderProbe(streamReader *reader) {
@@ -378,7 +376,7 @@ int streamReaderProbe(streamReader *reader) {
     if (reader->probe.ready) return 0;
 
     while (!reader->probe.ready) {
-        uint8_t buf[VKCS_ENVELOPE_SIZE];
+        uint8_t buf[VCS_ENVELOPE_SIZE];
         size_t need = streamReaderProbeBytesNeeded(reader);
         ssize_t got = reader->read_cb(reader->read_ctx, buf, need);
         size_t consumed = 0;
@@ -389,23 +387,23 @@ int streamReaderProbe(streamReader *reader) {
             return -1;
         }
 
-        vkcsProbeResult status = streamReaderProbeFeed(reader, buf,
-                                                       got > 0 ? (size_t)got : 0,
-                                                       got == 0, &consumed);
+        vcsProbeResult status = streamReaderProbeFeed(reader, buf,
+                                                      got > 0 ? (size_t)got : 0,
+                                                      got == 0, &consumed);
         switch (status) {
-        case VKCS_PROBE_ERROR:
+        case VCS_PROBE_ERROR:
             streamReaderSetError(reader, STREAM_READER_ERROR_INCOMPATIBLE);
             return -1;
-        case VKCS_PROBE_NEED_INPUT:
+        case VCS_PROBE_NEED_INPUT:
             continue;
-        case VKCS_PROBE_COMPRESSED:
+        case VCS_PROBE_COMPRESSED:
             if (!reader->decompressor_initialized &&
                 streamReaderInitCompressedState(reader, reader->buffer_size) != 0) {
                 streamReaderSetError(reader, STREAM_READER_ERROR_IO);
                 return -1;
             }
             break;
-        case VKCS_PROBE_PASSTHROUGH:
+        case VCS_PROBE_PASSTHROUGH:
             break;
         default:
             streamReaderSetError(reader, STREAM_READER_ERROR_INCOMPATIBLE);

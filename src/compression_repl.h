@@ -30,13 +30,13 @@
 
 /* ===== Primary-side per-replica compressor ===== */
 
-/* Owns the streamWriter (VKCS/LZ4 frame encoder) and the staging buffer of
+/* Owns the streamWriter (VCS/LZ4 frame encoder) and the staging buffer of
  * compressed bytes pending socket write for one replica connection. The
  * networking layer still drives which replication-backlog bytes get compressed
  * and performs the socket writes; this adapter owns the codec state and the
  * staging buffer so that ownership is not scattered through the client struct. */
 typedef struct replCompressor {
-    streamWriter writer; /* VKCS/LZ4 frame encoder (STREAM_KIND_REPL). */
+    streamWriter writer; /* VCS/LZ4 frame encoder (STREAM_KIND_REPL). */
     sds out_buf;         /* Compressed bytes staged for the socket. */
     size_t out_buf_pos;  /* Next unsent byte offset within out_buf. */
     size_t raw_bytes;    /* Raw backlog bytes represented by out_buf. */
@@ -78,7 +78,7 @@ typedef enum {
 /* Owns the push-mode streamReader and decode scratch buffer for the single
  * primary link. See the file header for why push-mode is required here. */
 typedef struct replDecompressor {
-    streamReader reader; /* Push-mode VKCS/LZ4 decoder (STREAM_KIND_REPL). */
+    streamReader reader; /* Push-mode VCS/LZ4 decoder (STREAM_KIND_REPL). */
     sds decode_buf;      /* Scratch buffer holding the most recent decoded bytes. */
 } replDecompressor;
 
