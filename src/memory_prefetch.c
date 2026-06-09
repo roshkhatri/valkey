@@ -29,13 +29,13 @@ typedef struct KeyPrefetchInfo {
     PrefetchState state; /* Current state of the prefetch operation */
     hashtableIncrementalFindState hashtab_state;
     /* Fields for deep prefetching of inner hashtables (hash/zset) */
-    robj **argv;          /* argv of the command that owns this key */
-    int argc;             /* argc of the command that owns this key */
-    int member_key_index; /* argv index of the first field/member */
-    int member_key_step;  /* stride between fields (1 = consecutive, 2 = interleaved) */
-    int member_key_count; /* max fields to prefetch (-1 = all remaining) */
+    robj **argv;           /* argv of the command that owns this key */
+    int argc;              /* argc of the command that owns this key */
+    int member_key_index;  /* argv index of the first field/member */
+    int member_key_step;   /* stride between fields (1 = consecutive, 2 = interleaved) */
+    int member_key_count;  /* max fields to prefetch (-1 = all remaining) */
     int current_field_idx; /* current argv index being prefetched */
-    hashtable *inner_ht;  /* cached inner hashtable pointer */
+    hashtable *inner_ht;   /* cached inner hashtable pointer */
     DeepPrefetchPhase deep_phase;
     hashtableIncrementalFindState inner_hashtab_state;
 } KeyPrefetchInfo;
@@ -51,7 +51,6 @@ typedef struct PrefetchCommandsBatch {
     int *slots;                     /* Array of slots for each key */
     void **keys;                    /* Array of keys to prefetch in the current batch */
     client **clients;               /* Array of clients in the current batch */
-    client **key_clients;           /* Client that owns each key (for removeClient cleanup) */
     robj ***key_argv;               /* Per-key argv pointer (correct for queued commands) */
     int *key_argc;                  /* Per-key argc (correct for queued commands) */
     int *key_member_indices;        /* member_key_index from cmd for each key (0 = no deep prefetch) */
@@ -69,7 +68,6 @@ void freePrefetchCommandsBatch(void) {
     }
 
     zfree(batch->clients);
-    zfree(batch->key_clients);
     zfree(batch->key_argv);
     zfree(batch->key_argc);
     zfree(batch->key_member_indices);
@@ -94,7 +92,6 @@ void prefetchCommandsBatchInit(void) {
     batch = zcalloc(sizeof(PrefetchCommandsBatch));
     batch->max_prefetch_size = max_prefetch_size;
     batch->clients = zcalloc(max_prefetch_size * sizeof(client *));
-    batch->key_clients = zcalloc(max_prefetch_size * sizeof(client *));
     batch->key_argv = zcalloc(max_prefetch_size * sizeof(robj **));
     batch->key_argc = zcalloc(max_prefetch_size * sizeof(int));
     batch->key_member_indices = zcalloc(max_prefetch_size * sizeof(int));
@@ -369,7 +366,7 @@ void processClientsCommandsBatch(void) {
 }
 
 /* Get a command's keys and add them to the current prefetching batch. */
-static void addCommandToBatch(client *c, struct serverCommand *cmd, robj **argv, int argc, serverDb *db, int slot) {
+static void addCommandToBatch(struct serverCommand *cmd, robj **argv, int argc, serverDb *db, int slot) {
     getKeysResult result;
     initGetKeysResult(&result);
     int num_keys = getKeysFromCommand(cmd, argv, argc, &result);
@@ -377,7 +374,6 @@ static void addCommandToBatch(client *c, struct serverCommand *cmd, robj **argv,
         batch->keys[batch->key_count] = argv[result.keys[i].pos];
         batch->slots[batch->key_count] = slot >= 0 ? slot : 0;
         batch->keys_tables[batch->key_count] = kvstoreGetHashtable(db->keys, batch->slots[batch->key_count]);
-        batch->key_clients[batch->key_count] = c;
         batch->key_argv[batch->key_count] = argv;
         batch->key_argc[batch->key_count] = argc;
         batch->key_member_indices[batch->key_count] = cmd->member_key_index;
@@ -400,7 +396,7 @@ int addCommandToBatchAndProcessIfFull(client *c) {
     /* Client's next command */
     if (c->parsed_cmd && !(c->read_flags & READ_FLAGS_BAD_ARITY)) {
         c->read_flags |= READ_FLAGS_PREFETCHED;
-        addCommandToBatch(c, c->parsed_cmd, c->argv, c->argc, c->db, c->slot);
+        addCommandToBatch(c->parsed_cmd, c->argv, c->argc, c->db, c->slot);
     }
 
     /* Commands in the queue. */
@@ -408,7 +404,7 @@ int addCommandToBatchAndProcessIfFull(client *c) {
         parsedCommand *p = &c->cmd_queue.cmds[j];
         if (!p->cmd) continue; /* Error or incomplete command. */
         p->read_flags |= READ_FLAGS_PREFETCHED;
-        addCommandToBatch(c, p->cmd, p->argv, p->argc, c->db, p->slot);
+        addCommandToBatch(p->cmd, p->argv, p->argc, c->db, p->slot);
     }
 
     /* If the batch is full, process it.
@@ -428,13 +424,7 @@ void removeClientFromPendingCommandsBatch(client *c) {
     for (size_t i = 0; i < batch->client_count; i++) {
         if (batch->clients[i] == c) {
             batch->clients[i] = NULL;
-            break;
-        }
-    }
-
-    for (size_t i = 0; i < batch->key_count; i++) {
-        if (batch->key_clients[i] == c) {
-            batch->key_clients[i] = NULL;
+            return;
         }
     }
 }
