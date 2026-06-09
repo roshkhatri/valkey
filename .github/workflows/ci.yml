@@ -206,11 +206,16 @@ jobs:
     # transport across the replication surface (full sync, dual-channel, buffer
     # management, AOF-sync, etc.) to catch regressions that only surface under
     # compressed replication.
-    # Note: integration/replication-psync is not tagged because its start_server
-    # lives inside a reusable proc, which is incompatible with a top-level-only
-    # tag. The compression-specific tests in integration/repl-compression.tcl are
-    # intentionally untagged too (they assert default replcompression=no behavior
-    # and are covered by the regular test-ubuntu-latest job).
+    # Note: a few tests are intentionally NOT tagged for this job:
+    #  - integration/replication-psync: its start_server lives inside a reusable
+    #    proc, incompatible with a top-level-only tag.
+    #  - integration/repl-compression.tcl: asserts the default replcompression=no
+    #    behavior; covered by the regular test-ubuntu-latest job.
+    #  - integration/replication-buffer.tcl and the buffer-memory tests in
+    #    integration/dual-channel-replication.tcl: they assert exact replication
+    #    buffer/backlog memory and byte volumes, which compression legitimately
+    #    changes (per-replica codec buffers, fewer wire bytes). They run in the
+    #    regular (uncompressed) job.
     runs-on: ubuntu-latest
     steps:
       - name: Install libbacktrace
