@@ -29,46 +29,6 @@ extern "C" {
 #undef __str
 #endif
 
-/* --- Test-local heap wrappers ---
- * The streamWriter/streamReader API was refactored to caller-allocated
- * Init/Free. These thin heap wrappers keep the original Create/Destroy shape so
- * the existing tests need no churn. */
-static streamWriter *streamWriterCreate(streamWriterConfig *cfg, streamWriterEmitFn emit_fn, void *emit_ctx) {
-    streamWriter *w = (streamWriter *)zmalloc(sizeof(*w));
-    if (streamWriterInit(w, cfg, emit_fn, emit_ctx) != 0) {
-        zfree(w);
-        return nullptr;
-    }
-    return w;
-}
-
-static void streamWriterDestroy(streamWriter *w) {
-    if (!w) return;
-    streamWriterFree(w);
-    zfree(w);
-}
-
-static streamReader *streamReaderCreate(streamReaderConfig *cfg, streamReaderReadFn read_cb, void *read_ctx) {
-    /* Old Create defaulted a zero buffer_size; new Init asserts it is nonzero. */
-    if (cfg->buffer_size == 0) cfg->buffer_size = STREAM_READER_BUFFER_SIZE_DEFAULT;
-    streamReader *r = (streamReader *)zmalloc(sizeof(*r));
-    if (streamReaderInit(r, cfg, read_cb, read_ctx) != 0) {
-        zfree(r);
-        return nullptr;
-    }
-    return r;
-}
-
-static void streamReaderDestroy(streamReader *r) {
-    if (!r) return;
-    streamReaderFree(r);
-    zfree(r);
-}
-
-static streamReaderError streamReaderGetError(const streamReader *r) {
-    return r->error_kind;
-}
-
 class CompressionTest : public ::testing::Test {};
 
 typedef struct {
