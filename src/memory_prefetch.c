@@ -29,7 +29,8 @@ typedef struct KeyPrefetchInfo {
     PrefetchState state; /* Current state of the prefetch operation */
     hashtableIncrementalFindState hashtab_state;
     /* Fields for deep prefetching of inner hashtables (hash/zset) */
-    client *client;
+    robj **argv;          /* argv of the command that owns this key */
+    int argc;             /* argc of the command that owns this key */
     int member_key_index; /* argv index of the first field/member */
     int member_key_step;  /* stride between fields (1 = consecutive, 2 = interleaved) */
     int member_key_count; /* max fields to prefetch (-1 = all remaining) */
@@ -50,7 +51,9 @@ typedef struct PrefetchCommandsBatch {
     int *slots;                     /* Array of slots for each key */
     void **keys;                    /* Array of keys to prefetch in the current batch */
     client **clients;               /* Array of clients in the current batch */
-    client **key_clients;           /* Client that owns each key (for deep prefetch access) */
+    client **key_clients;           /* Client that owns each key (for removeClient cleanup) */
+    robj ***key_argv;               /* Per-key argv pointer (correct for queued commands) */
+    int *key_argc;                  /* Per-key argc (correct for queued commands) */
     int *key_member_indices;        /* member_key_index from cmd for each key (0 = no deep prefetch) */
     int *key_member_steps;          /* member_key_step from cmd for each key */
     int *key_member_counts;         /* member_key_count from cmd for each key */
@@ -67,6 +70,8 @@ void freePrefetchCommandsBatch(void) {
 
     zfree(batch->clients);
     zfree(batch->key_clients);
+    zfree(batch->key_argv);
+    zfree(batch->key_argc);
     zfree(batch->key_member_indices);
     zfree(batch->key_member_steps);
     zfree(batch->key_member_counts);
@@ -90,6 +95,8 @@ void prefetchCommandsBatchInit(void) {
     batch->max_prefetch_size = max_prefetch_size;
     batch->clients = zcalloc(max_prefetch_size * sizeof(client *));
     batch->key_clients = zcalloc(max_prefetch_size * sizeof(client *));
+    batch->key_argv = zcalloc(max_prefetch_size * sizeof(robj **));
+    batch->key_argc = zcalloc(max_prefetch_size * sizeof(int));
     batch->key_member_indices = zcalloc(max_prefetch_size * sizeof(int));
     batch->key_member_steps = zcalloc(max_prefetch_size * sizeof(int));
     batch->key_member_counts = zcalloc(max_prefetch_size * sizeof(int));
@@ -143,7 +150,8 @@ static void initBatchInfo(hashtable **tables) {
             continue;
         }
         info->state = PREFETCH_ENTRY;
-        info->client = batch->key_clients[i];
+        info->argv = batch->key_argv[i];
+        info->argc = batch->key_argc[i];
         info->member_key_index = batch->key_member_indices[i];
         info->member_key_step = batch->key_member_steps[i];
         info->member_key_count = batch->key_member_counts[i];
@@ -168,8 +176,8 @@ static void prefetchEntry(KeyPrefetchInfo *info) {
          * deep prefetch for hash/zset inner hashtables. Check if applicable. */
         void *entry;
         if (hashtableIncrementalFindGetResult(&info->hashtab_state, &entry) &&
-            info->client && info->member_key_index > 0 &&
-            info->client->argc > info->member_key_index && canDeepPrefetch(entry)) {
+            info->member_key_index > 0 &&
+            info->argc > info->member_key_index && canDeepPrefetch(entry)) {
             info->state = PREFETCH_VALUE_DEEP;
         } else {
             markKeyAsdone(info);
@@ -188,8 +196,8 @@ static void prefetchValue(KeyPrefetchInfo *info) {
             valkey_prefetch(objectGetVal(val));
         }
         /* For types with inner hashtables, transition to deep prefetch */
-        if (info->client && info->member_key_index > 0 &&
-            info->client->argc > info->member_key_index && canDeepPrefetch(val)) {
+        if (info->member_key_index > 0 &&
+            info->argc > info->member_key_index && canDeepPrefetch(val)) {
             info->state = PREFETCH_VALUE_DEEP;
             return;
         }
@@ -234,7 +242,7 @@ static void prefetchValueDeep(KeyPrefetchInfo *info) {
             }
         }
         hashtableIncrementalFindInit(&info->inner_hashtab_state, info->inner_ht,
-                                     objectGetVal(info->client->argv[info->current_field_idx]));
+                                     objectGetVal(info->argv[info->current_field_idx]));
         info->deep_phase = DEEP_PREFETCH_STEP;
         moveToNextKey();
         return;
@@ -249,7 +257,7 @@ static void prefetchValueDeep(KeyPrefetchInfo *info) {
         /* Current field done. Check if there are more fields to prefetch. */
         int next_idx = info->current_field_idx + info->member_key_step;
         int fields_done = (next_idx - info->member_key_index) / info->member_key_step;
-        if (next_idx < info->client->argc &&
+        if (next_idx < info->argc &&
             (info->member_key_count < 0 || fields_done < info->member_key_count)) {
             /* More fields to prefetch - loop back to INIT */
             info->current_field_idx = next_idx;
@@ -260,8 +268,6 @@ static void prefetchValueDeep(KeyPrefetchInfo *info) {
         markKeyAsdone(info);
         return;
     }
-
-    markKeyAsdone(info);
 }
 
 /* Prefetch hashtable data for an array of keys.
@@ -372,6 +378,8 @@ static void addCommandToBatch(client *c, struct serverCommand *cmd, robj **argv,
         batch->slots[batch->key_count] = slot >= 0 ? slot : 0;
         batch->keys_tables[batch->key_count] = kvstoreGetHashtable(db->keys, batch->slots[batch->key_count]);
         batch->key_clients[batch->key_count] = c;
+        batch->key_argv[batch->key_count] = argv;
+        batch->key_argc[batch->key_count] = argc;
         batch->key_member_indices[batch->key_count] = cmd->member_key_index;
         batch->key_member_steps[batch->key_count] = cmd->member_key_step ? cmd->member_key_step : 1;
         batch->key_member_counts[batch->key_count] = cmd->member_key_count ? cmd->member_key_count : -1;
@@ -420,7 +428,13 @@ void removeClientFromPendingCommandsBatch(client *c) {
     for (size_t i = 0; i < batch->client_count; i++) {
         if (batch->clients[i] == c) {
             batch->clients[i] = NULL;
-            return;
+            break;
+        }
+    }
+
+    for (size_t i = 0; i < batch->key_count; i++) {
+        if (batch->key_clients[i] == c) {
+            batch->key_clients[i] = NULL;
         }
     }
 }
