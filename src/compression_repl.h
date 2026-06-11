@@ -29,6 +29,10 @@
 #include "compression_stream.h"
 #include "sds.h"
 
+/* Max raw replication-backlog bytes compressed per write dispatch cycle, to
+ * bound worst-case per-batch latency and keep the staging buffer predictable. */
+#define REPL_COMPRESSION_BATCH_LIMIT (1024 * 1024) /* 1 MB per dispatch cycle */
+
 /* ===== Primary-side per-replica compressor ===== */
 
 /* Owns the streamWriter (VCS/LZ4 frame encoder) and the staging buffer of
@@ -66,6 +70,10 @@ void replCompressorResetBatch(replCompressor *rc);
  * client-output-buffer accounting. */
 size_t replCompressorMemUsage(const replCompressor *rc);
 
+/* The compression algorithm this compressor was initialized with (for INFO and
+ * error logging). Returns ALGO_NONE if rc is NULL. */
+compressionAlgo replCompressorAlgo(const replCompressor *rc);
+
 /* ===== Replica-side decompressor ===== */
 
 /* Outcome of replDecompressorDecode. */
@@ -79,7 +87,7 @@ typedef enum {
 /* Decode mode for the single primary link. PROBE until the leading bytes reveal
  * whether the primary is sending a compressed VCS stream or plaintext; the
  * replica must tolerate plaintext because the primary compresses only if its own
- * replcompression is also enabled. */
+ * repl-compression is also enabled. */
 typedef enum {
     REPL_DECODE_MODE_PROBE = 0,  /* Still classifying the stream. */
     REPL_DECODE_MODE_COMPRESSED, /* VCS envelope seen; decoder initialized. */

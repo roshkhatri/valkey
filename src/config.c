@@ -181,6 +181,10 @@ configEnum rdb_compression_enum[] = {{"no", RDB_COMPRESSION_NO},
                                      {"lz4-stream", RDB_COMPRESSION_LZ4_STREAM},
                                      {NULL, 0}};
 
+configEnum repl_compression_enum[] = {{"no", REPL_COMPRESSION_NO},
+                                      {"lz4-stream", REPL_COMPRESSION_LZ4_STREAM},
+                                      {NULL, 0}};
+
 /* Output buffer limits presets. */
 clientBufferLimitsConfig clientBufferLimitsDefaults[CLIENT_TYPE_OBUF_COUNT] = {
     {0, 0, 0},                                 /* normal */
@@ -794,7 +798,7 @@ static void restoreBackupConfig(standardConfig **set_configs,
  * CONFIG SET implementation
  *----------------------------------------------------------------------------*/
 
-/* Set by the replcompression apply callback when the setting changes. Switching
+/* Set by the repl-compression apply callback when the setting changes. Switching
  * a live link between plaintext and compressed requires a reconnect, which is
  * irreversible, so the reconcile is deferred until after the whole CONFIG SET
  * commits (see configSetCommand); a mid-apply rollback re-runs the apply, and
@@ -3304,7 +3308,7 @@ standardConfig static_configs[] = {
     createBoolConfig("daemonize", NULL, IMMUTABLE_CONFIG, server.daemonize, 0, NULL, NULL),
     createBoolConfig("always-show-logo", NULL, IMMUTABLE_CONFIG, server.always_show_logo, 0, NULL, NULL),
     createBoolConfig("protected-mode", NULL, MODIFIABLE_CONFIG, server.protected_mode, 1, NULL, NULL),
-    createBoolConfig("replcompression", NULL, MODIFIABLE_CONFIG, server.repl_compression, 0, NULL, updateReplCompression),
+    createEnumConfig("repl-compression", NULL, MODIFIABLE_CONFIG, repl_compression_enum, server.repl_compression, REPL_COMPRESSION_NO, NULL, updateReplCompression),
     createBoolConfig("rdb-del-sync-files", NULL, MODIFIABLE_CONFIG, server.rdb_del_sync_files, 0, NULL, NULL),
     createBoolConfig("activerehashing", NULL, MODIFIABLE_CONFIG, server.activerehashing, 1, NULL, NULL),
     createBoolConfig("stop-writes-on-bgsave-error", NULL, MODIFIABLE_CONFIG, server.stop_writes_on_bgsave_err, 1, NULL, NULL),

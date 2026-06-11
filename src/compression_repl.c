@@ -10,8 +10,8 @@
 
 /* Release the staging/scratch buffer once it grows past this, so a bursty
  * batch does not leave a long-lived replica holding peak allocation forever.
- * Mirrors the 16 x PROTO_REPLY_CHUNK_BYTES threshold used previously, expressed
- * locally to keep this adapter independent of server.h. */
+ * Roughly 16 x PROTO_REPLY_CHUNK_BYTES, expressed locally to keep this adapter
+ * independent of server.h. */
 #define REPL_COMPRESSION_RETAIN_LIMIT (256 * 1024)
 
 /* Decoded-output chunk pulled from the reader per iteration. */
@@ -74,6 +74,10 @@ size_t replCompressorMemUsage(const replCompressor *rc) {
     size_t total = sizeof(*rc) + streamWriterMemUsage(&rc->writer);
     if (rc->out_buf) total += sdsalloc(rc->out_buf);
     return total;
+}
+
+compressionAlgo replCompressorAlgo(const replCompressor *rc) {
+    return rc ? rc->writer.compressor.algo : ALGO_NONE;
 }
 
 /* ===== Replica-side decompressor ===== */

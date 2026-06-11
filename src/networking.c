@@ -2412,13 +2412,39 @@ client *lookupClientByID(uint64_t id) {
     return c;
 }
 
+/* Advance the replica's replication-backlog cursor (ref_repl_buf_node /
+ * ref_block_pos) past `consumed` raw bytes, releasing the reference on each
+ * fully-sent block. Shared by the compressed and plaintext post-write paths. */
+static void advanceReplicaRefBlock(client *c, size_t consumed) {
+    listNode *curr = c->repl_data->ref_repl_buf_node;
+    listNode *next = NULL;
+    size_t remaining = consumed + c->repl_data->ref_block_pos;
+    replBufBlock *o = listNodeValue(curr);
+
+    while (remaining >= o->used) {
+        next = listNextNode(curr);
+        if (!next) break; /* End of list */
+
+        remaining -= o->used;
+        o->refcount--;
+
+        curr = next;
+        o = listNodeValue(curr);
+        o->refcount++;
+    }
+
+    serverAssert(remaining <= o->used);
+    c->repl_data->ref_repl_buf_node = curr;
+    c->repl_data->ref_block_pos = remaining;
+}
+
 static void postWriteToReplica(client *c) {
     /* Check compression error first; IO thread may have flagged this. */
     if (atomic_load_explicit(&c->repl_data->compression_error, memory_order_acquire)) {
         serverLog(LL_WARNING,
                   "Compression error on replica %s (algo=%s, raw_bytes=%zu), disconnecting",
                   replicationGetReplicaName(c),
-                  compressionAlgoName(REPL_COMPRESSION_ALGO),
+                  compressionAlgoName(replCompressorAlgo(c->repl_data->repl_compressor)),
                   c->repl_data->repl_compressor ? c->repl_data->repl_compressor->raw_bytes : 0);
         freeClientAsync(c);
         return;
@@ -2435,26 +2461,7 @@ static void postWriteToReplica(client *c) {
             /* All compressed data sent: advance cursor by raw bytes compressed */
             size_t raw_bytes = compressor->raw_bytes;
 
-            listNode *curr = c->repl_data->ref_repl_buf_node;
-            listNode *next = NULL;
-            size_t remaining = raw_bytes + c->repl_data->ref_block_pos;
-            replBufBlock *o = listNodeValue(curr);
-
-            while (remaining >= o->used) {
-                next = listNextNode(curr);
-                if (!next) break; /* End of list */
-
-                remaining -= o->used;
-                o->refcount--;
-
-                curr = next;
-                o = listNodeValue(curr);
-                o->refcount++;
-            }
-
-            serverAssert(remaining <= o->used);
-            c->repl_data->ref_repl_buf_node = curr;
-            c->repl_data->ref_block_pos = remaining;
+            advanceReplicaRefBlock(c, raw_bytes);
 
             c->repl_data->repl_uncompressed_bytes_total += raw_bytes;
             c->repl_data->repl_compressed_bytes_total += sdslen(compressor->out_buf);
@@ -2468,70 +2475,12 @@ static void postWriteToReplica(client *c) {
         return;
     }
 
-    /* Locate the last node which has leftover data and
-     * decrement reference counts of all nodes in front of it.
-     * Set c->ref_repl_buf_node to point to the last node and
-     * c->ref_block_pos to the offset within that node  */
-    listNode *curr = c->repl_data->ref_repl_buf_node;
-    listNode *next = NULL;
-    size_t nwritten = c->nwritten + c->repl_data->ref_block_pos;
-    replBufBlock *o = listNodeValue(curr);
-
-    while (nwritten >= o->used) {
-        next = listNextNode(curr);
-        if (!next) break; /* End of list */
-
-        nwritten -= o->used;
-        o->refcount--;
-
-        curr = next;
-        o = listNodeValue(curr);
-        o->refcount++;
-    }
-
-    serverAssert(nwritten <= o->used);
-    c->repl_data->ref_repl_buf_node = curr;
-    c->repl_data->ref_block_pos = nwritten;
+    /* Advance the cursor past the bytes just written and release fully-sent
+     * blocks. */
+    advanceReplicaRefBlock(c, c->nwritten);
 
     incrementalTrimReplicationBacklog(REPL_BACKLOG_TRIM_BLOCKS_PER_CALL);
 }
-
-/* Initialize inline compression for a replica client. */
-int replInitCompression(client *c, compressionAlgo algo, int level) {
-    if (!c || !c->repl_data) return C_ERR;
-
-    replDestroyCompression(c);
-
-    c->repl_data->repl_compressor = replCompressorCreate(algo, level);
-    if (!c->repl_data->repl_compressor) return C_ERR;
-
-    atomic_store_explicit(&c->repl_data->compression_error, 0, memory_order_relaxed);
-
-    return C_OK;
-}
-
-/* Destroy inline compression state for a replica client. Called from freeClient
- * and on runtime config changes. */
-void replDestroyCompression(client *c) {
-    if (!c || !c->repl_data) return;
-
-    if (c->repl_data->repl_compressor) {
-        /* Ensure no IO thread is using this client */
-        waitForClientIO(c);
-
-        replCompressorDestroy(c->repl_data->repl_compressor);
-        c->repl_data->repl_compressor = NULL;
-    }
-
-    atomic_store_explicit(&c->repl_data->compression_error, 0, memory_order_relaxed);
-    c->repl_data->repl_compressed_bytes_total = 0;
-    c->repl_data->repl_uncompressed_bytes_total = 0;
-    atomic_store_explicit(&c->repl_data->repl_compression_errors, 0, memory_order_relaxed);
-    atomic_store_explicit(&c->repl_data->repl_compression_cpu_usec, 0, memory_order_relaxed);
-    atomic_store_explicit(&c->repl_data->repl_compression_pending_drains, 0, memory_order_relaxed);
-}
-
-#define REPL_COMPRESSION_BATCH_LIMIT (1024 * 1024) /* 1 MB per dispatch cycle */
 
 /* Compressed write path for replicas on either the IO thread or the main thread. */
 static void writeToReplicaCompressed(client *c) {
@@ -2551,7 +2500,6 @@ static void writeToReplicaCompressed(client *c) {
             return;
         }
         compressor->out_buf_pos += c->nwritten;
-        atomic_fetch_add_explicit(&c->repl_data->repl_compression_pending_drains, 1, memory_order_relaxed);
         /* Skip trim here; postWriteToReplica trims only after the batch fully
          * drains. Worst-case trim delay is one batch (REPL_COMPRESSION_BATCH_LIMIT). */
         return;
@@ -2643,6 +2591,13 @@ static void writeToReplicaCompressed(client *c) {
 }
 
 static void writeToReplica(client *c) {
+    /* Compressed replicas use the framed write path; the decision lives here so
+     * callers do not branch on the per-replica compressor. */
+    if (c->repl_data->repl_compressor != NULL) {
+        writeToReplicaCompressed(c);
+        return;
+    }
+
     listNode *last_node;
     size_t bufpos;
 
@@ -3273,11 +3228,7 @@ int writeToClient(client *c) {
     c->write_flags = 0;
 
     if (getClientType(c) == CLIENT_TYPE_REPLICA) {
-        if (c->repl_data->repl_compressor != NULL) {
-            writeToReplicaCompressed(c);
-        } else {
-            writeToReplica(c);
-        }
+        writeToReplica(c);
     } else {
         _writeToClient(c);
     }
@@ -4509,7 +4460,8 @@ static bool readToQueryBuf(client *c) {
 int replDecompressQueryBuf(client *c, size_t new_data_start) {
     size_t raw_input_len, decompressed_len;
 
-    if (!server.repl_decompressor) return C_OK;
+    /* Callers should invoke this with an active decompressor */
+    serverAssert(server.repl_decompressor != NULL);
     serverAssert(c != NULL);
     serverAssert(c->querybuf != NULL);
     serverAssert(new_data_start <= sdslen(c->querybuf));
@@ -4580,17 +4532,7 @@ void readQueryFromClient(connection *conn) {
                 freeClientAsync(c);
                 return;
             }
-            if (c->flag.primary) {
-                /* Track replica-side replication apply CPU (decompression already
-                 * timed inside replDecompressQueryBuf and is excluded here). */
-                monotime apply_start = getMonotonicUs();
-                int rc = processInputBuffer(c);
-                server.repl_apply_cpu_usec += getMonotonicUs() - apply_start;
-                server.repl_apply_batches++;
-                if (rc == C_ERR) return;
-            } else {
-                if (processInputBuffer(c) == C_ERR) return;
-            }
+            if (processInputBuffer(c) == C_ERR) return;
             trimCommandQueue(c);
         }
         repeat = (c->flag.primary &&
@@ -6922,11 +6864,7 @@ void ioThreadWriteToClient(client *c) {
     serverAssert(c->io_write_state == CLIENT_PENDING_IO);
     c->nwritten = 0;
     if (c->write_flags & WRITE_FLAGS_IS_REPLICA) {
-        if (c->repl_data->repl_compressor != NULL) {
-            writeToReplicaCompressed(c);
-        } else {
-            writeToReplica(c);
-        }
+        writeToReplica(c);
     } else {
         _writeToClient(c);
     }

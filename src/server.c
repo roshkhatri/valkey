@@ -48,6 +48,7 @@
 #include "fmtargs.h"
 #include "io_threads.h"
 #include "compression.h"
+#include "compression_repl.h"
 #include "tls.h"
 #include "sds.h"
 #include "module.h"
@@ -6624,16 +6625,12 @@ sds genValkeyInfoString(dict *section_dict, int all_sections, int everything) {
                 info = sdscatfmt(info, "repl_decompression_errors:%U\r\n",
                                  (unsigned long long)server.repl_decompression_errors);
             }
-            if (server.repl_apply_batches > 0) {
+            if (server.repl_decompressed_bytes_total > 0) {
                 info = sdscatfmt(info,
                                  "repl_decompression_cpu_usec:%I\r\n"
-                                 "repl_decompressed_bytes_total:%U\r\n"
-                                 "repl_apply_cpu_usec:%I\r\n"
-                                 "repl_apply_batches:%U\r\n",
+                                 "repl_decompressed_bytes_total:%U\r\n",
                                  (long long)server.repl_decompression_cpu_usec,
-                                 (unsigned long long)server.repl_decompressed_bytes_total,
-                                 (long long)server.repl_apply_cpu_usec,
-                                 (unsigned long long)server.repl_apply_batches);
+                                 (unsigned long long)server.repl_decompressed_bytes_total);
             }
         }
 
@@ -6680,9 +6677,8 @@ sds genValkeyInfoString(dict *section_dict, int all_sections, int everything) {
                                         ",uncompressed_bytes=%lld"
                                         ",compression_ratio=%.2f"
                                         ",compression_errors=%lld"
-                                        ",compression_cpu_usec=%lld"
-                                        ",debug_compression_pending_drains=%lld",
-                                        compressionAlgoName(REPL_COMPRESSION_ALGO),
+                                        ",compression_cpu_usec=%lld",
+                                        compressionAlgoName(replCompressorAlgo(replica->repl_data->repl_compressor)),
                                         replica->repl_data->repl_compressed_bytes_total,
                                         replica->repl_data->repl_uncompressed_bytes_total,
                                         replica->repl_data->repl_uncompressed_bytes_total > 0
@@ -6692,8 +6688,6 @@ sds genValkeyInfoString(dict *section_dict, int all_sections, int everything) {
                                         atomic_load_explicit(&replica->repl_data->repl_compression_errors,
                                                              memory_order_relaxed),
                                         atomic_load_explicit(&replica->repl_data->repl_compression_cpu_usec,
-                                                             memory_order_relaxed),
-                                        atomic_load_explicit(&replica->repl_data->repl_compression_pending_drains,
                                                              memory_order_relaxed));
                 }
                 info = sdscat(info, "\r\n");

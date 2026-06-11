@@ -7,26 +7,26 @@ tags {"repl external:skip"} {
 start_server {overrides {save ""}} {
 
     test {Repl compression config defaults are correct} {
-        assert_equal "no" [lindex [r config get replcompression] 1]
+        assert_equal "no" [lindex [r config get repl-compression] 1]
     }
 
-    test {replcompression can be toggled on and off} {
-        r config set replcompression yes
-        assert_equal "yes" [lindex [r config get replcompression] 1]
-        r config set replcompression no
-        assert_equal "no" [lindex [r config get replcompression] 1]
+    test {repl-compression can be toggled on and off} {
+        r config set repl-compression lz4-stream
+        assert_equal "lz4-stream" [lindex [r config get repl-compression] 1]
+        r config set repl-compression no
+        assert_equal "no" [lindex [r config get repl-compression] 1]
     }
 
     test {Repl compression configs survive CONFIG REWRITE and restart} {
-        r config set replcompression yes
+        r config set repl-compression lz4-stream
         r config rewrite
 
         restart_server 0 true false
 
-        assert_equal "yes" [lindex [r config get replcompression] 1]
+        assert_equal "lz4-stream" [lindex [r config get repl-compression] 1]
 
         # Restore default
-        r config set replcompression no
+        r config set repl-compression no
     }
 }
 
@@ -39,8 +39,8 @@ start_server {tags {"repl"} overrides {save ""}} {
     set primary_host [srv 0 host]
     set primary_port [srv 0 port]
 
-    test {Replica with replcompression no does NOT send capa compression} {
-        start_server {overrides {save "" replcompression no}} {
+    test {Replica with repl-compression no does NOT send capa compression} {
+        start_server {overrides {save "" repl-compression no}} {
             set replica [srv 0 client]
             $replica replicaof $primary_host $primary_port
 
@@ -57,8 +57,8 @@ start_server {tags {"repl"} overrides {save ""}} {
         }
     }
 
-    test {Replica with replcompression yes and diskless load sends capa compression} {
-        start_server {overrides {save "" replcompression yes repl-diskless-load swapdb}} {
+    test {Replica with repl-compression lz4-stream and diskless load sends capa compression} {
+        start_server {overrides {save "" repl-compression lz4-stream repl-diskless-load swapdb}} {
             set replica [srv 0 client]
             $replica replicaof $primary_host $primary_port
 
@@ -76,9 +76,9 @@ start_server {tags {"repl"} overrides {save ""}} {
         }
     }
 
-    test {Replica with replcompression yes and disk-backed load also negotiates compression} {
-        $primary config set replcompression yes
-        start_server {overrides {save "" replcompression yes repl-diskless-load disabled}} {
+    test {Replica with repl-compression lz4-stream and disk-backed load also negotiates compression} {
+        $primary config set repl-compression lz4-stream
+        start_server {overrides {save "" repl-compression lz4-stream repl-diskless-load disabled}} {
             set replica [srv 0 client]
             $replica replicaof $primary_host $primary_port
 
@@ -110,7 +110,7 @@ start_server {tags {"repl"} overrides {save ""}} {
 
             $replica replicaof no one
         }
-        $primary config set replcompression no
+        $primary config set repl-compression no
     }
 
     test {Primary receiving capa compression still completes full sync correctly (no-op)} {
@@ -119,7 +119,7 @@ start_server {tags {"repl"} overrides {save ""}} {
             $primary set "noop:$i" [string repeat "value$i " 10]
         }
 
-        start_server {overrides {save "" replcompression yes repl-diskless-load swapdb}} {
+        start_server {overrides {save "" repl-compression lz4-stream repl-diskless-load swapdb}} {
             set replica [srv 0 client]
             $replica replicaof $primary_host $primary_port
             wait_for_sync $replica
@@ -155,22 +155,22 @@ start_server {tags {"repl"} overrides {save ""}} {
         }
     }
 
-    test {Toggling replcompression mid-runtime affects the next handshake} {
+    test {Toggling repl-compression mid-runtime affects the next handshake} {
         # First sync with compression disabled
-        start_server {overrides {save "" replcompression no repl-diskless-load swapdb}} {
+        start_server {overrides {save "" repl-compression no repl-diskless-load swapdb}} {
             set replica [srv 0 client]
             $replica replicaof $primary_host $primary_port
 
             wait_for_condition 50 100 {
                 [s 0 master_link_status] eq {up}
             } else {
-                fail "Replication not started with replcompression no"
+                fail "Replication not started with repl-compression no"
             }
 
             assert_equal {up} [s 0 master_link_status]
 
             # Toggle compression on at runtime
-            $replica config set replcompression yes
+            $replica config set repl-compression lz4-stream
 
             # Disconnect and reconnect to trigger a new handshake
             $replica replicaof no one
@@ -179,7 +179,7 @@ start_server {tags {"repl"} overrides {save ""}} {
             wait_for_condition 50 100 {
                 [s 0 master_link_status] eq {up}
             } else {
-                fail "Replication not started after toggling replcompression yes"
+                fail "Replication not started after toggling repl-compression lz4-stream"
             }
 
             assert_equal {up} [s 0 master_link_status]
@@ -189,10 +189,10 @@ start_server {tags {"repl"} overrides {save ""}} {
     }
 
     test {Compressed incremental replication delivers correct data} {
-        $primary config set replcompression yes
+        $primary config set repl-compression lz4-stream
         $primary flushall
 
-        start_server {overrides {save "" replcompression yes repl-diskless-load swapdb}} {
+        start_server {overrides {save "" repl-compression lz4-stream repl-diskless-load swapdb}} {
             set replica [srv 0 client]
             $replica replicaof $primary_host $primary_port
 
@@ -222,14 +222,14 @@ start_server {tags {"repl"} overrides {save ""}} {
             $replica replicaof no one
         }
 
-        $primary config set replcompression no
+        $primary config set repl-compression no
     }
 
     test {Partial resync with compression delivers correct data} {
-        $primary config set replcompression yes
+        $primary config set repl-compression lz4-stream
         $primary flushall
 
-        start_server {overrides {save "" replcompression yes repl-diskless-load swapdb}} {
+        start_server {overrides {save "" repl-compression lz4-stream repl-diskless-load swapdb}} {
             set replica [srv 0 client]
             $replica replicaof $primary_host $primary_port
 
@@ -284,17 +284,17 @@ start_server {tags {"repl"} overrides {save ""}} {
             $replica replicaof no one
         }
 
-        $primary config set replcompression no
+        $primary config set repl-compression no
     }
 
-    test {Replica with replcompression yes handles a plaintext primary (passthrough)} {
+    test {Replica with repl-compression lz4-stream handles a plaintext primary (passthrough)} {
         # Primary has compression OFF, replica ON: the replica advertises the
         # capability but the primary sends plaintext, so the replica must pass
         # the stream through untouched rather than expecting a VCS envelope.
-        $primary config set replcompression no
+        $primary config set repl-compression no
         $primary flushall
 
-        start_server {overrides {save "" replcompression yes repl-diskless-load swapdb}} {
+        start_server {overrides {save "" repl-compression lz4-stream repl-diskless-load swapdb}} {
             set replica [srv 0 client]
             $replica replicaof $primary_host $primary_port
 
@@ -322,10 +322,10 @@ start_server {tags {"repl"} overrides {save ""}} {
         }
     }
 
-    test {Replica replcompression flip renegotiates upstream without manual reconnect} {
-        $primary config set replcompression yes
+    test {Replica repl-compression flip renegotiates upstream without manual reconnect} {
+        $primary config set repl-compression lz4-stream
 
-        start_server {overrides {save "" replcompression yes repl-diskless-load swapdb}} {
+        start_server {overrides {save "" repl-compression lz4-stream repl-diskless-load swapdb}} {
             set replica [srv 0 client]
             $replica replicaof $primary_host $primary_port
 
@@ -339,7 +339,7 @@ start_server {tags {"repl"} overrides {save ""}} {
             # Flipping compression OFF on the replica must, on its own, drop and
             # reconnect the upstream link so it re-advertises capa without
             # compression. No manual replicaof is issued.
-            $replica config set replcompression no
+            $replica config set repl-compression no
 
             wait_for_condition 50 200 {
                 [s 0 master_link_status] eq {up} &&
@@ -360,10 +360,10 @@ start_server {tags {"repl"} overrides {save ""}} {
         }
     }
 
-    test {CONFIG SET replcompression no disconnects compressed replicas} {
-        $primary config set replcompression yes
+    test {CONFIG SET repl-compression no disconnects compressed replicas} {
+        $primary config set repl-compression lz4-stream
 
-        start_server {overrides {save "" replcompression yes repl-diskless-load swapdb}} {
+        start_server {overrides {save "" repl-compression lz4-stream repl-diskless-load swapdb}} {
             set replica [srv 0 client]
             $replica replicaof $primary_host $primary_port
 
@@ -381,13 +381,13 @@ start_server {tags {"repl"} overrides {save ""}} {
             }
 
             # Disable compression on primary — should disconnect compressed replicas
-            $primary config set replcompression no
+            $primary config set repl-compression no
 
             # Replica should disconnect and reconnect
             wait_for_condition 50 200 {
                 [s 0 master_link_status] eq {up}
             } else {
-                fail "Replica did not reconnect after replcompression disabled"
+                fail "Replica did not reconnect after repl-compression disabled"
             }
 
             # After reconnect, compression should NOT be active
@@ -404,9 +404,9 @@ start_server {tags {"repl"} overrides {save ""}} {
         # Verifies that multiple compressed replicas can connect to the same
         # primary and all receive replication data. With IO threads enabled,
         # writes are distributed across the shared inbox.
-        $primary config set replcompression yes
+        $primary config set repl-compression lz4-stream
 
-        start_server {overrides {save "" replcompression yes repl-diskless-load swapdb}} {
+        start_server {overrides {save "" repl-compression lz4-stream repl-diskless-load swapdb}} {
             set replica1 [srv 0 client]
             $replica1 replicaof $primary_host $primary_port
 
@@ -416,7 +416,7 @@ start_server {tags {"repl"} overrides {save ""}} {
                 fail "Replica 1 not started"
             }
 
-            start_server {overrides {save "" replcompression yes repl-diskless-load swapdb}} {
+            start_server {overrides {save "" repl-compression lz4-stream repl-diskless-load swapdb}} {
                 set replica2 [srv 0 client]
                 $replica2 replicaof $primary_host $primary_port
 
@@ -447,7 +447,7 @@ start_server {tags {"repl"} overrides {save ""}} {
             }
             $replica1 replicaof no one
         }
-        $primary config set replcompression no
+        $primary config set repl-compression no
     }
 
     # ============================================================
@@ -456,10 +456,10 @@ start_server {tags {"repl"} overrides {save ""}} {
 
     if {[lsearch $::denytags "repl-compression-suite"] == -1} {
 
-    $primary config set replcompression yes
+    $primary config set repl-compression lz4-stream
     $primary flushall
 
-    start_server {overrides {save "" replcompression yes repl-diskless-load swapdb}} {
+    start_server {overrides {save "" repl-compression lz4-stream repl-diskless-load swapdb}} {
         set replica [srv 0 client]
         $replica replicaof $primary_host $primary_port
 
@@ -578,7 +578,7 @@ start_server {tags {"repl"} overrides {save ""}} {
     }
 
     test {Compression handles io-threads change gracefully} {
-        start_server {overrides {save "" replcompression yes repl-diskless-load swapdb}} {
+        start_server {overrides {save "" repl-compression lz4-stream repl-diskless-load swapdb}} {
             set replica [srv 0 client]
             $replica replicaof $primary_host $primary_port
 
@@ -610,7 +610,7 @@ start_server {tags {"repl"} overrides {save ""}} {
         }
     }
 
-    $primary config set replcompression no
+    $primary config set repl-compression no
 
     } ;# end repl-compression-suite
 }
@@ -619,16 +619,16 @@ start_server {tags {"repl"} overrides {save ""}} {
 # Multi-replica compressed replication tests
 # ============================================================
 
-# Disabling replcompression at runtime disconnects compressed replicas. The
+# Disabling repl-compression at runtime disconnects compressed replicas. The
 # disconnect is deferred until after CONFIG SET commits (so a rolled-back
 # multi-option CONFIG SET drops nothing), then the replica reconnects plaintext.
-start_server {tags {"repl"} overrides {save "" replcompression yes}} {
+start_server {tags {"repl"} overrides {save "" repl-compression lz4-stream}} {
     set primary [srv 0 client]
     set primary_host [srv 0 host]
     set primary_port [srv 0 port]
 
-    test {Disabling replcompression disconnects compressed replicas} {
-        start_server {overrides {save "" replcompression yes repl-diskless-load swapdb}} {
+    test {Disabling repl-compression disconnects compressed replicas} {
+        start_server {overrides {save "" repl-compression lz4-stream repl-diskless-load swapdb}} {
             set replica [srv 0 client]
             $replica replicaof $primary_host $primary_port
             wait_for_sync $replica
@@ -639,14 +639,14 @@ start_server {tags {"repl"} overrides {save "" replcompression yes}} {
                 fail "Compression not active before disable"
             }
 
-            $primary config set replcompression no
+            $primary config set repl-compression no
 
             # The compressed replica is dropped, then reconnects as plaintext, so
             # the link no longer reports compression=lz4.
             wait_for_condition 50 100 {
                 [regexp -all "compression=lz4" [$primary info replication]] == 0
             } else {
-                fail "Compressed replica was not disconnected after replcompression no"
+                fail "Compressed replica was not disconnected after repl-compression no"
             }
             wait_for_condition 50 100 {
                 [status $replica master_link_status] eq "up"
@@ -656,20 +656,20 @@ start_server {tags {"repl"} overrides {save "" replcompression yes}} {
 
             $replica replicaof no one
         }
-        $primary config set replcompression yes
+        $primary config set repl-compression lz4-stream
     }
 }
 
-# Enabling replcompression at runtime disconnects capable-but-plaintext replicas
+# Enabling repl-compression at runtime disconnects capable-but-plaintext replicas
 # so they reconnect compressed (symmetric with the disable case; deferred to
 # CONFIG SET commit so a rolled-back command reconnects nothing).
-start_server {tags {"repl"} overrides {save "" replcompression no}} {
+start_server {tags {"repl"} overrides {save "" repl-compression no}} {
     set primary [srv 0 client]
     set primary_host [srv 0 host]
     set primary_port [srv 0 port]
 
-    test {Enabling replcompression reconnects capable replicas compressed} {
-        start_server {overrides {save "" replcompression yes repl-diskless-load swapdb}} {
+    test {Enabling repl-compression reconnects capable replicas compressed} {
+        start_server {overrides {save "" repl-compression lz4-stream repl-diskless-load swapdb}} {
             set replica [srv 0 client]
             $replica replicaof $primary_host $primary_port
             wait_for_sync $replica
@@ -685,7 +685,7 @@ start_server {tags {"repl"} overrides {save "" replcompression no}} {
 
             # Enable on the primary: the capable replica is dropped and reconnects
             # over a compressed stream.
-            $primary config set replcompression yes
+            $primary config set repl-compression lz4-stream
             wait_for_condition 50 100 {
                 [regexp -all "compression=lz4" [$primary info replication]] >= 1
             } else {
@@ -707,23 +707,23 @@ start_server {tags {"repl"} overrides {save "" replcompression no}} {
 }
 
 # Test 4: Multiple replicas distribute across threads and stay in sync
-start_server {tags {"repl"} overrides {save "" io-threads 4 io-threads-always-active yes replcompression yes}} {
+start_server {tags {"repl"} overrides {save "" io-threads 4 io-threads-always-active yes repl-compression lz4-stream}} {
     set primary [srv 0 client]
     set primary_host [srv 0 host]
     set primary_port [srv 0 port]
 
     test {Multiple replicas all stay in sync under load} {
-        start_server {overrides {save "" replcompression yes repl-diskless-load swapdb}} {
+        start_server {overrides {save "" repl-compression lz4-stream repl-diskless-load swapdb}} {
             set replica1 [srv 0 client]
             $replica1 replicaof $primary_host $primary_port
             wait_for_sync $replica1
 
-            start_server {overrides {save "" replcompression yes repl-diskless-load swapdb}} {
+            start_server {overrides {save "" repl-compression lz4-stream repl-diskless-load swapdb}} {
                 set replica2 [srv 0 client]
                 $replica2 replicaof $primary_host $primary_port
                 wait_for_sync $replica2
 
-                start_server {overrides {save "" replcompression yes repl-diskless-load swapdb}} {
+                start_server {overrides {save "" repl-compression lz4-stream repl-diskless-load swapdb}} {
                     set replica3 [srv 0 client]
                     $replica3 replicaof $primary_host $primary_port
                     wait_for_sync $replica3
@@ -765,18 +765,18 @@ start_server {tags {"repl"} overrides {save "" io-threads 4 io-threads-always-ac
 }
 
 # Test 5: Compressed replication survives replica disconnect/reconnect
-start_server {tags {"repl"} overrides {save "" io-threads 4 io-threads-always-active yes replcompression yes}} {
+start_server {tags {"repl"} overrides {save "" io-threads 4 io-threads-always-active yes repl-compression lz4-stream}} {
     set primary [srv 0 client]
     set primary_host [srv 0 host]
     set primary_port [srv 0 port]
 
     test {Compressed replication survives replica disconnect and reconnect} {
-        start_server {overrides {save "" replcompression yes repl-diskless-load swapdb}} {
+        start_server {overrides {save "" repl-compression lz4-stream repl-diskless-load swapdb}} {
             set replica1 [srv 0 client]
             $replica1 replicaof $primary_host $primary_port
             wait_for_sync $replica1
 
-            start_server {overrides {save "" replcompression yes repl-diskless-load swapdb}} {
+            start_server {overrides {save "" repl-compression lz4-stream repl-diskless-load swapdb}} {
                 set replica2 [srv 0 client]
                 $replica2 replicaof $primary_host $primary_port
                 wait_for_sync $replica2

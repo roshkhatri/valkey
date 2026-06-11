@@ -459,15 +459,6 @@ typedef enum {
 #define REPLICA_CAPA_SKIP_RDB_CHECKSUM_STR "skip-rdb-checksum" /* Supports skipping RDB checksum for sync requests. */
 #define REPLICA_CAPA_COMPRESSION_STR "compression"             /* Supports replication compression. */
 
-/* Replication compression: hardcoded defaults.
- * Per-algorithm default levels; keep REPL_COMPRESSION_LEVEL in sync with the
- * active REPL_COMPRESSION_ALGO. */
-#define REPL_COMPRESSION_DEFAULT_LEVEL_LZ4 0
-/* #define REPL_COMPRESSION_DEFAULT_LEVEL_ZSTD 3 */
-
-#define REPL_COMPRESSION_ALGO ALGO_LZ4
-#define REPL_COMPRESSION_LEVEL REPL_COMPRESSION_DEFAULT_LEVEL_LZ4
-
 /* Replica requirements */
 #define REPLICA_REQ_NONE 0
 #define REPLICA_REQ_RDB_EXCLUDE_DATA (1 << 0)      /* Exclude data from RDB */
@@ -614,6 +605,9 @@ typedef enum { RDB_VERSION_CHECK_STRICT = 0,
 typedef enum { RDB_COMPRESSION_NO = 0,
                RDB_COMPRESSION_YES,
                RDB_COMPRESSION_LZ4_STREAM } rdb_compression_mode;
+
+typedef enum { REPL_COMPRESSION_NO = 0,
+               REPL_COMPRESSION_LZ4_STREAM } repl_compression_mode;
 
 /* Structure representing a non-owning view of a buffer.
  * A stringRef struct does not manage the underlying memory, so its destruction
@@ -1229,8 +1223,6 @@ typedef struct ClientPubSubData {
                                       context of client side caching. */
 } ClientPubSubData;
 
-typedef struct streamWriter streamWriter;
-typedef struct streamReader streamReader;
 typedef struct replCompressor replCompressor;
 typedef struct replDecompressor replDecompressor;
 
@@ -1272,15 +1264,10 @@ typedef struct ClientReplicationData {
                                       * read by main thread in postWriteToReplica.
                                       * Atomic to make the cross-thread ordering explicit. */
     /* Compression metrics (primary side, per-replica) */
-    long long repl_compressed_bytes_total;   /* Total compressed bytes sent (main thread only). */
-    long long repl_uncompressed_bytes_total; /* Total raw bytes before compression (main thread only). */
-    /* The next three are updated on IO threads (writeToReplicaCompressed) and
-     * read by INFO on the main thread, so they are atomic. Relaxed ordering is
-     * sufficient: they are best-effort diagnostic counters with no dependency on
-     * other memory. */
-    _Atomic(long long) repl_compression_errors;         /* Compression failure count. */
-    _Atomic(long long) repl_compression_cpu_usec;       /* Cumulative CPU time in compression (microseconds). */
-    _Atomic(long long) repl_compression_pending_drains; /* Times the resume-pending path ran (backpressure indicator). */
+    long long repl_compressed_bytes_total;        /* Total compressed bytes sent (main thread only). */
+    long long repl_uncompressed_bytes_total;      /* Total raw bytes before compression (main thread only). */
+    _Atomic(long long) repl_compression_errors;   /* Compression failure count. */
+    _Atomic(long long) repl_compression_cpu_usec; /* Cumulative CPU time in compression (microseconds). */
 } ClientReplicationData;
 
 typedef struct ClientModuleData {
@@ -2081,7 +2068,8 @@ struct valkeyServer {
     int saveparamslen;                    /* Number of saving points */
     char *rdb_filename;                   /* Name of RDB file */
     int rdb_compression;                  /* RDB compression mode */
-    int repl_compression;                 /* Use compression for replication? 0=no (default) */
+    int repl_compression;                 /* Replication compression mode (repl_compression_mode):
+                                           * REPL_COMPRESSION_NO (default) or REPL_COMPRESSION_LZ4_STREAM. */
     int repl_provisional_compression;     /* Replica: compression advertised on the current upstream
                                            * handshake. Gates decompressor setup (not the live config),
                                            * so a mid-handshake config flip cannot desync the link. */
@@ -2228,8 +2216,6 @@ struct valkeyServer {
     size_t repl_decompression_errors;      /* Decompression failures (replica side). */
     long long repl_decompression_cpu_usec; /* Cumulative μs spent in replDecompressQueryBuf. */
     size_t repl_decompressed_bytes_total;  /* Total decompressed bytes processed (replica side). */
-    long long repl_apply_cpu_usec;         /* Cumulative μs spent parsing+executing replication commands. */
-    size_t repl_apply_batches;             /* Number of read→decompress→apply cycles processed. */
 
     /* The following two fields is where we store primary PSYNC replid/offset
      * while the PSYNC is in progress. At the end we'll copy the fields into

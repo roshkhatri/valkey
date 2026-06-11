@@ -88,7 +88,7 @@ ConnectionType *connTypeOfReplication(void) {
  * IP address and its listening port which is more clear for the user, for
  * example: "Closing connection with replica 10.1.2.3:6380". */
 
-/* Reconcile each replica's transport with the current replcompression setting
+/* Reconcile each replica's transport with the current repl-compression setting
  * after a runtime change. A live link cannot switch between plaintext and a
  * compressed VCS/LZ4 frame mid-stream, so a mismatched replica is dropped and
  * reconnects to renegotiate:
@@ -150,11 +150,46 @@ static int shouldEnableReplicaCompression(client *c) {
     return (c->repl_data->replica_capa & REPLICA_CAPA_COMPRESSION) != 0;
 }
 
+/* Initialize inline compression for a replica client. */
+int replInitCompression(client *c, compressionAlgo algo, int level) {
+    if (!c || !c->repl_data) return C_ERR;
+
+    replDestroyCompression(c);
+
+    c->repl_data->repl_compressor = replCompressorCreate(algo, level);
+    if (!c->repl_data->repl_compressor) return C_ERR;
+
+    atomic_store_explicit(&c->repl_data->compression_error, 0, memory_order_relaxed);
+
+    return C_OK;
+}
+
+/* Destroy inline compression state for a replica client. Called from freeClient
+ * and on runtime config changes. */
+void replDestroyCompression(client *c) {
+    if (!c || !c->repl_data) return;
+
+    if (c->repl_data->repl_compressor) {
+        /* Ensure no IO thread is using this client */
+        waitForClientIO(c);
+
+        replCompressorDestroy(c->repl_data->repl_compressor);
+        c->repl_data->repl_compressor = NULL;
+    }
+
+    atomic_store_explicit(&c->repl_data->compression_error, 0, memory_order_relaxed);
+    c->repl_data->repl_compressed_bytes_total = 0;
+    c->repl_data->repl_uncompressed_bytes_total = 0;
+    atomic_store_explicit(&c->repl_data->repl_compression_errors, 0, memory_order_relaxed);
+    atomic_store_explicit(&c->repl_data->repl_compression_cpu_usec, 0, memory_order_relaxed);
+}
+
 /* Initialize framed transport compression for a replica at PSYNC completion.
  * The stream writer emits the VCS envelope lazily on its first write. */
 static int replicaInitCompressionOnPsync(client *c) {
-    compressionAlgo algo = REPL_COMPRESSION_ALGO;
-    int level = REPL_COMPRESSION_LEVEL;
+    /* Derive the codec from the configured mode, mirroring the RDB path. */
+    compressionAlgo algo = server.repl_compression == REPL_COMPRESSION_LZ4_STREAM ? ALGO_LZ4 : ALGO_NONE;
+    int level = 0; /* Codec default. */
 
     serverAssert(c->io_write_state == CLIENT_IDLE);
     if (replInitCompression(c, algo, level) != C_OK) {
@@ -1560,8 +1595,8 @@ void replconfCommand(client *c) {
                 c->repl_data->replica_capa |= REPLICA_CAPA_SKIP_RDB_CHECKSUM;
             /* "compression" (REPLICA_CAPA_COMPRESSION): the replica can decode a
              * compressed incremental replication stream. Advertised when the
-             * replica has replcompression enabled; the primary compresses only
-             * if it also has replcompression enabled. Optional and backward
+             * replica has repl-compression enabled; the primary compresses only
+             * if it also has repl-compression enabled. Optional and backward
              * compatible: a primary that doesn't understand it just ignores it. */
             else if (!strcasecmp(objectGetVal(c->argv[j + 1]), REPLICA_CAPA_COMPRESSION_STR))
                 c->repl_data->replica_capa |= REPLICA_CAPA_COMPRESSION;
