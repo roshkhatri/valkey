@@ -151,7 +151,7 @@ static int shouldEnableReplicaCompression(client *c) {
 }
 
 /* Initialize inline compression for a replica client. */
-int replInitCompression(client *c, compressionAlgo algo, int level) {
+static int replInitCompression(client *c, compressionAlgo algo, int level) {
     if (!c || !c->repl_data) return C_ERR;
 
     replDestroyCompression(c);
@@ -203,20 +203,22 @@ static int replicaInitCompressionOnPsync(client *c) {
     return C_OK;
 }
 
-int replInitDecompression(void) {
+static void replDestroyDecompression(void);
+
+static int replInitDecompression(void) {
     replDestroyDecompression();
     server.repl_decompressor = replDecompressorCreate();
     return server.repl_decompressor ? C_OK : C_ERR;
 }
 
-void replDestroyDecompression(void) {
+static void replDestroyDecompression(void) {
     if (server.repl_decompressor) {
         replDecompressorDestroy(server.repl_decompressor);
         server.repl_decompressor = NULL;
     }
 }
 
-int replRefreshDecompression(void) {
+static int replRefreshDecompression(void) {
     replDestroyDecompression();
     return replInitDecompression();
 }

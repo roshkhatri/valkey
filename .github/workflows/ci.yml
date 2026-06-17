@@ -198,8 +198,8 @@ jobs:
         run: ./runtest --verbose --single unit/tls --dump-logs --tls
 
   test-replication-compression:
-    # Re-runs the replication suite with repl-compression=yes applied globally
-    # via --config. Test files opt in by carrying the top-level "repl-compression"
+    # Re-runs the replication suite with repl-compression=lz4-stream applied
+    # globally via --config. Test files opt in by carrying the top-level "repl-compression"
     # tag (see tests/support/server.tcl), so this job selects them with
     # --tags repl-compression instead of a hardcoded filename list that would
     # silently drift if a file is renamed. Exercises the streaming-compression
@@ -209,7 +209,7 @@ jobs:
     # Note: a few tests are intentionally NOT tagged for this job:
     #  - integration/replication-psync: its start_server lives inside a reusable
     #    proc, incompatible with a top-level-only tag.
-    #  - integration/repl-compression.tcl: asserts the default repl-compression=no
+    #  - integration/repl-compression.tcl: asserts the default repl-compression no
     #    behavior; covered by the regular test-ubuntu-latest job.
     #  - integration/replication-buffer.tcl and the buffer-memory tests in
     #    integration/dual-channel-replication.tcl: they assert exact replication
