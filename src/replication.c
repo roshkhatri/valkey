@@ -203,14 +203,6 @@ static int replicaInitCompressionOnPsync(client *c) {
     return C_OK;
 }
 
-static void replDestroyDecompression(void);
-
-static int replInitDecompression(void) {
-    replDestroyDecompression();
-    server.repl_decompressor = replDecompressorCreate();
-    return server.repl_decompressor ? C_OK : C_ERR;
-}
-
 static void replDestroyDecompression(void) {
     if (server.repl_decompressor) {
         replDecompressorDestroy(server.repl_decompressor);
@@ -218,9 +210,10 @@ static void replDestroyDecompression(void) {
     }
 }
 
-static int replRefreshDecompression(void) {
+/* (Re)create the replica-side decompressor for a fresh stream. */
+static void replRefreshDecompression(void) {
     replDestroyDecompression();
-    return replInitDecompression();
+    server.repl_decompressor = replDecompressorCreate();
 }
 
 char *replicationGetReplicaName(client *c) {
@@ -2525,9 +2518,7 @@ void replicaAfterLoadPrimaryRDB(connection *conn, rdbSaveInfo *rsi, int disk_bas
         /* Send the initial ACK immediately to put this replica in online state. */
         replicationSendAck();
         /* Initialize decompression for the incremental stream if compression is active. */
-        if (server.repl_provisional_compression && replRefreshDecompression() == C_ERR)
-            serverLog(LL_WARNING, "Failed to initialize replication decompression; "
-                                  "compressed stream from primary cannot be decoded");
+        if (server.repl_provisional_compression) replRefreshDecompression();
     }
 
     /* Fire the primary link modules event. */
@@ -3901,9 +3892,7 @@ int dualChannelReplMainConnRecvPsyncReply(connection *conn, sds *err) {
             serverCommunicateSystemd("STATUS=PRIMARY <-> REPLICA sync: Partial Resynchronization accepted. Ready to "
                                      "accept connections in read-write mode.\n");
         }
-        if (server.repl_provisional_compression && replRefreshDecompression() == C_ERR)
-            serverLog(LL_WARNING, "Failed to initialize replication decompression; "
-                                  "compressed stream from primary cannot be decoded");
+        if (server.repl_provisional_compression) replRefreshDecompression();
         dualChannelSyncHandlePsync();
         return C_OK;
     }
@@ -4433,9 +4422,7 @@ void syncWithPrimary(connection *conn) {
             serverCommunicateSystemd("STATUS=PRIMARY <-> REPLICA sync: Partial Resynchronization accepted. Ready to "
                                      "accept connections in read-write mode.\n");
         }
-        if (server.repl_provisional_compression && replRefreshDecompression() == C_ERR)
-            serverLog(LL_WARNING, "Failed to initialize replication decompression; "
-                                  "compressed stream from primary cannot be decoded");
+        if (server.repl_provisional_compression) replRefreshDecompression();
         return;
     }
 
