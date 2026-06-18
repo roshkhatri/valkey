@@ -2538,6 +2538,9 @@ static void writeToReplicaCompressed(client *c) {
         }
 
         size_t len = end - start;
+        /* Cap this write at the remaining batch budget; the cursor resumes mid-block next cycle. */
+        size_t remaining = REPL_COMPRESSION_BATCH_LIMIT - total_raw;
+        if (len > remaining) len = remaining;
         ssize_t rc = replCompressorWrite(compressor, block->buf + start, len);
         if (rc < 0) {
             atomic_store_explicit(&c->repl_data->compression_error, 1, memory_order_release);

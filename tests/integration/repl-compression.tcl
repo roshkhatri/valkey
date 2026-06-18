@@ -225,6 +225,39 @@ start_server {tags {"repl"} overrides {save ""}} {
         $primary config set repl-compression no
     }
 
+    test {Compressed incremental replication handles values larger than the batch limit} {
+        # A value past REPL_COMPRESSION_BATCH_LIMIT (1 MB) is compressed across
+        # multiple dispatches; verify it round-trips intact.
+        $primary config set repl-compression lz4-stream
+        $primary flushall
+
+        start_server {overrides {save "" repl-compression lz4-stream repl-diskless-load swapdb}} {
+            set replica [srv 0 client]
+            $replica replicaof $primary_host $primary_port
+
+            wait_for_condition 50 100 {
+                [s 0 master_link_status] eq {up}
+            } else {
+                fail "Replication not started"
+            }
+
+            # ~4 MB value (well past the 1 MB batch limit) written after full sync.
+            set bigval [string repeat "abcdefghij0123456789" 209715]
+            $primary set bigkey $bigval
+
+            wait_for_condition 50 200 {
+                [$replica get bigkey] eq $bigval
+            } else {
+                fail "Large value did not replicate intact under compression"
+            }
+            assert_equal [string length $bigval] [string length [$replica get bigkey]]
+
+            $replica replicaof no one
+        }
+
+        $primary config set repl-compression no
+    }
+
     test {Partial resync with compression delivers correct data} {
         $primary config set repl-compression lz4-stream
         $primary flushall
