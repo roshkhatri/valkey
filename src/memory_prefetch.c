@@ -23,6 +23,7 @@ typedef enum {
     DEEP_PREFETCH_HEADER, /* Prefetch val->ptr (data structure header) */
     DEEP_PREFETCH_INIT,   /* Init incremental find on inner hashtable */
     DEEP_PREFETCH_STEP,   /* Step through incremental find */
+    DEEP_PREFETCH_VALUE,  /* Prefetch the found entry value */
 } DeepPrefetchPhase;
 
 typedef struct KeyPrefetchInfo {
@@ -251,12 +252,22 @@ static void prefetchValueDeep(KeyPrefetchInfo *info) {
             moveToNextKey();
             return;
         }
-        /* Current field done. Check if there are more fields to prefetch. */
+        info->deep_phase = DEEP_PREFETCH_VALUE;
+        moveToNextKey();
+        return;
+
+    case DEEP_PREFETCH_VALUE: {
+        void *inner_entry;
+        if (hashtableIncrementalFindGetResult(&info->inner_hashtab_state, &inner_entry) && inner_entry) {
+            if (!entryHasEmbeddedValue(inner_entry)) {
+                char *value = entryGetValue(inner_entry, NULL);
+                if (value) valkey_prefetch(value);
+            }
+        }
         int next_idx = info->current_field_idx + info->member_key_step;
         int fields_done = (next_idx - info->member_key_index) / info->member_key_step;
         if (next_idx < info->argc &&
             (info->member_key_count < 0 || fields_done < info->member_key_count)) {
-            /* More fields to prefetch - loop back to INIT */
             info->current_field_idx = next_idx;
             info->deep_phase = DEEP_PREFETCH_INIT;
             moveToNextKey();
@@ -264,6 +275,7 @@ static void prefetchValueDeep(KeyPrefetchInfo *info) {
         }
         markKeyAsdone(info);
         return;
+    }
     }
 }
 
