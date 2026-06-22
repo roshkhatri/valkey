@@ -1566,6 +1566,8 @@ static int rdbSaveInternal(int req, const char *filename, rdbSaveInfo *rsi, int 
     char *err_op; /* For a detailed log */
     compressionAlgo streaming_algo = server.rdb_compression == RDB_COMPRESSION_LZ4_STREAM ? ALGO_LZ4 : ALGO_NONE;
     bool use_streaming_compression = streaming_algo != ALGO_NONE;
+    /* Replication full sync does not negotiate streaming compression yet. */
+    if (rdbflags & RDBFLAGS_REPLICATION) use_streaming_compression = false;
     compressRio cr;
     compressRio *crp = NULL;
 
@@ -1594,7 +1596,7 @@ static int rdbSaveInternal(int req, const char *filename, rdbSaveInfo *rsi, int 
      * compressRio. rdbSaveRio writes through the compressor transparently.
      * Per-string LZF is gated on RIO_FLAG_STREAMING_COMPRESSION (set on
      * the wrapper, not on the inner rio), so paths without a streaming
-     * wrapper (DUMP, AOF rewrite, diskless sync) keep using LZF as
+     * wrapper (DUMP, AOF rewrite, replication sync) keep using LZF as
      * before. */
     rio *save_rio = &rdb;
     if (use_streaming_compression) {

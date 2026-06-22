@@ -402,8 +402,10 @@ start_server {tags {"rdb-compression repl external:skip"}} {
         set primary_host [srv 0 host]
         set primary_port [srv 0 port]
 
-        test {Disk-based full sync replication works with LZ4-compressed RDB snapshot} {
+        test {Disk-based full sync writes plain RDB when rdbcompression is lz4-stream} {
             $primary config set rdbcompression lz4-stream
+            $primary config set repl-diskless-sync no
+            $primary config set rdb-del-sync-files no
             $primary flushall
             for {set i 0} {$i < 500} {incr i} {
                 $primary set "repl:$i" [string repeat "payload$i " 40]
@@ -424,6 +426,8 @@ start_server {tags {"rdb-compression repl external:skip"}} {
             }
 
             assert_equal [string repeat "payload42 " 40] [$replica get repl:42]
+            assert {[file exists [dump_rdb_path $primary]]}
+            assert_equal "VALKEY" [string range [read_dump_rdb_header_bytes $primary] 0 5]
 
             $primary set repl:post-sync "after-sync"
             wait_for_condition 50 100 {
