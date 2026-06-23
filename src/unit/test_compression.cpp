@@ -406,7 +406,6 @@ TEST_F(CompressionTest, streamReaderClassifiesProbeInputs) {
 
         streamReaderInfo info;
         if (cases[i].expect_probe_ok) {
-            ASSERT_EQ(streamReaderProbe(&t), 0) << cases[i].name;
             ASSERT_EQ(streamReaderGetInfo(&t, &info), 0) << cases[i].name;
             ASSERT_FALSE(info.compressed) << cases[i].name;
 
@@ -416,7 +415,6 @@ TEST_F(CompressionTest, streamReaderClassifiesProbeInputs) {
             ASSERT_EQ(memcmp(out, cases[i].input, cases[i].expected_read_len), 0) << cases[i].name;
             ASSERT_EQ(streamReaderRead(&t, out, sizeof(out)), 0) << cases[i].name;
         } else {
-            ASSERT_EQ(streamReaderProbe(&t), -1) << cases[i].name;
             ASSERT_EQ(streamReaderGetInfo(&t, &info), -1) << cases[i].name;
             ASSERT_EQ(t.error_kind, cases[i].expected_error) << cases[i].name;
 
@@ -551,7 +549,6 @@ TEST_F(CompressionTest, streamReaderValidatesCompressedStreamKinds) {
 
         streamReaderInfo info;
         if (cases[i].expect_ok) {
-            ASSERT_EQ(streamReaderProbe(&r), 0) << cases[i].name;
             ASSERT_EQ(streamReaderGetInfo(&r, &info), 0) << cases[i].name;
             ASSERT_TRUE(info.compressed) << cases[i].name;
             ASSERT_EQ(info.algo, ALGO_LZ4) << cases[i].name;
@@ -562,7 +559,6 @@ TEST_F(CompressionTest, streamReaderValidatesCompressedStreamKinds) {
             ASSERT_EQ(memcmp(out, cases[i].payload, payload_len), 0) << cases[i].name;
             ASSERT_EQ(streamReaderRead(&r, out, sizeof(out)), 0) << cases[i].name;
         } else {
-            ASSERT_EQ(streamReaderProbe(&r), -1) << cases[i].name;
             ASSERT_EQ(streamReaderGetInfo(&r, &info), -1) << cases[i].name;
             ASSERT_EQ(r.error_kind, STREAM_READER_ERROR_INCOMPATIBLE) << cases[i].name;
 

@@ -182,8 +182,6 @@ static vcsProbeResult streamReaderProbeFeed(streamReader *reader,
 #define STREAM_WRITER_INPUT_CHUNK_SIZE (1024 * 1024)
 
 int streamWriterInit(streamWriter *writer, streamWriterConfig *cfg, streamWriterEmitFn emit_fn, void *emit_ctx) {
-    if (!compressionAlgoSupportsStreaming(cfg->algo)) return -1;
-
     memset(writer, 0, sizeof(*writer));
     writer->emit_fn = emit_fn;
     writer->emit_ctx = emit_ctx;
@@ -358,7 +356,7 @@ static size_t streamReaderProbeBytesNeeded(streamReader *reader) {
     return VCS_ENVELOPE_SIZE - reader->probe.header_len;
 }
 
-int streamReaderProbe(streamReader *reader) {
+static int streamReaderProbe(streamReader *reader) {
     if (reader->errored) return -1;
     if (reader->probe.ready) return 0;
 
