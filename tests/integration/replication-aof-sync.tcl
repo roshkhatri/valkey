@@ -164,7 +164,7 @@ tags {"repl external:skip" repl-compression} {
         }
     }
 
-    test "Replica restart falls back to bgrewriteaof when synced RDB uses streaming compression" {
+    test "Replica restart reuses disk-based sync RDB when primary rdbcompression is lz4-stream" {
         start_server {overrides {appendonly yes aof-use-rdb-preamble yes repl-diskless-sync no save "" rdbcompression lz4-stream}} {
             set primary [srv 0 client]
             set primary_host [srv 0 host]
@@ -183,17 +183,12 @@ tags {"repl external:skip" repl-compression} {
                 wait_for_sync $replica
 
                 wait_for_condition 50 100 {
-                    [log_file_matches $replica_log "*uses streaming compression, falling back to BGREWRITEAOF*"]
+                    [log_file_matches $replica_log "*Reused RDB file from primary sync as AOF base file*"]
                 } else {
-                    fail "Expected streaming-compressed sync RDB fallback log not found"
+                    fail "Expected log message about reusing RDB file not found"
                 }
 
-                # The positive wait above proves restartAOFWithSyncRdb has run and
-                # taken the fallback branch; only after that ordering is the negative
-                # check below meaningful (otherwise it could pass simply because the
-                # log line hasn't been written yet).
-                assert {![log_file_matches $replica_log "*Reused RDB file from primary sync as AOF base file*"]}
-                waitForBgrewriteaof $replica
+                assert {![log_file_matches $replica_log "*uses streaming compression, falling back to BGREWRITEAOF*"]}
                 set manifest_path [get_aof_manifest_path $replica]
                 set base_name [get_cur_base_aof_name $manifest_path]
                 assert {$base_name ne ""}

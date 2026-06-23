@@ -31,7 +31,6 @@
 #define __RDB_H
 
 #include <stdio.h>
-#include "compression_rio.h"
 #include "rio.h"
 
 /* TBD: include only necessary headers. */
@@ -187,15 +186,6 @@ enum RdbType {
 #define RDB_LOAD_ERR_OTHER 3             /* Any other errors */
 #define RDB_LOAD_ERR_ALL_ITEMS_EXPIRED 4 /* All fields expired */
 
-/* Wrapper state for preparing a raw input rio as a logical RDB byte stream. */
-typedef struct {
-    rio *raw_rio;
-    rio *rdb_rio;
-    decompressRio decompressor;
-    streamReaderInfo stream_info;
-    bool initialized;
-} rdbInputStream;
-
 bool rdbIsVersionAccepted(int rdbver, bool is_valkey_magic, bool is_redis_magic);
 ssize_t rdbWriteRaw(rio *rdb, void *p, size_t len);
 int rdbSaveType(rio *rdb, unsigned char type);
@@ -231,10 +221,6 @@ int rdbSaveBinaryFloatValue(rio *rdb, float val);
 int rdbLoadBinaryFloatValue(rio *rdb, float *val);
 int rdbLoadRio(rio *rdb, int rdbflags, rdbSaveInfo *rsi);
 int rdbLoadRioWithLoadingCtxScopedRdb(rio *rdb, int rdbflags, rdbSaveInfo *rsi, rdbLoadingCtx *rdb_loading_ctx);
-void rdbInputStreamInit(rdbInputStream *input, rio *raw_rio);
-decompressRioInitResult rdbInputStreamPrepare(rdbInputStream *input);
-int rdbInputStreamValidateEnd(rdbInputStream *input);
-void rdbInputStreamFree(rdbInputStream *input);
 bool rdbRioHasCorruptCompressedInput(rio *rdb);
 int rdbFunctionLoad(rio *rdb, int ver, functionsLibCtx *lib_ctx, int rdbflags, sds *err);
 int rdbSaveRio(int req, int rdbver, rio *rdb, int *error, int rdbflags, rdbSaveInfo *rsi);

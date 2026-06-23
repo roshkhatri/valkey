@@ -10,6 +10,11 @@
 #include "compression_stream.h"
 #include "rio.h"
 
+/* Streaming compression has three layers:
+ * - compression.c/compression_*.c wrap codec-specific streaming APIs.
+ * - compression_stream.c owns VCS framing, probing, buffering, and validation.
+ * - compression_rio.c adapts those streams to rio so RDB code can keep using rio.
+ */
 typedef struct {
     rio base; /* Must be first, allows casting to (rio *). */
     rio *inner;

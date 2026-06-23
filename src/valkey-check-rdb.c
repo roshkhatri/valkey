@@ -30,6 +30,7 @@
 #include "mt19937-64.h"
 #include "server.h"
 #include "rdb.h"
+#include "compression_rio.h"
 #include "module.h"
 #include "hdr_histogram.h"
 #include "fpconv_dtoa.h"
@@ -609,7 +610,8 @@ int redis_check_rdb(char *rdbfilename, FILE *fp) {
     long long expiretime;
     static rio file_rdb;
     rio *rdb = &file_rdb; /* Pointed by global struct riostate. */
-    rdbInputStream input;
+    decompressRio decompressor;
+    bool decompressor_initialized = false;
     struct stat sb;
 
     now = mstime();
@@ -620,10 +622,15 @@ int redis_check_rdb(char *rdbfilename, FILE *fp) {
 
     startLoadingFile(sb.st_size, rdbfilename, RDBFLAGS_NONE);
     rioInitWithFile(&file_rdb, fp);
-    rdbInputStreamInit(&input, &file_rdb);
 
     /* Support both plain RDB files and VCS-wrapped streaming-compressed RDBs. */
-    decompressRioInitResult init_rc = rdbInputStreamPrepare(&input);
+    streamReaderConfig reader_cfg = {
+        .expected_stream_kind = STREAM_KIND_RDB,
+        .allow_passthrough = true,
+        .buffer_size = STREAM_READER_BUFFER_SIZE_DEFAULT,
+    };
+    streamReaderInfo stream_info = {0};
+    decompressRioInitResult init_rc = rioInitWithDecompression(&decompressor, &file_rdb, &reader_cfg, &stream_info);
     if (init_rc == DECOMPRESS_RIO_INIT_INCOMPATIBLE) {
         rdbCheckError("Invalid or unsupported RDB stream envelope. "
                       "File may require a Valkey version with streaming RDB "
@@ -634,7 +641,11 @@ int redis_check_rdb(char *rdbfilename, FILE *fp) {
         rdbCheckError("Failed to inspect RDB stream metadata");
         goto err;
     }
-    rdb = input.rdb_rio;
+    decompressor_initialized = true;
+    rdb = (rio *)&decompressor;
+    /* The VCS frame carries its own checksum policy, so there is no logical
+     * RDB CRC64 to validate over the decoded stream. */
+    if (stream_info.compressed) rdb->flags |= RIO_FLAG_SKIP_RDB_CHECKSUM;
 
     rdbstate.rio = rdb;
     rdb->update_cksum = rdbLoadProgressCallback;
@@ -851,12 +862,12 @@ int redis_check_rdb(char *rdbfilename, FILE *fp) {
         }
     }
 
-    if (rdbInputStreamValidateEnd(&input) != C_OK) {
+    if (decompressRioValidateEnd(&decompressor) != 0) {
         rdbCheckError("Compressed RDB stream did not end cleanly");
         goto err;
     }
 
-    rdbInputStreamFree(&input);
+    if (decompressor_initialized) decompressRioFree(&decompressor);
     rdbstate.rio = &file_rdb;
     if (closefile) fclose(fp);
     stopLoading(1);
@@ -871,7 +882,7 @@ eoferr: /* unexpected end of file is handled here with a fatal exit */
         rdbCheckError("Unexpected EOF reading RDB file");
     }
 err:
-    rdbInputStreamFree(&input);
+    if (decompressor_initialized) decompressRioFree(&decompressor);
     rdbstate.rio = &file_rdb;
     if (closefile) fclose(fp);
     stopLoading(0);
