@@ -3152,46 +3152,6 @@ void rdbLoadProgressCallback(rio *r, const void *buf, size_t len) {
     }
 }
 
-void rdbInputStreamInit(rdbInputStream *input, rio *raw_rio) {
-    memset(input, 0, sizeof(*input));
-    input->raw_rio = raw_rio;
-    input->rdb_rio = raw_rio;
-}
-
-/* Synchronous: drives reads on the wrapped rio while probing the envelope.
- * Only safe to call on rios that can block (file rios). */
-decompressRioInitResult rdbInputStreamPrepare(rdbInputStream *input) {
-    streamReaderConfig reader_cfg = {
-        .expected_stream_kind = STREAM_KIND_RDB,
-        .allow_passthrough = true,
-        .buffer_size = STREAM_READER_BUFFER_SIZE_DEFAULT,
-    };
-
-    decompressRioInitResult init_rc =
-        rioInitWithDecompression(&input->decompressor, input->raw_rio, &reader_cfg, &input->stream_info);
-    if (init_rc == DECOMPRESS_RIO_INIT_OK) {
-        input->initialized = true;
-        input->rdb_rio = (rio *)&input->decompressor;
-        /* The VCS frame carries its own checksum policy, so there is no
-         * logical RDB CRC64 to validate over the decoded stream. */
-        if (input->stream_info.compressed) input->rdb_rio->flags |= RIO_FLAG_SKIP_RDB_CHECKSUM;
-    }
-    return init_rc;
-}
-
-void rdbInputStreamFree(rdbInputStream *input) {
-    if (input->initialized) {
-        decompressRioFree(&input->decompressor);
-        input->initialized = false;
-    }
-    input->rdb_rio = input->raw_rio;
-}
-
-int rdbInputStreamValidateEnd(rdbInputStream *input) {
-    serverAssert(input->initialized);
-    return decompressRioValidateEnd(&input->decompressor) == 0 ? C_OK : C_ERR;
-}
-
 bool rdbRioHasCorruptCompressedInput(rio *rdb) {
     /* rdbLoadRio also accepts raw rios, for example AOF preamble loads. */
     if (!(rdb->flags & RIO_FLAG_STREAMING_DECOMPRESSION)) return false;
@@ -3751,7 +3711,10 @@ eoferr:
 int rdbLoad(char *filename, rdbSaveInfo *rsi, int rdbflags) {
     FILE *fp;
     rio rdb;
-    rdbInputStream input;
+    rio *load_rio = &rdb;
+    decompressRio decompressor;
+    bool decompressor_initialized = false;
+    streamReaderInfo stream_info = {0};
     int retval = RDB_FAILED;
     struct stat sb;
     int rdb_fd;
@@ -3768,9 +3731,13 @@ int rdbLoad(char *filename, rdbSaveInfo *rsi, int rdbflags) {
 
     startLoadingFile(sb.st_size, filename, rdbflags);
     rioInitWithFile(&rdb, fp);
-    rdbInputStreamInit(&input, &rdb);
 
-    decompressRioInitResult init_rc = rdbInputStreamPrepare(&input);
+    streamReaderConfig reader_cfg = {
+        .expected_stream_kind = STREAM_KIND_RDB,
+        .allow_passthrough = true,
+        .buffer_size = STREAM_READER_BUFFER_SIZE_DEFAULT,
+    };
+    decompressRioInitResult init_rc = rioInitWithDecompression(&decompressor, &rdb, &reader_cfg, &stream_info);
     if (init_rc == DECOMPRESS_RIO_INIT_INCOMPATIBLE) {
         serverLog(LL_WARNING,
                   "Invalid or unsupported RDB stream envelope in %s. "
@@ -3784,19 +3751,25 @@ int rdbLoad(char *filename, rdbSaveInfo *rsi, int rdbflags) {
         serverLog(LL_WARNING, "Failed to initialize RDB stream reader for %s", filename);
         goto done;
     }
-    if (input.stream_info.compressed) {
+    decompressor_initialized = true;
+    load_rio = (rio *)&decompressor;
+    /* The VCS frame carries its own checksum policy, so there is no logical
+     * RDB CRC64 to validate over the decoded stream. */
+    if (stream_info.compressed) load_rio->flags |= RIO_FLAG_SKIP_RDB_CHECKSUM;
+
+    if (stream_info.compressed) {
         serverLog(LL_NOTICE, "Loading compressed RDB (algo=%s) from %s",
-                  compressionAlgoName(input.stream_info.algo), filename);
+                  compressionAlgoName(stream_info.algo), filename);
     }
 
-    retval = rdbLoadRio(input.rdb_rio, rdbflags, rsi);
-    if (retval == RDB_OK && rdbInputStreamValidateEnd(&input) != C_OK) {
+    retval = rdbLoadRio(load_rio, rdbflags, rsi);
+    if (retval == RDB_OK && decompressRioValidateEnd(&decompressor) != 0) {
         serverLog(LL_WARNING, "Compressed RDB stream in %s did not end cleanly", filename);
         retval = RDB_FAILED;
     }
 
 done:
-    rdbInputStreamFree(&input);
+    if (decompressor_initialized) decompressRioFree(&decompressor);
     fclose(fp);
     stopLoading(retval == RDB_OK);
     /* Reclaim the cache backed by rdb */
