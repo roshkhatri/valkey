@@ -1,8 +1,8 @@
-# Test deep prefetch for hash and zset inner hashtables.
+# Test nested prefetch for hash and zset inner hashtables.
 # Requires io-threads >= 2 and hashtable-encoded objects (>128 fields).
 
-start_server {config "minimal.conf" tags {"external:skip"} overrides {io-threads 4 hash-max-listpack-entries 0 zset-max-listpack-entries 0}} {
-    test "Deep prefetch - HGET correctness with pipelined commands" {
+start_server {config "minimal.conf" tags {"external:skip"} overrides {io-threads 4 io-threads-always-active yes hash-max-listpack-entries 0 zset-max-listpack-entries 0}} {
+    test "Nested prefetch - HGET correctness with pipelined commands" {
         # Create a hash with enough fields to use hashtable encoding
         for {set i 0} {$i < 200} {incr i} {
             r hset myhash "field:$i" "value:$i"
@@ -21,7 +21,7 @@ start_server {config "minimal.conf" tags {"external:skip"} overrides {io-threads
         $rd close
     }
 
-    test "Deep prefetch - ZSCORE correctness with pipelined commands" {
+    test "Nested prefetch - ZSCORE correctness with pipelined commands" {
         # Create a zset with enough members to use skiplist encoding
         for {set i 0} {$i < 200} {incr i} {
             r zadd myzset $i "member:$i"
@@ -40,7 +40,7 @@ start_server {config "minimal.conf" tags {"external:skip"} overrides {io-threads
         $rd close
     }
 
-    test "Deep prefetch - HMGET multi-field correctness" {
+    test "Nested prefetch - HMGET multi-field correctness" {
         set rd [valkey_deferring_client]
         $rd hmget myhash field:0 field:1 field:2 field:3 field:4
         $rd flush
@@ -49,7 +49,7 @@ start_server {config "minimal.conf" tags {"external:skip"} overrides {io-threads
         $rd close
     }
 
-    test "Deep prefetch - mixed commands in pipeline" {
+    test "Nested prefetch - mixed commands in pipeline" {
         set rd [valkey_deferring_client]
         $rd hget myhash field:10
         $rd zscore myzset member:10
@@ -63,10 +63,31 @@ start_server {config "minimal.conf" tags {"external:skip"} overrides {io-threads
         $rd close
     }
 
-    test "Deep prefetch - prefetch stats non-negative" {
-        # Just verify the stats exist and are non-negative (prefetch may not
-        # trigger in test env with single client, but should never be negative)
-        set entries [getInfoProperty [r info stats] io_threaded_total_prefetch_entries]
-        assert {$entries >= 0}
+    test "Nested prefetch - stats increment after batched hash/zset lookups" {
+        set before [getInfoProperty [r info stats] io_threaded_total_prefetch_entries]
+
+        # Drive a batch of concurrent pipelined lookups across multiple clients
+        # so the prefetch batch fills and the nested-prefetch path executes.
+        set clients {}
+        for {set c 0} {$c < 8} {incr c} {
+            set rd [valkey_deferring_client]
+            lappend clients $rd
+            for {set i 0} {$i < 100} {incr i} {
+                $rd hget myhash "field:[expr {$i % 200}]"
+            }
+            $rd flush
+        }
+        foreach rd $clients {
+            for {set i 0} {$i < 100} {incr i} { $rd read }
+            $rd close
+        }
+
+        # With io-threads active and batched hashtable lookups, the prefetch
+        # path must have processed entries.
+        wait_for_condition 50 100 {
+            [getInfoProperty [r info stats] io_threaded_total_prefetch_entries] > $before
+        } else {
+            fail "io_threaded_total_prefetch_entries did not increase after batched lookups"
+        }
     }
 }

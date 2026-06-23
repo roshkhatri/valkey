@@ -13,22 +13,22 @@
 #include "io_threads.h"
 
 typedef enum {
-    PREFETCH_ENTRY,      /* Initial state, prefetch entries associated with the given key's hash */
-    PREFETCH_VALUE,      /* prefetch the value object of the entry found in the previous step */
-    PREFETCH_VALUE_DEEP, /* deep prefetch of inner hashtable for hash/zset types */
-    PREFETCH_DONE        /* Indicates that prefetching for this key is complete */
+    PREFETCH_ENTRY,        /* Initial state, prefetch entries associated with the given key's hash */
+    PREFETCH_VALUE,        /* prefetch the value object of the entry found in the previous step */
+    PREFETCH_VALUE_NESTED, /* nested prefetch of inner hashtable for hash/zset types */
+    PREFETCH_DONE          /* Indicates that prefetching for this key is complete */
 } PrefetchState;
 
 typedef enum {
-    DEEP_PREFETCH_HEADER, /* Prefetch val->ptr (data structure header) */
-    DEEP_PREFETCH_INIT,   /* Init incremental find on inner hashtable */
-    DEEP_PREFETCH_STEP,   /* Step through incremental find */
-} DeepPrefetchPhase;
+    NESTED_PREFETCH_HEADER, /* Prefetch val->ptr (data structure header) */
+    NESTED_PREFETCH_INIT,   /* Init incremental find on inner hashtable */
+    NESTED_PREFETCH_STEP,   /* Step through incremental find */
+} NestedPrefetchPhase;
 
 typedef struct KeyPrefetchInfo {
     PrefetchState state; /* Current state of the prefetch operation */
     hashtableIncrementalFindState hashtab_state;
-    /* Fields for deep prefetching of inner hashtables (hash/zset) */
+    /* Fields for nested prefetching of inner hashtables (hash/zset) */
     robj **argv;           /* argv of the command that owns this key */
     int argc;              /* argc of the command that owns this key */
     int member_key_index;  /* argv index of the first field/member */
@@ -36,7 +36,7 @@ typedef struct KeyPrefetchInfo {
     int member_key_count;  /* max fields to prefetch (-1 = all remaining) */
     int current_field_idx; /* current argv index being prefetched */
     hashtable *inner_ht;   /* cached inner hashtable pointer */
-    DeepPrefetchPhase deep_phase;
+    NestedPrefetchPhase nested_phase;
     hashtableIncrementalFindState inner_hashtab_state;
 } KeyPrefetchInfo;
 
@@ -53,7 +53,7 @@ typedef struct PrefetchCommandsBatch {
     client **clients;               /* Array of clients in the current batch */
     robj ***key_argv;               /* Per-key argv pointer (correct for queued commands) */
     int *key_argc;                  /* Per-key argc (correct for queued commands) */
-    int *key_member_indices;        /* member_key_index from cmd for each key (0 = no deep prefetch) */
+    int *key_member_indices;        /* member_key_index from cmd for each key (0 = no nested prefetch) */
     int *key_member_steps;          /* member_key_step from cmd for each key */
     int *key_member_counts;         /* member_key_count from cmd for each key */
     hashtable **keys_tables;        /* Main table for each key */
@@ -137,6 +137,9 @@ static KeyPrefetchInfo *getNextPrefetchInfo(void) {
     return NULL;
 }
 
+/* Initialize per-key prefetch state for the current batch: reset each key's
+ * state machine, copy the owning command's argv/argc and member-key parameters,
+ * and start an incremental find for the key in the main hashtable. */
 static void initBatchInfo(hashtable **tables) {
     /* Initialize the prefetch info */
     for (size_t i = 0; i < batch->key_count; i++) {
@@ -154,28 +157,31 @@ static void initBatchInfo(hashtable **tables) {
         info->member_key_count = batch->key_member_counts[i];
         info->current_field_idx = 0;
         info->inner_ht = NULL;
-        info->deep_phase = DEEP_PREFETCH_HEADER;
+        info->nested_phase = NESTED_PREFETCH_HEADER;
         hashtableIncrementalFindInit(&info->hashtab_state, tables[i], batch->keys[i]);
     }
 }
 
-/* Check if a value type supports deep prefetching of its inner hashtable. */
-static inline int canDeepPrefetch(robj *val) {
+/* Check if a value type supports nested prefetching of its inner hashtable. */
+static inline int canNestedPrefetch(robj *val) {
     return val->encoding == OBJ_ENCODING_HASHTABLE || val->encoding == OBJ_ENCODING_SKIPLIST;
 }
 
+/* Advance the main-hashtable find for a key. Once the entry is located,
+ * decide the next state: transition to nested prefetch for eligible hash/zset
+ * values, fall through to value prefetch for strings, or mark the key done. */
 static void prefetchEntry(KeyPrefetchInfo *info) {
     if (hashtableIncrementalFindStep(&info->hashtab_state)) {
         /* Not done yet */
         moveToNextKey();
     } else if (server.io_threads_num >= server.min_io_threads_copy_avoid) {
         /* Copy avoidance skips PREFETCH_VALUE for strings, but we still want
-         * deep prefetch for hash/zset inner hashtables. Check if applicable. */
+         * nested prefetch for hash/zset inner hashtables. Check if applicable. */
         void *entry;
         if (hashtableIncrementalFindGetResult(&info->hashtab_state, &entry) &&
             info->member_key_index > 0 &&
-            info->argc > info->member_key_index && canDeepPrefetch(entry)) {
-            info->state = PREFETCH_VALUE_DEEP;
+            info->argc > info->member_key_index && canNestedPrefetch(entry)) {
+            info->state = PREFETCH_VALUE_NESTED;
         } else {
             markKeyAsdone(info);
         }
@@ -184,7 +190,9 @@ static void prefetchEntry(KeyPrefetchInfo *info) {
     }
 }
 
-/* Prefetch the entry's value. If the value is found.*/
+/* Prefetch the entry's value object. For strings, prefetch the value data; for
+ * hash/zset values, transition to the nested-prefetch path to walk the inner
+ * hashtable. */
 static void prefetchValue(KeyPrefetchInfo *info) {
     void *entry;
     if (hashtableIncrementalFindGetResult(&info->hashtab_state, &entry)) {
@@ -192,10 +200,10 @@ static void prefetchValue(KeyPrefetchInfo *info) {
         if (val->encoding == OBJ_ENCODING_RAW && val->type == OBJ_STRING) {
             valkey_prefetch(objectGetVal(val));
         }
-        /* For types with inner hashtables, transition to deep prefetch */
+        /* For types with inner hashtables, transition to nested prefetch */
         if (info->member_key_index > 0 &&
-            info->argc > info->member_key_index && canDeepPrefetch(val)) {
-            info->state = PREFETCH_VALUE_DEEP;
+            info->argc > info->member_key_index && canNestedPrefetch(val)) {
+            info->state = PREFETCH_VALUE_NESTED;
             return;
         }
     }
@@ -203,11 +211,11 @@ static void prefetchValue(KeyPrefetchInfo *info) {
     markKeyAsdone(info);
 }
 
-/* Deep prefetch: walk the inner hashtable for hash/zset types.
+/* Nested prefetch: walk the inner hashtable for hash/zset types.
  * Uses a 3-phase approach (HEADER -> INIT -> STEP) to amortize cache misses
  * across multiple commands in the batch. Supports multiple fields per command
  * using member_key_step and member_key_count. */
-static void prefetchValueDeep(KeyPrefetchInfo *info) {
+static void prefetchValueNested(KeyPrefetchInfo *info) {
     void *entry;
     if (!hashtableIncrementalFindGetResult(&info->hashtab_state, &entry)) {
         markKeyAsdone(info);
@@ -215,16 +223,16 @@ static void prefetchValueDeep(KeyPrefetchInfo *info) {
     }
     robj *val = entry;
 
-    switch (info->deep_phase) {
-    case DEEP_PREFETCH_HEADER:
+    switch (info->nested_phase) {
+    case NESTED_PREFETCH_HEADER:
         /* Phase 1: Prefetch the data structure header (val->ptr) */
         valkey_prefetch(objectGetVal(val));
-        info->deep_phase = DEEP_PREFETCH_INIT;
+        info->nested_phase = NESTED_PREFETCH_INIT;
         info->current_field_idx = info->member_key_index;
         moveToNextKey();
         return;
 
-    case DEEP_PREFETCH_INIT: {
+    case NESTED_PREFETCH_INIT: {
         /* Phase 2: Header is warm. Get inner hashtable and init incremental find. */
         if (!info->inner_ht) {
             if (val->encoding == OBJ_ENCODING_HASHTABLE) {
@@ -240,12 +248,12 @@ static void prefetchValueDeep(KeyPrefetchInfo *info) {
         }
         hashtableIncrementalFindInit(&info->inner_hashtab_state, info->inner_ht,
                                      objectGetVal(info->argv[info->current_field_idx]));
-        info->deep_phase = DEEP_PREFETCH_STEP;
+        info->nested_phase = NESTED_PREFETCH_STEP;
         moveToNextKey();
         return;
     }
 
-    case DEEP_PREFETCH_STEP:
+    case NESTED_PREFETCH_STEP:
         /* Phase 3: Step through the inner hashtable find */
         if (hashtableIncrementalFindStep(&info->inner_hashtab_state)) {
             moveToNextKey();
@@ -258,7 +266,7 @@ static void prefetchValueDeep(KeyPrefetchInfo *info) {
             (info->member_key_count < 0 || fields_done < info->member_key_count)) {
             /* More fields to prefetch - loop back to INIT */
             info->current_field_idx = next_idx;
-            info->deep_phase = DEEP_PREFETCH_INIT;
+            info->nested_phase = NESTED_PREFETCH_INIT;
             moveToNextKey();
             return;
         }
@@ -284,7 +292,7 @@ static void hashtablePrefetch(hashtable **tables) {
         switch (info->state) {
         case PREFETCH_ENTRY: prefetchEntry(info); break;
         case PREFETCH_VALUE: prefetchValue(info); break;
-        case PREFETCH_VALUE_DEEP: prefetchValueDeep(info); break;
+        case PREFETCH_VALUE_NESTED: prefetchValueNested(info); break;
         default: serverPanic("Unknown prefetch state %d", info->state);
         }
     }
@@ -377,6 +385,7 @@ static void addCommandToBatch(struct serverCommand *cmd, robj **argv, int argc, 
         batch->key_argv[batch->key_count] = argv;
         batch->key_argc[batch->key_count] = argc;
         batch->key_member_indices[batch->key_count] = cmd->member_key_index;
+        /* Normalize defaults: step 0 -> 1 (consecutive), count 0 -> -1 (all remaining). */
         batch->key_member_steps[batch->key_count] = cmd->member_key_step ? cmd->member_key_step : 1;
         batch->key_member_counts[batch->key_count] = cmd->member_key_count ? cmd->member_key_count : -1;
         batch->key_count++;
