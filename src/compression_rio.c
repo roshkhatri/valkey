@@ -60,7 +60,7 @@ static size_t compressRioWrite(rio *r, const void *buf, size_t len) {
         r->flags |= RIO_FLAG_WRITE_ERROR;
         return 0;
     }
-    if (streamWriterWrite(&cr->writer, buf, len) < 0) {
+    if (streamWriterWrite(&cr->writer, buf, len) != 0) {
         r->flags |= RIO_FLAG_WRITE_ERROR;
         return 0;
     }

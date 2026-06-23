@@ -87,7 +87,6 @@ typedef struct streamWriter {
     bool envelope_written;
     bool finished;
     bool errored;
-    uint64_t bytes_emitted;
 } streamWriter;
 
 typedef struct streamReader {
@@ -132,9 +131,8 @@ typedef struct streamReader {
  * stream up front. */
 int streamWriterInit(streamWriter *writer, streamWriterConfig *cfg, streamWriterEmitFn emit_fn, void *emit_ctx);
 
-/* Returns compressed bytes emitted to the sink (not input bytes consumed),
- * including the envelope on the first successful write. -1 on error. */
-ssize_t streamWriterWrite(streamWriter *writer, const void *buf, size_t len);
+/* Returns 0 on success and -1 on error. */
+int streamWriterWrite(streamWriter *writer, const void *buf, size_t len);
 int streamWriterFlush(streamWriter *writer);
 int streamWriterFinish(streamWriter *writer);
 void streamWriterFree(streamWriter *writer);
