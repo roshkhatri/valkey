@@ -23,6 +23,7 @@ typedef enum {
     NESTED_PREFETCH_HEADER, /* Prefetch val->ptr (data structure header) */
     NESTED_PREFETCH_INIT,   /* Init incremental find on inner hashtable */
     NESTED_PREFETCH_STEP,   /* Step through incremental find */
+    NESTED_PREFETCH_VALUE,  /* Prefetch the found entry's value (non-embedded only) */
 } NestedPrefetchPhase;
 
 typedef struct KeyPrefetchInfo {
@@ -162,9 +163,12 @@ static void initBatchInfo(hashtable **tables) {
     }
 }
 
-/* Check if a value type supports nested prefetching of its inner hashtable. */
-static inline int canNestedPrefetch(robj *val) {
-    return val->encoding == OBJ_ENCODING_HASHTABLE || val->encoding == OBJ_ENCODING_SKIPLIST;
+/* Check if a key is eligible for nested prefetch: the command declares a member
+ * field (member_key_index) present in argv, and the value is a hash/zset whose
+ * inner hashtable we can walk. */
+static inline int canNestedPrefetch(KeyPrefetchInfo *info, robj *val) {
+    return info->member_key_index > 0 && info->argc > info->member_key_index &&
+           (val->encoding == OBJ_ENCODING_HASHTABLE || val->encoding == OBJ_ENCODING_SKIPLIST);
 }
 
 /* Advance the main-hashtable find for a key. Once the entry is located,
@@ -178,9 +182,7 @@ static void prefetchEntry(KeyPrefetchInfo *info) {
         /* Copy avoidance skips PREFETCH_VALUE for strings, but we still want
          * nested prefetch for hash/zset inner hashtables. Check if applicable. */
         void *entry;
-        if (hashtableIncrementalFindGetResult(&info->hashtab_state, &entry) &&
-            info->member_key_index > 0 &&
-            info->argc > info->member_key_index && canNestedPrefetch(entry)) {
+        if (hashtableIncrementalFindGetResult(&info->hashtab_state, &entry) && canNestedPrefetch(info, entry)) {
             info->state = PREFETCH_VALUE_NESTED;
         } else {
             markKeyAsdone(info);
@@ -201,8 +203,7 @@ static void prefetchValue(KeyPrefetchInfo *info) {
             valkey_prefetch(objectGetVal(val));
         }
         /* For types with inner hashtables, transition to nested prefetch */
-        if (info->member_key_index > 0 &&
-            info->argc > info->member_key_index && canNestedPrefetch(val)) {
+        if (canNestedPrefetch(info, val)) {
             info->state = PREFETCH_VALUE_NESTED;
             return;
         }
@@ -211,10 +212,24 @@ static void prefetchValue(KeyPrefetchInfo *info) {
     markKeyAsdone(info);
 }
 
-/* Nested prefetch: walk the inner hashtable for hash/zset types.
- * Uses a 3-phase approach (HEADER -> INIT -> STEP) to amortize cache misses
- * across multiple commands in the batch. Supports multiple fields per command
- * using member_key_step and member_key_count. */
+/* Advance to the next field for multi-field commands, or mark the key done. */
+static void nestedPrefetchAdvance(KeyPrefetchInfo *info) {
+    int next_idx = info->current_field_idx + info->member_key_step;
+    int fields_done = (next_idx - info->member_key_index) / info->member_key_step;
+    if (next_idx < info->argc &&
+        (info->member_key_count < 0 || fields_done < info->member_key_count)) {
+        info->current_field_idx = next_idx;
+        info->nested_phase = NESTED_PREFETCH_INIT;
+        moveToNextKey();
+        return;
+    }
+    markKeyAsdone(info);
+}
+
+/* Nested prefetch: walk the inner hashtable for hash/zset types using a phased
+ * approach (HEADER -> INIT -> STEP [-> VALUE]) to amortize cache misses across
+ * commands in the batch. Supports multiple fields via member_key_step/count.
+ * The VALUE phase runs only for non-embedded hash values. */
 static void prefetchValueNested(KeyPrefetchInfo *info) {
     void *entry;
     if (!hashtableIncrementalFindGetResult(&info->hashtab_state, &entry)) {
@@ -259,19 +274,30 @@ static void prefetchValueNested(KeyPrefetchInfo *info) {
             moveToNextKey();
             return;
         }
-        /* Current field done. Check if there are more fields to prefetch. */
-        int next_idx = info->current_field_idx + info->member_key_step;
-        int fields_done = (next_idx - info->member_key_index) / info->member_key_step;
-        if (next_idx < info->argc &&
-            (info->member_key_count < 0 || fields_done < info->member_key_count)) {
-            /* More fields to prefetch - loop back to INIT */
-            info->current_field_idx = next_idx;
-            info->nested_phase = NESTED_PREFETCH_INIT;
-            moveToNextKey();
-            return;
+        /* Only non-embedded hash values have a separate value pointer worth
+         * prefetching; embedded values and zset/set skip the VALUE phase. */
+        if (val->type == OBJ_HASH) {
+            void *inner_entry;
+            if (hashtableIncrementalFindGetResult(&info->inner_hashtab_state, &inner_entry) && inner_entry &&
+                !entryHasEmbeddedValue(inner_entry)) {
+                info->nested_phase = NESTED_PREFETCH_VALUE;
+                moveToNextKey();
+                return;
+            }
         }
-        markKeyAsdone(info);
+        nestedPrefetchAdvance(info);
         return;
+
+    case NESTED_PREFETCH_VALUE: {
+        /* Phase 4: Prefetch the found hash entry's (non-embedded) value. */
+        void *inner_entry;
+        if (hashtableIncrementalFindGetResult(&info->inner_hashtab_state, &inner_entry) && inner_entry) {
+            char *value = entryGetValue(inner_entry, NULL);
+            if (value) valkey_prefetch(value);
+        }
+        nestedPrefetchAdvance(info);
+        return;
+    }
     }
 }
 

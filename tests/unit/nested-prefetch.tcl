@@ -90,4 +90,38 @@ start_server {config "minimal.conf" tags {"external:skip"} overrides {io-threads
             fail "io_threaded_total_prefetch_entries did not increase after batched lookups"
         }
     }
+
+    test "Nested prefetch - large (non-embedded) hash values exercise value phase" {
+        # Values >128 bytes are stored as a separate allocation (non-embedded),
+        # which triggers the optional NESTED_PREFETCH_VALUE phase. Verify both
+        # correctness and that the prefetch path runs for these values.
+        set big [string repeat "x" 512]
+        for {set i 0} {$i < 200} {incr i} {
+            r hset bighash "field:$i" "$big:$i"
+        }
+        assert_encoding hashtable bighash
+
+        set before [getInfoProperty [r info stats] io_threaded_total_prefetch_entries]
+        set clients {}
+        for {set c 0} {$c < 8} {incr c} {
+            set rd [valkey_deferring_client]
+            lappend clients $rd
+            for {set i 0} {$i < 100} {incr i} {
+                $rd hget bighash "field:[expr {$i % 200}]"
+            }
+            $rd flush
+        }
+        foreach rd $clients {
+            for {set i 0} {$i < 100} {incr i} {
+                assert_equal "$big:$i" [$rd read]
+            }
+            $rd close
+        }
+
+        wait_for_condition 50 100 {
+            [getInfoProperty [r info stats] io_threaded_total_prefetch_entries] > $before
+        } else {
+            fail "prefetch entries did not increase for non-embedded hash values"
+        }
+    }
 }
