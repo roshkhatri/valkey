@@ -624,13 +624,7 @@ int redis_check_rdb(char *rdbfilename, FILE *fp) {
     rioInitWithFile(&file_rdb, fp);
 
     /* Support both plain RDB files and VCS-wrapped streaming-compressed RDBs. */
-    streamReaderConfig reader_cfg = {
-        .expected_stream_kind = STREAM_KIND_RDB,
-        .allow_passthrough = true,
-        .buffer_size = STREAM_READER_BUFFER_SIZE_DEFAULT,
-    };
-    streamReaderInfo stream_info = {0};
-    decompressRioInitResult init_rc = rioInitWithDecompression(&decompressor, &file_rdb, &reader_cfg, &stream_info);
+    decompressRioInitResult init_rc = rioInitWithRdbDecompression(&decompressor, &file_rdb, NULL);
     if (init_rc == DECOMPRESS_RIO_INIT_INCOMPATIBLE) {
         rdbCheckError("Invalid or unsupported RDB stream envelope. "
                       "File may require a Valkey version with streaming RDB "
@@ -643,9 +637,6 @@ int redis_check_rdb(char *rdbfilename, FILE *fp) {
     }
     decompressor_initialized = true;
     rdb = (rio *)&decompressor;
-    /* The VCS frame carries its own checksum policy, so there is no logical
-     * RDB CRC64 to validate over the decoded stream. */
-    if (stream_info.compressed) rdb->flags |= RIO_FLAG_SKIP_RDB_CHECKSUM;
 
     rdbstate.rio = rdb;
     rdb->update_cksum = rdbLoadProgressCallback;
