@@ -6,6 +6,7 @@
         "since": "9.1.0",
         "arity": -5,
         "member_key_index": 4,
+        "member_key_count": -1,
         "function": "hgetdelCommand",
         "command_flags": [
             "WRITE",

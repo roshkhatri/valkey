@@ -6,6 +6,7 @@
         "since": "9.0.0",
         "arity": -5,
         "member_key_index": 4,
+        "member_key_count": -1,
         "function": "hpexpiretimeCommand",
         "command_flags": [
             "READONLY",

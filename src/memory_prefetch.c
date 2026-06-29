@@ -411,9 +411,10 @@ static void addCommandToBatch(struct serverCommand *cmd, robj **argv, int argc, 
         batch->key_argv[batch->key_count] = argv;
         batch->key_argc[batch->key_count] = argc;
         batch->key_member_indices[batch->key_count] = cmd->member_key_index;
-        /* Normalize defaults: step 0 -> 1 (consecutive), count 0 -> -1 (all remaining). */
+        /* Normalize defaults: step 0 -> 1 (consecutive), count 0 -> 1 (single
+         * member). Variadic commands declare count -1 ("all remaining") explicitly. */
         batch->key_member_steps[batch->key_count] = cmd->member_key_step ? cmd->member_key_step : 1;
-        batch->key_member_counts[batch->key_count] = cmd->member_key_count ? cmd->member_key_count : -1;
+        batch->key_member_counts[batch->key_count] = cmd->member_key_count ? cmd->member_key_count : 1;
         batch->key_count++;
     }
     getKeysFreeResult(&result);

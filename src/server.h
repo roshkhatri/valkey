@@ -2703,9 +2703,9 @@ struct serverCommand {
      * 0 means disabled. Used by the prefetch system to find the lookup key. */
     int member_key_index;
     int member_key_step; /* stride between fields (default 1) */
-    /* Max number of fields to prefetch. Both 0 (unset/default) and -1 mean
-     * "prefetch all remaining fields from member_key_index to argc". A positive
-     * value caps the number of fields (e.g. 1 for single-field commands). */
+    /* Number of fields to prefetch starting at member_key_index. Defaults to 1
+     * (single field) when unset. Set to -1 for variadic commands to prefetch
+     * all remaining fields to argc, or a positive N to cap the count. */
     int member_key_count;
     /* Array of subcommands (may be NULL) */
     struct serverCommand *subcommands;
