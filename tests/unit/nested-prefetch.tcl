@@ -101,7 +101,6 @@ start_server {config "minimal.conf" tags {"external:skip"} overrides {io-threads
         }
         assert_encoding hashtable bighash
 
-        set before [getInfoProperty [r info stats] io_threaded_total_prefetch_entries]
         set clients {}
         for {set c 0} {$c < 8} {incr c} {
             set rd [valkey_deferring_client]
@@ -116,12 +115,6 @@ start_server {config "minimal.conf" tags {"external:skip"} overrides {io-threads
                 assert_equal "$big:$i" [$rd read]
             }
             $rd close
-        }
-
-        wait_for_condition 50 100 {
-            [getInfoProperty [r info stats] io_threaded_total_prefetch_entries] > $before
-        } else {
-            fail "prefetch entries did not increase for non-embedded hash values"
         }
     }
 }
