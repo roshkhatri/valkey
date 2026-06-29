@@ -108,14 +108,16 @@ static replDecodeResult replDecodeEmit(replDecompressor *rd, const uint8_t *in, 
 static replDecodeResult replDecodeFeed(replDecompressor *rd, const uint8_t *in, size_t len, size_t output_max) {
     size_t off = 0;
     while (off < len) {
-        char out_buf[REPL_DECODE_CHUNK];
+        rd->decode_buf = sdsMakeRoomFor(rd->decode_buf, REPL_DECODE_CHUNK);
         size_t consumed = 0;
-        ssize_t produced = streamDecompressorFeed(&rd->decompressor, (uint8_t *)out_buf, sizeof(out_buf),
+        ssize_t produced = streamDecompressorFeed(&rd->decompressor,
+                                                  (uint8_t *)rd->decode_buf + sdslen(rd->decode_buf),
+                                                  sdsavail(rd->decode_buf),
                                                   in + off, len - off, &consumed);
         if (produced < 0 || consumed > len - off) return REPL_DECODE_ERR;
         if (produced > 0) {
             if (sdslen(rd->decode_buf) + (size_t)produced > output_max) return REPL_DECODE_OVERFLOW;
-            rd->decode_buf = sdscatlen(rd->decode_buf, out_buf, (size_t)produced);
+            sdsIncrLen(rd->decode_buf, (size_t)produced);
         }
         off += consumed;
         /* A long-lived replication stream must never reach a compressed frame

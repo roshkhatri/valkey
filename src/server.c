@@ -2824,6 +2824,9 @@ void resetServerStats(void) {
     server.stat_sync_full = 0;
     server.stat_sync_partial_ok = 0;
     server.stat_sync_partial_err = 0;
+    server.repl_decompression_errors = 0;
+    server.repl_decompression_cpu_usec = 0;
+    server.repl_decompressed_bytes_total = 0;
     server.stat_io_reads_processed = 0;
     server.stat_total_reads_processed = 0;
     server.stat_io_writes_processed = 0;
