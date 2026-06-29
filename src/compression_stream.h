@@ -88,7 +88,6 @@ typedef struct streamWriter {
     bool envelope_written;
     bool finished;
     bool errored;
-    uint64_t bytes_emitted;
 } streamWriter;
 
 typedef struct streamReader {
@@ -128,14 +127,12 @@ typedef struct streamReader {
 /* The writer pushes compressed bytes to a streamWriterEmitFn sink; the reader
  * pulls from a streamReaderReadFn source. streamWriterFinish must run before
  * freeing, since it emits the frame end; a writer freed without it is
- * truncated. The reader probes the envelope on the first read, so
- * streamReaderProbe and streamReaderGetInfo are only needed to classify the
- * stream up front. */
+ * truncated. The reader probes the envelope on the first read; callers that
+ * need to classify the stream up front can use streamReaderGetInfo. */
 int streamWriterInit(streamWriter *writer, streamWriterConfig *cfg, streamWriterEmitFn emit_fn, void *emit_ctx);
 
-/* Returns compressed bytes emitted to the sink (not input bytes consumed),
- * including the envelope on the first successful write. -1 on error. */
-ssize_t streamWriterWrite(streamWriter *writer, const void *buf, size_t len);
+/* Returns 0 on success and -1 on error. */
+int streamWriterWrite(streamWriter *writer, const void *buf, size_t len);
 int streamWriterFlush(streamWriter *writer);
 int streamWriterFinish(streamWriter *writer);
 void streamWriterFree(streamWriter *writer);
@@ -145,10 +142,6 @@ int streamReadEnvelopeInfo(const uint8_t *buf,
                            streamReaderInfo *info);
 
 int streamReaderInit(streamReader *reader, streamReaderConfig *cfg, streamReaderReadFn read_cb, void *read_ctx);
-
-/* Drives the wrapped read callback synchronously. Caller must ensure the
- * source can block (file rios are fine; non-blocking sources are not). */
-int streamReaderProbe(streamReader *reader);
 
 /* Full or fail: returns len on success, 0 on EOF, -1 on error. */
 ssize_t streamReaderRead(streamReader *reader, void *buf, size_t len);

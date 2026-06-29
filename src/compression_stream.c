@@ -182,8 +182,6 @@ static vcsProbeResult streamReaderProbeFeed(streamReader *reader,
 #define STREAM_WRITER_INPUT_CHUNK_SIZE (1024 * 1024)
 
 int streamWriterInit(streamWriter *writer, streamWriterConfig *cfg, streamWriterEmitFn emit_fn, void *emit_ctx) {
-    if (!compressionAlgoSupportsStreaming(cfg->algo)) return -1;
-
     memset(writer, 0, sizeof(*writer));
     writer->emit_fn = emit_fn;
     writer->emit_ctx = emit_ctx;
@@ -203,7 +201,6 @@ static int streamWriterEnsureEnvelope(streamWriter *writer) {
         writer->errored = true;
         return -1;
     }
-    writer->bytes_emitted += VCS_ENVELOPE_SIZE;
     writer->envelope_written = true;
     return 0;
 }
@@ -214,7 +211,6 @@ static int streamWriterEmit(streamWriter *writer, const uint8_t *buf, size_t len
         writer->errored = true;
         return -1;
     }
-    writer->bytes_emitted += len;
     return 0;
 }
 
@@ -256,16 +252,14 @@ void streamWriterFree(streamWriter *writer) {
     writer->out_buf_size = 0;
 }
 
-ssize_t streamWriterWrite(streamWriter *writer, const void *buf, size_t len) {
+int streamWriterWrite(streamWriter *writer, const void *buf, size_t len) {
     /* Writes after finish are a caller bug; silently dropping them would
      * corrupt the consumer's view of the stream. */
     if (writer->finished) return -1;
     if (len == 0) return 0;
-    if (len > (size_t)SSIZE_MAX) return -1;
 
     const uint8_t *src = (const uint8_t *)buf;
     size_t remaining = len;
-    uint64_t emitted_before = writer->bytes_emitted;
     if (streamWriterEnsureEnvelope(writer) != 0) return -1;
     while (remaining > 0) {
         size_t chunk_len = remaining < STREAM_WRITER_INPUT_CHUNK_SIZE
@@ -275,12 +269,7 @@ ssize_t streamWriterWrite(streamWriter *writer, const void *buf, size_t len) {
         src += chunk_len;
         remaining -= chunk_len;
     }
-    uint64_t emitted_delta = writer->bytes_emitted - emitted_before;
-    if (emitted_delta > (uint64_t)SSIZE_MAX) {
-        writer->errored = true;
-        return -1;
-    }
-    return (ssize_t)emitted_delta;
+    return 0;
 }
 
 int streamWriterFlush(streamWriter *writer) {
@@ -367,7 +356,7 @@ static size_t streamReaderProbeBytesNeeded(streamReader *reader) {
     return VCS_ENVELOPE_SIZE - reader->probe.header_len;
 }
 
-int streamReaderProbe(streamReader *reader) {
+static int streamReaderProbe(streamReader *reader) {
     if (reader->errored) return -1;
     if (reader->probe.ready) return 0;
 

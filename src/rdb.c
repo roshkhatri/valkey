@@ -1600,15 +1600,9 @@ static int rdbSaveInternal(int req, const char *filename, rdbSaveInfo *rsi, int 
      * before. */
     rio *save_rio = &rdb;
     if (use_streaming_compression) {
-        streamWriterConfig cfg = {
-            .algo = streaming_algo,
-            .level = 0, /* Codec default. */
-            .stream_kind = STREAM_KIND_RDB,
-            .codec_checksum_enabled = server.rdb_checksum != 0,
-        };
-        if (rioInitWithCompression(&cr, &rdb, &cfg) != 0) {
+        if (rioInitWithRdbCompression(&cr, &rdb, streaming_algo, server.rdb_checksum != 0) != 0) {
             errno = EIO; /* Compressor init failure, set errno for werr log */
-            err_op = "rioInitWithCompression";
+            err_op = "rioInitWithRdbCompression";
             goto werr;
         }
         crp = &cr;
@@ -3714,7 +3708,7 @@ int rdbLoad(char *filename, rdbSaveInfo *rsi, int rdbflags) {
     rio *load_rio = &rdb;
     decompressRio decompressor;
     bool decompressor_initialized = false;
-    streamReaderInfo stream_info = {0};
+    compressionAlgo streaming_algo = ALGO_NONE;
     int retval = RDB_FAILED;
     struct stat sb;
     int rdb_fd;
@@ -3732,12 +3726,7 @@ int rdbLoad(char *filename, rdbSaveInfo *rsi, int rdbflags) {
     startLoadingFile(sb.st_size, filename, rdbflags);
     rioInitWithFile(&rdb, fp);
 
-    streamReaderConfig reader_cfg = {
-        .expected_stream_kind = STREAM_KIND_RDB,
-        .allow_passthrough = true,
-        .buffer_size = STREAM_READER_BUFFER_SIZE_DEFAULT,
-    };
-    decompressRioInitResult init_rc = rioInitWithDecompression(&decompressor, &rdb, &reader_cfg, &stream_info);
+    decompressRioInitResult init_rc = rioInitWithRdbDecompression(&decompressor, &rdb, &streaming_algo);
     if (init_rc == DECOMPRESS_RIO_INIT_INCOMPATIBLE) {
         serverLog(LL_WARNING,
                   "Invalid or unsupported RDB stream envelope in %s. "
@@ -3753,13 +3742,10 @@ int rdbLoad(char *filename, rdbSaveInfo *rsi, int rdbflags) {
     }
     decompressor_initialized = true;
     load_rio = (rio *)&decompressor;
-    /* The VCS frame carries its own checksum policy, so there is no logical
-     * RDB CRC64 to validate over the decoded stream. */
-    if (stream_info.compressed) load_rio->flags |= RIO_FLAG_SKIP_RDB_CHECKSUM;
 
-    if (stream_info.compressed) {
+    if (load_rio->flags & RIO_FLAG_STREAMING_COMPRESSION) {
         serverLog(LL_NOTICE, "Loading compressed RDB (algo=%s) from %s",
-                  compressionAlgoName(stream_info.algo), filename);
+                  compressionAlgoName(streaming_algo), filename);
     }
 
     retval = rdbLoadRio(load_rio, rdbflags, rsi);
