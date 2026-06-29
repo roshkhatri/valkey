@@ -44,6 +44,7 @@
                 }
             }
         ],
+        "member_key_index": 2,
         "arguments": [
             {
                 "name": "key",
