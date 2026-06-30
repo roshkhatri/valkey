@@ -50,6 +50,7 @@ decompressRioInitResult rioInitWithRdbDecompression(decompressRio *dr,
                                                     rio *inner,
                                                     compressionAlgo *algo);
 streamReaderError decompressRioGetError(decompressRio *dr);
+int decompressRioValidateFrameEnd(decompressRio *dr);
 int decompressRioValidateEnd(decompressRio *dr);
 void decompressRioFree(decompressRio *dr);
 

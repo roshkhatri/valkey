@@ -603,7 +603,10 @@ static ssize_t streamReaderReadCompressed(streamReader *reader, uint8_t *dst, si
                                                                    : reader->error_kind);
             }
             if (filled == 0 && !reader->decompressor.frame_done) {
-                return streamReaderFailWithError(reader, total, STREAM_READER_ERROR_CORRUPT);
+                /* Clean EOF mid-frame is truncation, not corruption. A codec
+                 * failure would already have set error_kind (preserved by
+                 * streamReaderSetError), so this only labels genuine truncation. */
+                return streamReaderFailWithError(reader, total, STREAM_READER_ERROR_TRUNCATED);
             }
             if (filled == 0) break;
         }
@@ -638,7 +641,7 @@ int streamReaderGetInfo(streamReader *reader, streamReaderInfo *info) {
     return 0;
 }
 
-int streamReaderValidateEnd(streamReader *reader) {
+static int streamReaderValidateEndInternal(streamReader *reader, bool require_source_eof) {
     uint8_t buf[4096];
 
     if (streamReaderProbe(reader) != 0) return -1;
@@ -662,6 +665,10 @@ int streamReaderValidateEnd(streamReader *reader) {
         return -1;
     }
 
+    /* Caller owns trailing framing (e.g. the diskless EOF mark): stop at a clean
+     * frame end and leave remaining source bytes for the caller. */
+    if (!require_source_eof) return 0;
+
     ssize_t got = reader->read_cb(reader->read_ctx, buf, 1);
     if (got < 0) {
         streamReaderSetError(reader, STREAM_READER_ERROR_IO);
@@ -672,6 +679,14 @@ int streamReaderValidateEnd(streamReader *reader) {
         return -1;
     }
     return 0;
+}
+
+int streamReaderValidateFrameEnd(streamReader *reader) {
+    return streamReaderValidateEndInternal(reader, false);
+}
+
+int streamReaderValidateEnd(streamReader *reader) {
+    return streamReaderValidateEndInternal(reader, true);
 }
 
 void streamReaderFree(streamReader *reader) {

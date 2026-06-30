@@ -187,6 +187,10 @@ streamReaderError decompressRioGetError(decompressRio *dr) {
     return dr->reader.error_kind;
 }
 
+int decompressRioValidateFrameEnd(decompressRio *dr) {
+    return streamReaderValidateFrameEnd(&dr->reader);
+}
+
 int decompressRioValidateEnd(decompressRio *dr) {
     return streamReaderValidateEnd(&dr->reader);
 }

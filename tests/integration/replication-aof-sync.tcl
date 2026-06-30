@@ -17,7 +17,13 @@ proc get_aof_manifest_path {r} {
     return [file join $dir $appenddirname $appendfilename$::manifest_suffix]
 }
 
-tags {"repl external:skip" repl-compression} {
+# The RDB-reuse-as-AOF-base tests below assert plaintext disk-based full-sync
+# behavior, which streaming compression legitimately changes: a compressed
+# full-sync RDB cannot be reused as an AOF base (the replica correctly falls back
+# to BGREWRITEAOF, covered by the dedicated test in the repl-compression block at
+# the bottom of this file). So this block is NOT tagged repl-compression and runs
+# only in the regular (uncompressed) job.
+tags {"repl external:skip"} {
 
     # Test 1: Disk-based full sync with aof-use-rdb-preamble yes should
     # reuse the RDB file as AOF base file
@@ -208,6 +214,70 @@ tags {"repl external:skip" repl-compression} {
                 assert_equal 60 [$replica dbsize]
                 for {set i 0} {$i < 60} {incr i} {
                     assert_equal "value:$i" [$replica get "lz4-key:$i"]
+                }
+            }
+        }
+    }
+
+}
+
+# These tests are compatible with streaming compression and stay in the
+# repl-compression matrix: the BGREWRITEAOF-fallback test below verifies the
+# correct compressed-RDB behavior, and the remaining tests assert
+# fallback/diskless paths that do not depend on plaintext RDB reuse.
+tags {"repl external:skip" repl-compression} {
+
+    # A streaming-compressed disk-based sync RDB (repl-compression lz4-stream on
+    # both ends) cannot be reused as an AOF base, so the replica falls back to
+    # BGREWRITEAOF. Inverse of the rdbcompression test above (plaintext RDB reused).
+    test "Disk-based full sync with repl-compression lz4-stream falls back to BGREWRITEAOF for AOF base" {
+        start_server {overrides {repl-diskless-sync no repl-compression lz4-stream save ""}} {
+            set primary [srv 0 client]
+            set primary_host [srv 0 host]
+            set primary_port [srv 0 port]
+
+            for {set i 0} {$i < 40} {incr i} {
+                $primary set "rcomp-key:$i" "value:$i"
+            }
+
+            start_server {overrides {appendonly yes aof-use-rdb-preamble yes repl-diskless-sync no repl-compression lz4-stream save ""}} {
+                set replica [srv 0 client]
+                set replica_log [srv 0 stdout]
+
+                $replica replicaof $primary_host $primary_port
+                wait_for_sync $replica
+
+                # Replica detects the compressed sync RDB and falls back to BGREWRITEAOF.
+                wait_for_condition 50 100 {
+                    [log_file_matches $replica_log "*uses streaming compression, falling back to BGREWRITEAOF*"]
+                } else {
+                    fail "Expected streaming-compression AOF fallback log not found"
+                }
+
+                # And it must NOT have reused the sync RDB as the AOF base.
+                assert {![log_file_matches $replica_log "*Reused RDB file from primary sync as AOF base file*"]}
+
+                # AOF comes up via BGREWRITEAOF; a base file must exist.
+                waitForBgrewriteaof $replica
+                set manifest_path [get_aof_manifest_path $replica]
+                set base_name [get_cur_base_aof_name $manifest_path]
+                assert {$base_name ne ""}
+
+                # Data correct at runtime (loaded from the compressed socket stream).
+                assert_equal 40 [$replica dbsize]
+                for {set i 0} {$i < 40} {incr i} {
+                    assert_equal "value:$i" [$replica get "rcomp-key:$i"]
+                }
+
+                # After restart: AOF loads from the rewritten base, not the compressed RDB.
+                $replica replicaof no one
+                restart_server 0 true false
+                set replica [srv 0 client]
+                wait_done_loading $replica
+
+                assert_equal 40 [$replica dbsize]
+                for {set i 0} {$i < 40} {incr i} {
+                    assert_equal "value:$i" [$replica get "rcomp-key:$i"]
                 }
             }
         }
