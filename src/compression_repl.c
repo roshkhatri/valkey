@@ -118,9 +118,10 @@ static replDecodeResult replDecodeFeed(replDecompressor *rd, const uint8_t *in, 
          * end. If it does, the stream is corrupt or the primary sent an
          * unexpected terminator: the caller should disconnect. */
         if (rd->decompressor.frame_done) return REPL_DECODE_FRAME_DONE;
-        /* No progress: the codec has buffered a partial frame and needs more
-         * bytes. Resume on the next read tick. */
-        if (consumed == 0 && produced == 0) break;
+        /* LZ4F always makes progress given non-empty input and output room,
+         * making no progress with input still pending is an impossible/stuck state.
+         * should fail here rather than letting the caller drop the unconsumed tail. */
+        if (consumed == 0 && produced == 0) return REPL_DECODE_ERR;
     }
     return REPL_DECODE_OK;
 }
