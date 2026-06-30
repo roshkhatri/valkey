@@ -77,6 +77,10 @@ typedef enum {
     STREAM_READER_ERROR_IO = 1,
     STREAM_READER_ERROR_INCOMPATIBLE = 2,
     STREAM_READER_ERROR_CORRUPT = 3,
+    /* Source hit EOF before the codec frame completed: a truncated stream
+     * (e.g. replica connection killed mid-transfer), recoverable like an
+     * uncompressed short read, as opposed to genuine codec corruption. */
+    STREAM_READER_ERROR_TRUNCATED = 4,
 } streamReaderError;
 
 typedef struct streamWriter {
@@ -152,6 +156,11 @@ int streamReaderInit(streamReader *reader, streamReaderConfig *cfg, streamReader
 /* Full or fail: returns len on success, 0 on EOF, -1 on error. */
 ssize_t streamReaderRead(streamReader *reader, void *buf, size_t len);
 int streamReaderGetInfo(streamReader *reader, streamReaderInfo *info);
+
+/* Validate a compressed frame without consuming caller-owned trailing framing. */
+int streamReaderValidateFrameEnd(streamReader *reader);
+
+/* Validate a compressed frame and require the wrapped source to be exhausted. */
 int streamReaderValidateEnd(streamReader *reader);
 void streamReaderFree(streamReader *reader);
 
