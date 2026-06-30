@@ -1,4 +1,4 @@
-tags {"repl external:skip"} {
+tags {"repl repl-compression external:skip"} {
 
 # ============================================================
 # Config CRUD — single-server tests, no replication needed
@@ -78,39 +78,42 @@ start_server {tags {"repl"} overrides {save ""}} {
 
     test {Replica with repl-compression lz4-stream and disk-backed load also negotiates compression} {
         $primary config set repl-compression lz4-stream
-        start_server {overrides {save "" repl-compression lz4-stream repl-diskless-load disabled}} {
-            set replica [srv 0 client]
-            $replica replicaof $primary_host $primary_port
+        set _code [catch {
+            start_server {overrides {save "" repl-compression lz4-stream repl-diskless-load disabled}} {
+                set replica [srv 0 client]
+                $replica replicaof $primary_host $primary_port
 
-            wait_for_condition 50 100 {
-                [s 0 master_link_status] eq {up}
-            } else {
-                fail "Replication not started"
-            }
+                wait_for_condition 50 100 {
+                    [s 0 master_link_status] eq {up}
+                } else {
+                    fail "Replication not started"
+                }
 
-            # Disk-backed full sync completes, then compression activates for the
-            # post-sync incremental stream (the full-sync RDB itself is never
-            # compressed by this capability).
-            wait_for_condition 50 100 {
-                [regexp -all "compression=lz4" [$primary info replication]] >= 1
-            } else {
-                fail "Compression not negotiated for disk-backed replica"
-            }
+                # Disk-backed full sync completes, then compression activates for the
+                # post-sync incremental stream (the full-sync RDB itself is never
+                # compressed by this capability).
+                wait_for_condition 50 100 {
+                    [regexp -all "compression=lz4" [$primary info replication]] >= 1
+                } else {
+                    fail "Compression not negotiated for disk-backed replica"
+                }
 
-            # Exercise the compressed incremental stream over a disk-backed link.
-            for {set i 0} {$i < 100} {incr i} {
-                $primary set "diskbacked:$i" [string repeat "v" 50]
-            }
-            wait_for_condition 50 100 {
-                [$replica get "diskbacked:99"] eq [string repeat "v" 50]
-            } else {
-                fail "Disk-backed replica did not receive compressed incremental stream"
-            }
-            assert_equal [$primary debug digest] [$replica debug digest]
+                # Exercise the compressed incremental stream over a disk-backed link.
+                for {set i 0} {$i < 100} {incr i} {
+                    $primary set "diskbacked:$i" [string repeat "v" 50]
+                }
+                wait_for_condition 50 100 {
+                    [$replica get "diskbacked:99"] eq [string repeat "v" 50]
+                } else {
+                    fail "Disk-backed replica did not receive compressed incremental stream"
+                }
+                assert_equal [$primary debug digest] [$replica debug digest]
 
-            $replica replicaof no one
-        }
+                $replica replicaof no one
+            }
+        } _res _opts]
         $primary config set repl-compression no
+        return -options $_opts $_res
     }
 
     test {Primary receiving capa compression still completes full sync correctly (no-op)} {
