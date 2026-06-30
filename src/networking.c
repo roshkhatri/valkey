@@ -1763,8 +1763,11 @@ int clientHasPendingReplies(client *c) {
          * private output buffer. */
         serverAssert(c->bufpos == 0 && listLength(c->reply) == 0);
 
-        /* Check for unsent compressed data in the compressed output buffer */
-        if (c->repl_data->repl_compressor &&
+        /* Check for unsent compressed data in the compressed output buffer.
+         * Skip while CLIENT_PENDING_IO: the IO thread owns out_buf and may
+         * realloc it, so the main thread must not read it here
+         * (postWriteToReplica re-checks once the write job completes). */
+        if (c->repl_data->repl_compressor && c->io_write_state != CLIENT_PENDING_IO &&
             c->repl_data->repl_compressor->out_buf_pos < sdslen(c->repl_data->repl_compressor->out_buf)) {
             return 1;
         }
