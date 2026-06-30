@@ -4,7 +4,7 @@ tags {"repl repl-compression external:skip"} {
 # Config CRUD — single-server tests, no replication needed
 # ============================================================
 
-start_server {overrides {save ""}} {
+start_server {overrides {save "" repl-compression no}} {
 
     test {Repl compression config defaults are correct} {
         assert_equal "no" [lindex [r config get repl-compression] 1]
