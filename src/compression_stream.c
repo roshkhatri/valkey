@@ -56,8 +56,8 @@ static void streamReaderProbeSetCompressed(streamReader *reader,
     reader->probe.stream_kind = stream_kind;
 }
 
-static int writeVcsEnvelope(streamWriterEmitFn emit_fn,
-                            void *ctx,
+/* Fill the 7-byte VCS envelope. Returns -1 if algo has no streaming codec. */
+static int buildVcsEnvelope(uint8_t *out,
                             compressionAlgo algo,
                             uint8_t stream_kind,
                             bool codec_checksum_enabled) {
@@ -72,6 +72,17 @@ static int writeVcsEnvelope(streamWriterEmitFn emit_fn,
         [VCS_OFFSET_FLAGS] = codec_checksum_enabled ? VCS_FLAG_CODEC_CHECKSUM : 0,
         [VCS_OFFSET_STREAM_KIND] = stream_kind,
     };
+    memcpy(out, envelope, VCS_ENVELOPE_SIZE);
+    return 0;
+}
+
+static int writeVcsEnvelope(streamWriterEmitFn emit_fn,
+                            void *ctx,
+                            compressionAlgo algo,
+                            uint8_t stream_kind,
+                            bool codec_checksum_enabled) {
+    uint8_t envelope[VCS_ENVELOPE_SIZE];
+    if (buildVcsEnvelope(envelope, algo, stream_kind, codec_checksum_enabled) != 0) return -1;
     return emit_fn(ctx, envelope, VCS_ENVELOPE_SIZE) == 0 ? 0 : -1;
 }
 
@@ -192,12 +203,24 @@ int streamWriterInit(streamWriter *writer, streamWriterConfig *cfg, streamWriter
     return 0;
 }
 
+void streamWriterSetSink(streamWriter *writer, sds *sink) {
+    writer->sink = sink;
+}
+
 /* Envelope is emitted lazily so a writer that's created but never written
  * doesn't leave a stub envelope on the sink. */
 static int streamWriterEnsureEnvelope(streamWriter *writer) {
     if (writer->envelope_written) return 0;
-    if (writeVcsEnvelope(writer->emit_fn, writer->emit_ctx, writer->compressor.algo,
-                         writer->stream_kind, writer->compressor.codec_checksum) != 0) {
+    if (writer->sink) {
+        uint8_t envelope[VCS_ENVELOPE_SIZE];
+        if (buildVcsEnvelope(envelope, writer->compressor.algo, writer->stream_kind,
+                             writer->compressor.codec_checksum) != 0) {
+            writer->errored = true;
+            return -1;
+        }
+        *writer->sink = sdscatlen(*writer->sink, (char *)envelope, VCS_ENVELOPE_SIZE);
+    } else if (writeVcsEnvelope(writer->emit_fn, writer->emit_ctx, writer->compressor.algo,
+                                writer->stream_kind, writer->compressor.codec_checksum) != 0) {
         writer->errored = true;
         return -1;
     }
@@ -227,10 +250,34 @@ static int streamWriterEnsureOutBuf(streamWriter *writer, size_t input_len) {
     return 0;
 }
 
+/* Sink path: compress directly into the caller's sds tail, no scratch/emit. */
+static int streamWriterFeedToSink(streamWriter *writer,
+                                  const uint8_t *input,
+                                  size_t input_len,
+                                  compressFlushMode flush_mode) {
+    size_t bound = streamCompressorOutputBound(&writer->compressor, input_len);
+    if (bound == 0) {
+        writer->errored = true;
+        return -1;
+    }
+    *writer->sink = sdsMakeRoomFor(*writer->sink, bound);
+    ssize_t compressed = streamCompressorFeed(&writer->compressor,
+                                              (uint8_t *)(*writer->sink) + sdslen(*writer->sink),
+                                              sdsavail(*writer->sink), input, input_len, flush_mode);
+    if (compressed < 0) {
+        writer->errored = true;
+        return -1;
+    }
+    sdsIncrLen(*writer->sink, (size_t)compressed);
+    return 0;
+}
+
 static int streamWriterFeedAndEmit(streamWriter *writer,
                                    const uint8_t *input,
                                    size_t input_len,
                                    compressFlushMode flush_mode) {
+    if (writer->sink) return streamWriterFeedToSink(writer, input, input_len, flush_mode);
+
     if (streamWriterEnsureOutBuf(writer, input_len) != 0) return -1;
 
     ssize_t compressed = streamCompressorFeed(&writer->compressor, writer->out_buf,

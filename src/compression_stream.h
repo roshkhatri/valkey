@@ -8,6 +8,7 @@
 #define COMPRESSION_STREAM_H
 
 #include "compression.h"
+#include "sds.h"
 
 /* VCS envelope:
  *   [0..2] magic "VCS"
@@ -84,6 +85,7 @@ typedef struct streamWriter {
     size_t out_buf_size;
     streamWriterEmitFn emit_fn;
     void *emit_ctx;
+    sds *sink; /* When set, compress directly into *sink instead of out_buf + emit. */
     uint8_t stream_kind;
     bool envelope_written;
     bool finished;
@@ -130,6 +132,10 @@ typedef struct streamReader {
  * truncated. The reader probes the envelope on the first read; callers that
  * need to classify the stream up front can use streamReaderGetInfo. */
 int streamWriterInit(streamWriter *writer, streamWriterConfig *cfg, streamWriterEmitFn emit_fn, void *emit_ctx);
+
+/* Redirect compressed output (envelope + frames) straight into *sink, bypassing
+ * the internal scratch buffer and emit callback. */
+void streamWriterSetSink(streamWriter *writer, sds *sink);
 
 /* Returns 0 on success and -1 on error. */
 int streamWriterWrite(streamWriter *writer, const void *buf, size_t len);

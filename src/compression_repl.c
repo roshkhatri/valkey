@@ -19,13 +19,6 @@
 
 /* ===== Primary-side per-replica compressor ===== */
 
-/* Emit callback for the streamWriter: append compressed bytes to out_buf. */
-static int replCompressorEmit(void *ctx, const uint8_t *data, size_t len) {
-    replCompressor *rc = (replCompressor *)ctx;
-    rc->out_buf = sdscatlen(rc->out_buf, data, len);
-    return 0;
-}
-
 replCompressor *replCompressorCreate(compressionAlgo algo, int level) {
     replCompressor *rc = zcalloc(sizeof(*rc));
 
@@ -36,11 +29,12 @@ replCompressor *replCompressorCreate(compressionAlgo algo, int level) {
         .codec_checksum_enabled = 0,
     };
     rc->out_buf = sdsempty();
-    if (streamWriterInit(&rc->writer, &cfg, replCompressorEmit, rc) != 0) {
+    if (streamWriterInit(&rc->writer, &cfg, NULL, NULL) != 0) {
         sdsfree(rc->out_buf);
         zfree(rc);
         return NULL;
     }
+    streamWriterSetSink(&rc->writer, &rc->out_buf);
     return rc;
 }
 
