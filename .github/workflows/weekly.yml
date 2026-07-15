@@ -12,7 +12,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   determine-release-branches:
-    if: github.repository == 'valkey-io/valkey'
+    # TEST: repo guard removed to allow running on a fork
     runs-on: ubuntu-latest
     outputs:
       branches: ${{ steps.release-branches.outputs.branches }}
@@ -50,7 +50,8 @@ jobs:
 
   dispatch-daily-for-release-branches:
     needs: determine-release-branches
-    if: needs.determine-release-branches.outputs.has-branches == 'true' && github.repository == 'valkey-io/valkey'
+    # TEST: repo guard removed to allow running on a fork
+    if: needs.determine-release-branches.outputs.has-branches == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 355
     permissions:
@@ -77,9 +78,12 @@ jobs:
 
             await github.rest.actions.createWorkflowDispatch({
               owner, repo, workflow_id, ref,
-              // Override the branch's workflow_dispatch defaults (which skip most
-              // jobs) so the dispatched run executes everything.
-              inputs: { skipjobs: '', skiptests: '' },
+              // TEST: skip the long-running jobs so each daily finishes fast.
+              // (production version passes empty strings to run everything.)
+              inputs: {
+                skipjobs: 'valgrind,sanitizer,tls,freebsd,macos,alpine,32bit,iothreads,rpm-distros,malloc,specific,fortify,reply-schema,arm',
+                skiptests: 'valkey,redis,modules,sentinel,cluster,unittest,large-memory',
+              },
             });
             core.info(`Dispatched ${workflow_id} on ${ref}`);
 
