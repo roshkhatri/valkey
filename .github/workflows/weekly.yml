@@ -78,12 +78,9 @@ jobs:
 
             await github.rest.actions.createWorkflowDispatch({
               owner, repo, workflow_id, ref,
-              // TEST: skip the long-running jobs so each daily finishes fast.
-              // (production version passes empty strings to run everything.)
-              inputs: {
-                skipjobs: 'valgrind,sanitizer,tls,freebsd,macos,alpine,32bit,iothreads,rpm-distros,malloc,specific,fortify,reply-schema,arm',
-                skiptests: 'valkey,redis,modules,sentinel,cluster,unittest,large-memory',
-              },
+              // Full run: empty overrides the branch dispatch defaults so the
+              // complete daily matrix runs.
+              inputs: { skipjobs: '', skiptests: '' },
             });
             core.info(`Dispatched ${workflow_id} on ${ref}`);
 
