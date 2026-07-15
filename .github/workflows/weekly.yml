@@ -63,71 +63,60 @@ jobs:
         release-branch: ${{ fromJson(needs.determine-release-branches.outputs.branches) }}
     steps:
       - name: Dispatch daily.yml on ${{ matrix.release-branch }} and wait
-        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          script: |
-            const { owner, repo } = context.repo;
-            const ref = '${{ matrix.release-branch }}';
-            const workflow_id = 'daily.yml';
-            const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          REF: ${{ matrix.release-branch }}
+        run: |
+          set -euo pipefail
+          workflow="daily.yml"
 
-            // Record time just before dispatch (small buffer for clock skew).
-            const dispatchedAfter = new Date(Date.now() - 30_000);
+          # Timestamp just before dispatch (small buffer for clock skew).
+          dispatched_after=$(date -u -d '30 seconds ago' +%s)
 
-            await github.rest.actions.createWorkflowDispatch({
-              owner, repo, workflow_id, ref,
-              // 'none' is a sentinel that matches no job/test token, so the
-              // dispatched daily runs its full matrix. An empty string does NOT
-              // work here: the dispatch API drops empty inputs and the branch's
-              // own workflow_dispatch default skip list is applied instead.
-              inputs: { skipjobs: 'none', skiptests: 'none' },
-            });
-            core.info(`Dispatched ${workflow_id} on ${ref}`);
+          # 'none' is a sentinel that matches no job/test token, so the dispatched
+          # daily runs its full matrix. An empty string does NOT work: the dispatch
+          # API drops empty inputs and the branch's own workflow_dispatch default
+          # skip list is applied instead.
+          gh workflow run "$workflow" --repo "$REPO" --ref "$REF" \
+            -f skipjobs=none -f skiptests=none
+          echo "Dispatched $workflow on $REF"
 
-            // 1) Locate the run we just created (it takes a few seconds to appear).
-            let run;
-            for (let attempt = 0; attempt < 20 && !run; attempt++) {
-              await sleep(15_000);
-              const { data } = await github.rest.actions.listWorkflowRuns({
-                owner, repo, workflow_id,
-                branch: ref,
-                event: 'workflow_dispatch',
-                per_page: 20,
-              });
-              run = data.workflow_runs
-                .filter((r) => new Date(r.created_at) >= dispatchedAfter)
-                .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))[0];
-              if (!run) core.info(`Run not visible yet (attempt ${attempt + 1})...`);
-            }
-            if (!run) {
-              core.setFailed(`Could not find dispatched daily run for ${ref}`);
-              return;
-            }
-            core.info(`Tracking run ${run.id}: ${run.html_url}`);
+          # 1) Locate the run we just created (it takes a few seconds to appear).
+          run_id=""
+          for attempt in $(seq 1 20); do
+            sleep 15
+            run_id=$(gh run list --repo "$REPO" --workflow "$workflow" \
+              --branch "$REF" --event workflow_dispatch \
+              --json databaseId,createdAt -L 20 \
+              --jq "[.[] | select((.createdAt | fromdateiso8601) >= $dispatched_after)] | sort_by(.createdAt) | last | .databaseId // empty")
+            if [ -n "$run_id" ]; then break; fi
+            echo "Run not visible yet (attempt $attempt)..."
+          done
+          if [ -z "$run_id" ]; then
+            echo "::error::Could not find dispatched daily run for $REF"
+            exit 1
+          fi
+          echo "Tracking run $run_id: https://github.com/$REPO/actions/runs/$run_id"
 
-            // 2) Poll until the run completes (stay just under the job timeout).
-            const POLL_MS = 60_000;
-            const DEADLINE = Date.now() + 350 * 60_000;
-            let status = run.status;
-            let conclusion = run.conclusion;
-            while (status !== 'completed') {
-              if (Date.now() > DEADLINE) {
-                core.setFailed(`Timed out waiting for ${ref} daily run ${run.id}: ${run.html_url}`);
-                return;
-              }
-              await sleep(POLL_MS);
-              const { data } = await github.rest.actions.getWorkflowRun({
-                owner, repo, run_id: run.id,
-              });
-              status = data.status;
-              conclusion = data.conclusion;
-              core.info(`${ref} run ${run.id}: status=${status} conclusion=${conclusion ?? 'pending'}`);
-            }
+          # 2) Poll until the run completes (stay just under the job timeout).
+          deadline=$(( $(date -u +%s) + 350 * 60 ))
+          while true; do
+            info=$(gh run view "$run_id" --repo "$REPO" --json status,conclusion)
+            status=$(echo "$info" | jq -r '.status')
+            conclusion=$(echo "$info" | jq -r '.conclusion // "pending"')
+            echo "$REF run $run_id: status=$status conclusion=$conclusion"
+            [ "$status" = "completed" ] && break
+            if [ "$(date -u +%s)" -gt "$deadline" ]; then
+              echo "::error::Timed out waiting for $REF daily run $run_id: https://github.com/$REPO/actions/runs/$run_id"
+              exit 1
+            fi
+            sleep 120
+          done
 
-            // 3) Reflect the dispatched run's result in this job.
-            if (conclusion !== 'success') {
-              core.setFailed(`Daily run for ${ref} concluded '${conclusion}': ${run.html_url}`);
-            } else {
-              core.info(`Daily run for ${ref} succeeded: ${run.html_url}`);
-            }
+          # 3) Reflect the dispatched run's result in this job.
+          if [ "$conclusion" != "success" ]; then
+            echo "::error::Daily run for $REF concluded '$conclusion': https://github.com/$REPO/actions/runs/$run_id"
+            exit 1
+          fi
+          echo "Daily run for $REF succeeded: https://github.com/$REPO/actions/runs/$run_id"
