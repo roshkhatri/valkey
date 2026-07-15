@@ -47,22 +47,85 @@ jobs:
             core.info(`Weekly release branches: ${releaseBranches.join(', ') || '(none)'}`);
             core.setOutput('branches', JSON.stringify(releaseBranches));
             core.setOutput('has-branches', releaseBranches.length > 0 ? 'true' : 'false');
-  run-daily-for-release-branches:
+
+  dispatch-daily-for-release-branches:
     needs: determine-release-branches
     if: needs.determine-release-branches.outputs.has-branches == 'true' && github.repository == 'valkey-io/valkey'
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
     permissions:
       actions: write
       contents: read
-      pull-requests: read
     strategy:
       fail-fast: false
+      max-parallel: 2
       matrix:
         release-branch: ${{ fromJson(needs.determine-release-branches.outputs.branches) }}
-      max-parallel: 1
-    uses: ./.github/workflows/daily.yml
-    with:
-      use_repo: valkey-io/valkey
-      use_git_ref: ${{ matrix.release-branch }}
-      skipjobs: ""
-      skiptests: ""
-    secrets: inherit
+    steps:
+      - name: Dispatch daily.yml on ${{ matrix.release-branch }} and wait
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const { owner, repo } = context.repo;
+            const ref = '${{ matrix.release-branch }}';
+            const workflow_id = 'daily.yml';
+            const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+            // Record time just before dispatch (small buffer for clock skew).
+            const dispatchedAfter = new Date(Date.now() - 30_000);
+
+            await github.rest.actions.createWorkflowDispatch({
+              owner, repo, workflow_id, ref,
+              // Override the branch's workflow_dispatch defaults (which skip most
+              // jobs) so the dispatched run executes everything.
+              inputs: { skipjobs: '', skiptests: '' },
+            });
+            core.info(`Dispatched ${workflow_id} on ${ref}`);
+
+            // 1) Locate the run we just created (it takes a few seconds to appear).
+            let run;
+            for (let attempt = 0; attempt < 20 && !run; attempt++) {
+              await sleep(15_000);
+              const { data } = await github.rest.actions.listWorkflowRuns({
+                owner, repo, workflow_id,
+                branch: ref,
+                event: 'workflow_dispatch',
+                per_page: 20,
+              });
+              run = data.workflow_runs
+                .filter((r) => new Date(r.created_at) >= dispatchedAfter)
+                .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))[0];
+              if (!run) core.info(`Run not visible yet (attempt ${attempt + 1})...`);
+            }
+            if (!run) {
+              core.setFailed(`Could not find dispatched daily run for ${ref}`);
+              return;
+            }
+            core.info(`Tracking run ${run.id}: ${run.html_url}`);
+
+            // 2) Poll until the run completes (stay just under the job timeout).
+            const POLL_MS = 60_000;
+            const DEADLINE = Date.now() + 350 * 60_000;
+            let status = run.status;
+            let conclusion = run.conclusion;
+            while (status !== 'completed') {
+              if (Date.now() > DEADLINE) {
+                core.setFailed(`Timed out waiting for ${ref} daily run ${run.id}: ${run.html_url}`);
+                return;
+              }
+              await sleep(POLL_MS);
+              const { data } = await github.rest.actions.getWorkflowRun({
+                owner, repo, run_id: run.id,
+              });
+              status = data.status;
+              conclusion = data.conclusion;
+              core.info(`${ref} run ${run.id}: status=${status} conclusion=${conclusion ?? 'pending'}`);
+            }
+
+            // 3) Reflect the dispatched run's result in this job.
+            if (conclusion !== 'success') {
+              core.setFailed(`Daily run for ${ref} concluded '${conclusion}': ${run.html_url}`);
+            } else {
+              core.info(`Daily run for ${ref} succeeded: ${run.html_url}`);
+            }
