@@ -78,9 +78,10 @@ jobs:
 
             await github.rest.actions.createWorkflowDispatch({
               owner, repo, workflow_id, ref,
-              // Full run: empty overrides the branch dispatch defaults so the
-              // complete daily matrix runs.
-              inputs: { skipjobs: '', skiptests: '' },
+              // Full run: 'none' is a sentinel that matches no job/test token,
+              // so nothing is skipped. Empty string does NOT work: the dispatch
+              // API drops it and the branch's default skip list is applied.
+              inputs: { skipjobs: 'none', skiptests: 'none' },
             });
             core.info(`Dispatched ${workflow_id} on ${ref}`);
 
