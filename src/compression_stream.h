@@ -130,7 +130,8 @@ typedef struct streamReader {
  * need to classify the stream up front can use streamReaderGetInfo. */
 int streamWriterInit(streamWriter *writer, streamWriterConfig *cfg, streamWriterEmitFn emit_fn, void *emit_ctx);
 
-/* Returns 0 on success and -1 on error. */
+/* Returns 0 on success and -1 on error. Errors are sticky: after a failed
+ * write, flush, or finish, later operations fail without emitting bytes. */
 int streamWriterWrite(streamWriter *writer, const void *buf, size_t len);
 int streamWriterFlush(streamWriter *writer);
 int streamWriterFinish(streamWriter *writer);

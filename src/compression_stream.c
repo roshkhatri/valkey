@@ -255,7 +255,7 @@ void streamWriterFree(streamWriter *writer) {
 int streamWriterWrite(streamWriter *writer, const void *buf, size_t len) {
     /* Writes after finish are a caller bug; silently dropping them would
      * corrupt the consumer's view of the stream. */
-    if (writer->finished) return -1;
+    if (writer->finished || writer->errored) return -1;
     if (len == 0) return 0;
 
     const uint8_t *src = (const uint8_t *)buf;
@@ -273,6 +273,7 @@ int streamWriterWrite(streamWriter *writer, const void *buf, size_t len) {
 }
 
 int streamWriterFlush(streamWriter *writer) {
+    if (writer->errored) return -1;
     /* Flush after finish is a no-op: frame is already closed. */
     if (writer->finished) return 0;
 
@@ -281,6 +282,7 @@ int streamWriterFlush(streamWriter *writer) {
 }
 
 int streamWriterFinish(streamWriter *writer) {
+    if (writer->errored) return -1;
     if (writer->finished) return 0;
     writer->finished = true;
 
@@ -616,7 +618,7 @@ int streamReaderValidateEnd(streamReader *reader) {
     }
 
     ssize_t got = reader->read_cb(reader->read_ctx, buf, 1);
-    if (got < 0) {
+    if (got < 0 || got > 1) {
         streamReaderSetError(reader, STREAM_READER_ERROR_IO);
         return -1;
     }

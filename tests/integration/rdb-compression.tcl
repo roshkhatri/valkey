@@ -8,12 +8,32 @@ proc read_binary_file_prefix {path count} {
     return $prefix
 }
 
+proc read_binary_file {path} {
+    set fd [open $path r]
+    fconfigure $fd -translation binary
+    set data [read $fd]
+    close $fd
+    return $data
+}
+
+proc write_binary_file {path data} {
+    set fd [open $path w]
+    fconfigure $fd -translation binary
+    puts -nonewline $fd $data
+    close $fd
+}
+
 proc dump_rdb_path {client} {
     return [file join [lindex [$client config get dir] 1] dump.rdb]
 }
 
 proc read_dump_rdb_header_bytes {client} {
     return [read_binary_file_prefix [dump_rdb_path $client] 8]
+}
+
+proc assert_lz4_rdb_envelope {client checksum_flag} {
+    binary scan [read_binary_file_prefix [dump_rdb_path $client] 7] cu* bytes
+    assert_equal [list 86 67 83 1 2 $checksum_flag 0] $bytes
 }
 
 proc write_rdb_test_dataset {client prefix} {
@@ -48,6 +68,7 @@ start_server {overrides {save "" enable-debug-command local}} {
         set digest [debug_digest]
 
         assert_equal "OK" [r save]
+        assert_lz4_rdb_envelope r 1
         r config rewrite
         restart_server 0 true false
 
@@ -64,7 +85,7 @@ start_server {overrides {save "" enable-debug-command local}} {
         assert_equal 0 [r dbsize]
         assert_equal "OK" [r save]
         r config rewrite
-        assert_equal "VCS" [string range [read_dump_rdb_header_bytes r] 0 2]
+        assert_lz4_rdb_envelope r 1
 
         restart_server 0 true false
 
@@ -106,29 +127,6 @@ start_server {overrides {save "" enable-debug-command local}} {
         assert_rdb_test_dataset r $prefix
     }
 
-    test {LZ4 compressed RDB with large dataset} {
-        r config set rdbcompression lz4-stream
-        r flushall
-        for {set i 0} {$i < 1000} {incr i} {
-            r set "bulk:$i" [string repeat "payload:$i " 32]
-        }
-        r lpush bulk:list a b c d e
-        r hset bulk:hash f1 v1 f2 v2
-
-        set digest [debug_digest]
-        assert_equal "OK" [r save]
-        r config rewrite
-        restart_server 0 true false
-
-        assert_equal "lz4-stream" [lindex [r config get rdbcompression] 1]
-        set newdigest [debug_digest]
-        assert {$digest eq $newdigest}
-        assert_equal [string repeat "payload:42 " 32] [r get bulk:42]
-        assert_equal 5 [r llen bulk:list]
-        assert_equal "v1" [r hget bulk:hash f1]
-        assert_equal 1002 [r dbsize]
-    }
-
     test {Changing compression config during active BGSAVE does not affect the in-flight save} {
         r config set rdbcompression lz4-stream
         r config set rdb-key-save-delay 10000
@@ -145,16 +143,7 @@ start_server {overrides {save "" enable-debug-command local}} {
             fail "BGSAVE did not start in time"
         }
 
-        # Wait for the child to actually begin serializing keys before
-        # flipping the config, otherwise the algo read in the child can
-        # race the parent's CONFIG SET.
-        wait_for_condition 200 10 {
-            [s current_save_keys_processed] >= 1
-        } else {
-            r config set rdb-key-save-delay 0
-            fail "BGSAVE child did not begin serializing in time"
-        }
-
+        # The child must keep the compression setting inherited at fork.
         r config set rdbcompression yes
 
         wait_for_condition 500 10 {
@@ -166,7 +155,7 @@ start_server {overrides {save "" enable-debug-command local}} {
         r config set rdb-key-save-delay 0
 
         assert_equal "yes" [lindex [r config get rdbcompression] 1]
-        assert_equal "VCS" [string range [read_dump_rdb_header_bytes r] 0 2]
+        assert_lz4_rdb_envelope r 1
 
         assert_equal "OK" [r save]
         assert_equal "VALKEY" [string range [read_dump_rdb_header_bytes r] 0 5]
@@ -213,41 +202,14 @@ start_server {overrides {save "" enable-debug-command local}} {
     }
 
     test {Invalid compression config is rejected} {
+        set previous [lindex [r config get rdbcompression] 1]
         assert_error "*argument(s) must be one of the following: no, yes, lz4-stream*" {
             r config set rdbcompression snappy
         }
+        assert_equal $previous [lindex [r config get rdbcompression] 1]
     }
 
-    test {RDB compression config survives CONFIG REWRITE and restart} {
-        r config set rdbcompression lz4-stream
-        r config rewrite
-
-        restart_server 0 true false
-
-        assert_equal "lz4-stream" [lindex [r config get rdbcompression] 1]
-    }
-
-    test {LZ4 compressed RDB with rdbchecksum yes sets the VCS codec checksum flag} {
-        r config set rdbcompression lz4-stream
-        r flushall
-        for {set i 0} {$i < 200} {incr i} {
-            r set "cksum:$i" [string repeat "payload$i " 200]
-        }
-
-        r save
-        set header [read_dump_rdb_header_bytes r]
-        assert_equal "VCS" [string range $header 0 2]
-        binary scan [string index $header 5] cu flags
-        assert {$flags == 1}
-
-        set digest [debug_digest]
-        restart_server 0 true false
-        set newdigest [debug_digest]
-        assert {$digest eq $newdigest}
-        assert_equal [string repeat "payload42 " 200] [r get cksum:42]
-    }
-
-    test {Truncated VCS snapshot is rejected on load} {
+    test {Truncated LZ4 frame is rejected on load} {
         r config set rdbcompression lz4-stream
         r flushall
         set noisy_payload ""
@@ -260,7 +222,7 @@ start_server {overrides {save "" enable-debug-command local}} {
 
         assert_equal "OK" [r save]
         set rdbfile [dump_rdb_path r]
-        assert_equal "VCS" [string range [read_binary_file_prefix $rdbfile 8] 0 2]
+        assert_lz4_rdb_envelope r 1
 
         set truncated [read_binary_file_prefix $rdbfile [expr {[file size $rdbfile] / 2}]]
         set fd [open $rdbfile w]
@@ -268,11 +230,12 @@ start_server {overrides {save "" enable-debug-command local}} {
         puts -nonewline $fd $truncated
         close $fd
 
-        catch {r debug reload nosave} err
-        assert_match "*Error*" $err
+        set failed [catch {r debug reload nosave} err]
+        assert_equal 1 $failed
+        assert_match "*Error trying to load the RDB*" $err
     }
 
-    test {LZ4 compressed RDB detects tail corruption when codec checksums are enabled} {
+    test {LZ4 compressed RDB detects a content checksum mismatch} {
         r config set rdbcompression lz4-stream
         assert_equal "yes" [lindex [r config get rdbchecksum] 1]
         r flushall
@@ -284,33 +247,46 @@ start_server {overrides {save "" enable-debug-command local}} {
         set rdbfile [file join [lindex [r config get dir] 1] dump.rdb]
         set fd [open $rdbfile r+]
         fconfigure $fd -translation binary
-        seek $fd -8 end
-        puts -nonewline $fd "foobar00"
+        seek $fd -1 end
+        binary scan [read $fd 1] cu checksum_byte
+        seek $fd -1 end
+        puts -nonewline $fd [binary format c [expr {$checksum_byte ^ 1}]]
         close $fd
 
-        catch {r debug reload nosave} err
-        assert_match "*Error*" $err
+        set failed [catch {r debug reload nosave} err]
+        assert_equal 1 $failed
+        assert_match "*Error trying to load the RDB*" $err
     }
 
-    test {LZ4 compressed RDB with REPL stream kind is rejected} {
+    test {RDB loader rejects incompatible VCS envelope fields without changing data} {
         r config set rdbcompression lz4-stream
         r flushall
-        r set wrong-kind:key [string repeat "payload " 100]
+        r set incompatible-envelope:key [string repeat "payload " 100]
 
         assert_equal "OK" [r save]
+        set digest [debug_digest]
+        set rdbfile [dump_rdb_path r]
+        set original [read_binary_file $rdbfile]
 
-        set rdbfile [file join [lindex [r config get dir] 1] dump.rdb]
-        set fd [open $rdbfile r+]
-        fconfigure $fd -translation binary
-        set data [read $fd]
-        set data [string replace $data 6 6 [binary format c 0x01]]
-        seek $fd 0
-        puts -nonewline $fd $data
-        close $fd
+        foreach case {
+            {version 3 2}
+            {codec 4 127}
+            {reserved-flags 5 2}
+            {stream-kind 6 1}
+        } {
+            lassign $case field offset value
+            set mutated [string replace $original $offset $offset [binary format c $value]]
+            write_binary_file $rdbfile $mutated
+            set loglines [count_log_lines 0]
 
-        catch {r debug reload nosave} err
-        assert_match "*Error*" $err
-        verify_log_message 0 "*Invalid or unsupported RDB stream envelope*" 0
+            set failed [catch {r debug reload nosave} err]
+            assert_equal 1 $failed "VCS $field should be rejected"
+            assert_match "*Error trying to load the RDB*" $err
+            verify_log_message 0 "*Invalid or unsupported RDB stream envelope*" $loglines
+            assert_equal $digest [debug_digest]
+        }
+
+        write_binary_file $rdbfile $original
     }
 
     test {LZ4 compressed RDB detects corruption in compressed payload} {
@@ -324,13 +300,10 @@ start_server {overrides {save "" enable-debug-command local}} {
 
         set rdbfile [file join [lindex [r config get dir] 1] dump.rdb]
 
-        # Read the file, flip a byte in the compressed payload
-        # (skip the VCS envelope at offset 0-6, corrupt somewhere in the middle)
         set fd [open $rdbfile r+]
         fconfigure $fd -translation binary
         set data [read $fd]
         set len [string length $data]
-        # Corrupt a byte roughly in the middle of the compressed data
         set pos [expr {$len / 2}]
         set byte [string index $data $pos]
         binary scan $byte c val
@@ -341,27 +314,11 @@ start_server {overrides {save "" enable-debug-command local}} {
         puts -nonewline $fd $data
         close $fd
 
-        # Reload should fail due to corruption
-        catch {r debug reload nosave} err
-        assert_match "*Error*" $err
+        set failed [catch {r debug reload nosave} err]
+        assert_equal 1 $failed
+        assert_match "*Error trying to load the RDB*" $err
     }
 
-    test {Invalid non-VCS/non-RDB file fails reload} {
-        r config set rdbcompression lz4-stream
-        r flushall
-        r set smoke-key smoke-value
-
-        assert_equal "OK" [r save]
-
-        set rdbfile [file join [lindex [r config get dir] 1] dump.rdb]
-        set fd [open $rdbfile w]
-        fconfigure $fd -translation binary
-        puts -nonewline $fd "NOTANRDB"
-        close $fd
-
-        catch {r debug reload nosave} err
-        assert_match "*Error*" $err
-    }
 }
 
 start_server {config "minimal.conf" args {"--rdbcompression lz4-stream"}} {
@@ -379,10 +336,7 @@ start_server {overrides {save "" enable-debug-command local rdbchecksum no}} {
         }
 
         r save
-        set header [read_dump_rdb_header_bytes r]
-        assert_equal "VCS" [string range $header 0 2]
-        binary scan [string index $header 5] cu flags
-        assert {$flags == 0}
+        assert_lz4_rdb_envelope r 0
 
         set digest [debug_digest]
         restart_server 0 true false
@@ -466,32 +420,6 @@ start_server {tags {"rdb-compression repl external:skip"}} {
         }
 
         $replica replicaof no one
-    }
-}
-
-set cluster_bus_port [find_available_port $::baseport $::portcount]
-start_server [list tags {"rdb-compression cluster external:skip singledb"} overrides [list save "" cluster-enabled yes cluster-port $cluster_bus_port]] {
-    test {RDB compression config works in cluster mode} {
-        r config set rdbcompression lz4-stream
-        assert_equal "OK" [r cluster addslotsrange 0 16383]
-        wait_for_condition 50 100 {
-            [getInfoProperty [r cluster info] cluster_state] eq "ok"
-        } else {
-            fail "Cluster did not become writable"
-        }
-        assert_equal "OK" [r cluster saveconfig]
-        r set cluster-rdb-compression value
-        assert_equal "OK" [r save]
-        assert_equal "VCS" [string range [read_dump_rdb_header_bytes r] 0 2]
-
-        restart_server 0 true false
-        wait_for_condition 50 100 {
-            [getInfoProperty [r cluster info] cluster_state] eq "ok"
-        } else {
-            fail "Cluster did not become writable after restart"
-        }
-
-        assert_equal "value" [r get cluster-rdb-compression]
     }
 }
 

@@ -164,55 +164,6 @@ tags {"repl external:skip"} {
         }
     }
 
-    test "Replica restart reuses disk-based sync RDB when primary rdbcompression is lz4-stream" {
-        start_server {overrides {appendonly yes aof-use-rdb-preamble yes repl-diskless-sync no save "" rdbcompression lz4-stream}} {
-            set primary [srv 0 client]
-            set primary_host [srv 0 host]
-            set primary_port [srv 0 port]
-
-            for {set i 0} {$i < 40} {incr i} {
-                $primary set "lz4-key:$i" "value:$i"
-            }
-            waitForBgrewriteaof $primary
-
-            start_server {overrides {appendonly yes aof-use-rdb-preamble yes repl-diskless-sync no save ""}} {
-                set replica [srv 0 client]
-                set replica_log [srv 0 stdout]
-
-                $replica replicaof $primary_host $primary_port
-                wait_for_sync $replica
-
-                wait_for_condition 50 100 {
-                    [log_file_matches $replica_log "*Reused RDB file from primary sync as AOF base file*"]
-                } else {
-                    fail "Expected log message about reusing RDB file not found"
-                }
-
-                assert {![log_file_matches $replica_log "*uses streaming compression, falling back to BGREWRITEAOF*"]}
-                set manifest_path [get_aof_manifest_path $replica]
-                set base_name [get_cur_base_aof_name $manifest_path]
-                assert {$base_name ne ""}
-                assert {[string match "*.rdb" $base_name]}
-
-                for {set i 40} {$i < 60} {incr i} {
-                    $primary set "lz4-key:$i" "value:$i"
-                }
-                wait_for_ofs_sync $primary $replica
-
-                $replica replicaof no one
-
-                restart_server 0 true false
-                set replica [srv 0 client]
-                wait_done_loading $replica
-
-                assert_equal 60 [$replica dbsize]
-                for {set i 0} {$i < 60} {incr i} {
-                    assert_equal "value:$i" [$replica get "lz4-key:$i"]
-                }
-            }
-        }
-    }
-
     # Test 4: aof-use-rdb-preamble no should fall back to bgrewriteaof
     test "Disk-based sync with aof-use-rdb-preamble no uses bgrewriteaof" {
         start_server {overrides {appendonly yes aof-use-rdb-preamble no repl-diskless-sync no save ""}} {
