@@ -196,7 +196,12 @@ start_server {tags {"repl external:skip"}} {
         }
         
         test {Replica output bytes metric} {
-            # reset stats 
+            # Make sure no replication traffic (initial sync, backlog writes)
+            # is still in flight before resetting stats, so the zero-baseline
+            # assertion below doesn't race with it.
+            wait_for_ofs_sync $A $B
+
+            # reset stats
             $A config resetstat
             
             set info [$A info stats]
@@ -207,7 +212,7 @@ start_server {tags {"repl external:skip"}} {
             $A set key value
             
             # wait for command propagation
-            wait_for_condition 50 100 {
+            wait_for_condition 100 100 {
                 [$B get key] eq {value}
             } else {
                 fail "Replica did not receive the command"
@@ -687,6 +692,12 @@ foreach testType {Successful Aborted} {
                         assert_error {LOADING*} {$replica REPLICAOF no one}
                     }
 
+                    test {MODULE LOAD and LOADEX are blocked during async-loading} {
+                        set testmodule [file normalize tests/modules/basics.so]
+                        assert_error {LOADING*} {$replica MODULE LOAD $testmodule}
+                        assert_error {LOADING*} {$replica MODULE LOADEX $testmodule}
+                    }
+
                     # Make sure that next sync will not start immediately so that we can catch the replica in between syncs
                     $master config set repl-diskless-sync-delay 5
 
@@ -973,9 +984,30 @@ start_server {tags {"repl external:skip"} overrides {save ""}} {
                         # Let one replica hit repl-timeout while the slow reader
                         # is paused, then restore a generous timeout so the
                         # remaining replica can finish the streamed RDB.
+                        #
+                        # The disconnect can land in either of two branches in
+                        # replication.c serverCron (see src/replication.c around
+                        # the "Disconnecting timedout replica" emitters):
+                        #   - "(full sync)"      WAIT_BGSAVE_END + rdb_child_type == SOCKET
+                        #   - "(streaming sync)" REPLICA_STATE_ONLINE
+                        # On some platforms (notably macOS CI) the RDB child can
+                        # exit and clear rdb_child_type in the same serverCron
+                        # tick as the disconnect check, closing the (full sync)
+                        # window; the timed-out replica is by then already
+                        # promoted via replicaPutOnline() and the disconnect
+                        # surfaces on the (streaming sync) path instead. Both
+                        # are legitimate timeout-driven disconnects.
                         $master config set repl-timeout 2
-                        wait_for_log_messages -2 {"*Disconnecting timedout replica (full sync)*"} $loglines 100 100
+                        wait_for_log_messages -2 {
+                            "*Disconnecting timedout replica (full sync)*"
+                            "*Disconnecting timedout replica (streaming sync)*"
+                        } $loglines 100 100
                         $master config set repl-timeout 60
+                        # Guard against silently broadening the assertion: the
+                        # slow replica must time out exactly once across both
+                        # branches in this subcase.
+                        assert_equal 1 [count_log_message -2 "Disconnecting timedout replica"] \
+                            "expected exactly one 'Disconnecting timedout replica' log entry (full sync or streaming sync) for the slow replica"
                     }
 
                     # Use a single generous budget for all subcases; successful
