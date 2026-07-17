@@ -485,8 +485,10 @@ void rioGenericUpdateChecksum(rio *r, const void *buf, size_t len) {
     r->cksum = crc64(r->cksum, buf, len);
 }
 
-/* Read up to `len` bytes from a readable rio without requiring a full-length
- * transfer. Returns:
+/* rioRead() is for callers that know an exact field size. A stream transformer
+ * instead treats its input buffer size as a capacity and may still use a short
+ * final chunk, so it uses this upper-bound read. Read up to `len` bytes from a
+ * readable rio without requiring a full-length transfer. Returns:
  * - >0 bytes read
  * -  0 on EOF
  * - -1 on error (sticky read error is latched on the rio) */
@@ -536,6 +538,8 @@ void rioSetReclaimCache(rio *r, int enabled) {
 }
 
 int rioIsConnBacked(rio *r) {
+    /* Test the propagated transport property instead of comparing function
+     * pointers, which would identify a decorator rather than its inner rio. */
     return (r->flags & RIO_FLAG_CONN_BACKED) != 0;
 }
 

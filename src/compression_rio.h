@@ -10,22 +10,41 @@
 #include "compression_stream.h"
 #include "rio.h"
 
-/* Streaming compression has three layers:
+/* These types are rio decorators: they add a transformation in front of an
+ * already initialized rio without changing that inner rio.
+ *
+ * Save path (arrows show the direction of bytes):
+ *
+ *   rdbSaveRio -> compressRio.base -> streamWriter -> compressRio.inner -> file
+ *                  plain RDB bytes       VCS/LZ4 bytes
+ *
+ * Load path:
+ *
+ *   rdbLoadRio <- decompressRio.base <- streamReader <- decompressRio.inner <- file
+ *                  plain RDB bytes          file bytes
+ *
+ * The base rio is the interface presented to RDB. The inner rio is the
+ * existing file, buffer, or connection backend that performs the physical I/O.
+ * The wrappers do not own inner, so it must remain valid until the wrapper is
+ * freed. Keeping base and inner separate also prevents transformed bytes from
+ * being sent through the wrapper again.
+ *
+ * Streaming compression has three implementation layers:
  * - compression.c/compression_*.c wrap codec-specific streaming APIs.
  * - compression_stream.c owns VCS framing, probing, buffering, and validation.
  * - compression_rio.c adapts those streams to rio so RDB code can keep using rio.
  */
 typedef struct {
-    rio base; /* Must be first, allows casting to (rio *). */
-    rio *inner;
-    streamWriter writer;
-    bool finalized;
+    rio base;            /* Outward rio that accepts plain RDB bytes. Must be first. */
+    rio *inner;          /* Existing destination for VCS/LZ4 bytes; not owned. */
+    streamWriter writer; /* Transforms plain bytes before emitting to inner. */
+    bool finalized;      /* No writes are allowed after the frame is finished. */
 } compressRio;
 
 typedef struct {
-    rio base; /* Must be first. */
-    rio *inner;
-    streamReader reader;
+    rio base;            /* Outward rio that returns plain RDB bytes. Must be first. */
+    rio *inner;          /* Existing source of plain or VCS/LZ4 bytes; not owned. */
+    streamReader reader; /* Probes, passes through, or decompresses inner bytes. */
 } decompressRio;
 
 typedef enum {

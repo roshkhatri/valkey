@@ -1592,8 +1592,14 @@ static int rdbSaveInternal(int req, const char *filename, rdbSaveInfo *rsi, int 
         if (!(rdbflags & RDBFLAGS_KEEP_CACHE)) rioSetReclaimCache(&rdb, 1);
     }
 
-    /* When streaming compression is enabled, wrap the file rio with
-     * compressRio. rdbSaveRio writes through the compressor transparently.
+    /* save_rio normally points directly at the file rio above. Streaming
+     * compression inserts one new outward rio while reusing that same file rio:
+     *
+     *   disabled: rdbSaveRio -> rdb(file) -> disk
+     *   enabled:  rdbSaveRio -> cr.base -> cr.inner=&rdb(file) -> disk
+     *
+     * rdbSaveRio therefore writes the same logical RDB bytes in both cases.
+     * The wrapper transforms those bytes before forwarding them to the file.
      * Per-string LZF is gated on RIO_FLAG_STREAMING_COMPRESSION (set on
      * the wrapper, not on the inner rio), so paths without a streaming
      * wrapper (DUMP, AOF rewrite, replication sync) keep using LZF as
@@ -3734,6 +3740,14 @@ int rdbLoad(char *filename, rdbSaveInfo *rsi, int rdbflags) {
     startLoadingFile(sb.st_size, filename, rdbflags);
     rioInitWithFile(&rdb, fp);
 
+    /* Always put the probing reader in front of an on-disk RDB:
+     *
+     *   plain file: rdbLoadRio <- decompressor.base <- pass through <- rdb(file)
+     *   VCS file:   rdbLoadRio <- decompressor.base <- LZ4 decode  <- rdb(file)
+     *
+     * The probe bytes are replayed for plain input, so rdbLoadRio sees the
+     * original RDB header. For VCS input it sees the header produced by the
+     * decoder. The parser therefore remains unaware of the outer file format. */
     bool skip_codec_checksum_validation = !server.rdb_checksum || server.skip_checksum_validation;
     decompressRioInitResult init_rc = rioInitWithRdbDecompression(
         &decompressor, &rdb, skip_codec_checksum_validation, &streaming_algo);

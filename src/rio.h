@@ -44,20 +44,22 @@
 #define RIO_FLAG_SKIP_RDB_CHECKSUM (1 << 3)
 #define RIO_FLAG_STREAMING_COMPRESSION (1 << 4)   /* Streaming compression active, skip per-string LZF */
 #define RIO_FLAG_STREAMING_DECOMPRESSION (1 << 5) /* rio is a stream decompression adapter */
-#define RIO_FLAG_CONN_BACKED (1 << 6)             /* rio reads from or writes to connection-backed transport. */
+/* The final transport is connection-backed. Decorators copy this property from
+ * their inner rio because their own read/write function pointers hide the
+ * concrete transport. */
+#define RIO_FLAG_CONN_BACKED (1 << 6)
 
 struct _rio {
-    /* Backend functions.
-     * Since this functions do not tolerate short writes or reads the return
-     * value is simplified to: zero on error, non zero on complete success. */
+    /* Backend functions. read and write are the exact-length interface used by
+     * parsers: zero means failure, nonzero means all len bytes were processed. */
     size_t (*read)(struct _rio *, void *buf, size_t len);
     size_t (*write)(struct _rio *, const void *buf, size_t len);
     off_t (*tell)(struct _rio *);
     int (*flush)(struct _rio *);
-    /* Partial-read backend: returns >0 bytes read, 0 on EOF, -1 on error.
-     * Unlike read(), partial results are allowed. Used by rioReadPartial()
-     * for streaming decompression and other adapters that need incremental
-     * input. NULL when the backend does not support reading. */
+    /* Partial-read backend. Here len is a maximum, not a requirement: return
+     * >0 bytes read, 0 on EOF, or -1 on error. A stream decoder uses this
+     * because it cannot know how many encoded bytes will produce the decoded
+     * bytes requested by its caller. NULL when the backend cannot be read. */
     ssize_t (*read_some)(struct _rio *, void *buf, size_t len);
     /* The update_cksum method if not NULL is used to compute the checksum of
      * all the data that was read or written so far. The method should be
@@ -72,7 +74,8 @@ struct _rio {
     /* number of bytes read or written */
     size_t processed_bytes;
 
-    /* maximum single read or write chunk size */
+    /* Maximum size of one backend operation, not a total byte limit. Zero
+     * means unlimited. rioRead/rioWrite split larger requests into chunks. */
     size_t max_processing_chunk;
 
     /* Backend-specific vars. */

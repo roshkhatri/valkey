@@ -49,13 +49,18 @@ static void rioInitBase(rio *base,
 
 static int compressRioEmit(void *ctx, const uint8_t *data, size_t len) {
     compressRio *cr = (compressRio *)ctx;
-    /* streamWriter sinks return 0 on success and -1 on failure. rioWrite
+    /* streamWriter has finished transforming this chunk. Send it directly to
+     * the original destination. Sending it through cr->base would call
+     * compressRioWrite again and recursively compress the output.
+     * streamWriter sinks return 0 on success and -1 on failure, while rioWrite
      * returns nonzero on success and 0 on failure, so adapt that here. */
     return rioWrite(cr->inner, data, len) == 0 ? -1 : 0;
 }
 
 static size_t compressRioWrite(rio *r, const void *buf, size_t len) {
     compressRio *cr = (compressRio *)r;
+    /* RDB writes plain bytes to cr->base. The base is the first struct member,
+     * so the rio pointer is also a pointer to the containing compressRio. */
     if (cr->finalized) {
         r->flags |= RIO_FLAG_WRITE_ERROR;
         return 0;
@@ -104,6 +109,8 @@ int rioInitWithRdbCompression(compressRio *cr,
         .codec_checksum_enabled = codec_checksum_enabled,
     };
 
+    /* inner is the rio RDB would have used without compression. Keep it
+     * unchanged and put this new outward-facing rio in front of it. */
     memset(cr, 0, sizeof(*cr));
     rioInitBase(&cr->base, rioReadUnsupported, compressRioWrite, compressRioTell,
                 compressRioFlush,
@@ -120,7 +127,9 @@ int rioInitWithRdbCompression(compressRio *cr,
     return 0;
 }
 
-/* Idempotent: subsequent calls report cached error state. */
+/* Closing a codec frame is different from flushing it. Flush allows more RDB
+ * bytes to follow; finish writes the frame ending and rejects later writes.
+ * Idempotent: subsequent calls report cached error state. */
 int compressRioFinish(compressRio *cr) {
     if (cr->finalized) {
         if (cr->writer.errored) {
@@ -154,6 +163,9 @@ void compressRioFree(compressRio *cr) {
 
 static ssize_t decompressRioReadPartial(void *ctx, void *buf, size_t len) {
     decompressRio *dr = (decompressRio *)ctx;
+    /* The decoder cannot predict how many encoded bytes will produce the
+     * plain bytes requested by RDB. It therefore pulls up to len bytes from
+     * the original source and decides after decoding whether it needs more. */
     return rioReadPartial(dr->inner, buf, len);
 }
 
@@ -161,6 +173,9 @@ static size_t decompressRioRead(rio *r, void *buf, size_t len) {
     decompressRio *dr = (decompressRio *)r;
     if (dr->base.flags & RIO_FLAG_READ_ERROR) return 0;
 
+    /* streamReader may produce a partial result, but the outward rio contract
+     * used by RDB is exact-length-or-error. Keep reading until that contract is
+     * satisfied. */
     uint8_t *dst = (uint8_t *)buf;
     size_t remaining = len;
     while (remaining > 0) {
@@ -188,6 +203,8 @@ streamReaderError decompressRioGetError(decompressRio *dr) {
 }
 
 int decompressRioValidateEnd(decompressRio *dr) {
+    /* The RDB EOF opcode only ends the decoded payload. Also require the outer
+     * codec frame to end cleanly, with no buffered or trailing bytes. */
     return streamReaderValidateEnd(&dr->reader);
 }
 
@@ -212,6 +229,12 @@ decompressRioInitResult rioInitWithRdbDecompression(decompressRio *dr,
 
     if (algo) *algo = ALGO_NONE;
 
+    /* The reader probes inner before RDB starts parsing:
+     *
+     *   plain input: replay the probe bytes and pass the rest through
+     *   VCS input:   consume the envelope and return decoded RDB bytes
+     *
+     * In both cases callers can pass dr->base to the unchanged RDB parser. */
     if (streamReaderInit(&dr->reader, &cfg, decompressRioReadPartial, dr) != 0) return DECOMPRESS_RIO_INIT_ERROR;
     if (streamReaderGetInfo(&dr->reader, &info) != 0) {
         streamReaderError error_kind = dr->reader.error_kind;
