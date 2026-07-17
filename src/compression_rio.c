@@ -100,7 +100,7 @@ int rioInitWithRdbCompression(compressRio *cr,
     streamWriterConfig cfg = {
         .algo = algo,
         .level = 0,
-        .stream_kind = STREAM_KIND_RDB,
+        .stream_kind = VCS_STREAM_RDB,
         .codec_checksum_enabled = codec_checksum_enabled,
     };
 
@@ -193,10 +193,12 @@ int decompressRioValidateEnd(decompressRio *dr) {
 
 decompressRioInitResult rioInitWithRdbDecompression(decompressRio *dr,
                                                     rio *inner,
+                                                    bool skip_codec_checksum_validation,
                                                     compressionAlgo *algo) {
     streamReaderConfig cfg = {
-        .expected_stream_kind = STREAM_KIND_RDB,
+        .expected_stream_kind = VCS_STREAM_RDB,
         .allow_passthrough = true,
+        .skip_codec_checksum_validation = skip_codec_checksum_validation,
         .buffer_size = STREAM_READER_BUFFER_SIZE_DEFAULT,
     };
     streamReaderInfo info = {0};

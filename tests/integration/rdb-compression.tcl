@@ -31,9 +31,9 @@ proc read_dump_rdb_header_bytes {client} {
     return [read_binary_file_prefix [dump_rdb_path $client] 8]
 }
 
-proc assert_lz4_rdb_envelope {client checksum_flag} {
+proc assert_lz4_rdb_envelope {client} {
     binary scan [read_binary_file_prefix [dump_rdb_path $client] 7] cu* bytes
-    assert_equal [list 86 67 83 1 2 $checksum_flag 0] $bytes
+    assert_equal [list 86 67 83 1 1 0 1] $bytes
 }
 
 proc write_rdb_test_dataset {client prefix} {
@@ -68,7 +68,10 @@ start_server {overrides {save "" enable-debug-command local}} {
         set digest [debug_digest]
 
         assert_equal "OK" [r save]
-        assert_lz4_rdb_envelope r 1
+        assert_lz4_rdb_envelope r
+        set loglines [count_log_lines 0]
+        assert_equal "OK" [r debug reload nosave]
+        verify_log_message 0 "*Logical RDB CRC64 skipped for streaming-compressed input*" $loglines
         r config rewrite
         restart_server 0 true false
 
@@ -85,7 +88,7 @@ start_server {overrides {save "" enable-debug-command local}} {
         assert_equal 0 [r dbsize]
         assert_equal "OK" [r save]
         r config rewrite
-        assert_lz4_rdb_envelope r 1
+        assert_lz4_rdb_envelope r
 
         restart_server 0 true false
 
@@ -155,7 +158,7 @@ start_server {overrides {save "" enable-debug-command local}} {
         r config set rdb-key-save-delay 0
 
         assert_equal "yes" [lindex [r config get rdbcompression] 1]
-        assert_lz4_rdb_envelope r 1
+        assert_lz4_rdb_envelope r
 
         assert_equal "OK" [r save]
         assert_equal "VALKEY" [string range [read_dump_rdb_header_bytes r] 0 5]
@@ -222,7 +225,7 @@ start_server {overrides {save "" enable-debug-command local}} {
 
         assert_equal "OK" [r save]
         set rdbfile [dump_rdb_path r]
-        assert_lz4_rdb_envelope r 1
+        assert_lz4_rdb_envelope r
 
         set truncated [read_binary_file_prefix $rdbfile [expr {[file size $rdbfile] / 2}]]
         set fd [open $rdbfile w]
@@ -231,6 +234,12 @@ start_server {overrides {save "" enable-debug-command local}} {
         close $fd
 
         set failed [catch {r debug reload nosave} err]
+        assert_equal 1 $failed
+        assert_match "*Error trying to load the RDB*" $err
+
+        r debug set-skip-checksum-validation 1
+        set failed [catch {r debug reload nosave} err]
+        r debug set-skip-checksum-validation 0
         assert_equal 1 $failed
         assert_match "*Error trying to load the RDB*" $err
     }
@@ -256,6 +265,12 @@ start_server {overrides {save "" enable-debug-command local}} {
         set failed [catch {r debug reload nosave} err]
         assert_equal 1 $failed
         assert_match "*Error trying to load the RDB*" $err
+
+        set loglines [count_log_lines 0]
+        r debug set-skip-checksum-validation 1
+        assert_equal "OK" [r debug reload nosave]
+        r debug set-skip-checksum-validation 0
+        verify_log_message 0 "*Logical RDB CRC64 skipped for streaming-compressed input*" $loglines
     }
 
     test {RDB loader rejects incompatible VCS envelope fields without changing data} {
@@ -271,8 +286,8 @@ start_server {overrides {save "" enable-debug-command local}} {
         foreach case {
             {version 3 2}
             {codec 4 127}
-            {reserved-flags 5 2}
-            {stream-kind 6 1}
+            {reserved-byte 5 1}
+            {stream-kind 6 127}
         } {
             lassign $case field offset value
             set mutated [string replace $original $offset $offset [binary format c $value]]
@@ -328,7 +343,7 @@ start_server {config "minimal.conf" args {"--rdbcompression lz4-stream"}} {
 }
 
 start_server {overrides {save "" enable-debug-command local rdbchecksum no}} {
-    test {LZ4 compressed RDB with rdbchecksum no leaves VCS flags clear and loads correctly} {
+    test {LZ4 compressed RDB with rdbchecksum no omits codec checksums and loads correctly} {
         r config set rdbcompression lz4-stream
         r flushall
         for {set i 0} {$i < 50} {incr i} {
@@ -336,7 +351,10 @@ start_server {overrides {save "" enable-debug-command local rdbchecksum no}} {
         }
 
         r save
-        assert_lz4_rdb_envelope r 0
+        assert_lz4_rdb_envelope r
+        set loglines [count_log_lines 0]
+        assert_equal "OK" [r debug reload nosave]
+        verify_log_message 0 "*Logical RDB CRC64 skipped for streaming-compressed input*" $loglines
 
         set digest [debug_digest]
         restart_server 0 true false

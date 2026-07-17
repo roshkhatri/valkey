@@ -624,7 +624,7 @@ int redis_check_rdb(char *rdbfilename, FILE *fp) {
     rioInitWithFile(&file_rdb, fp);
 
     /* Support both plain RDB files and VCS-wrapped streaming-compressed RDBs. */
-    decompressRioInitResult init_rc = rioInitWithRdbDecompression(&decompressor, &file_rdb, NULL);
+    decompressRioInitResult init_rc = rioInitWithRdbDecompression(&decompressor, &file_rdb, false, NULL);
     if (init_rc == DECOMPRESS_RIO_INIT_INCOMPATIBLE) {
         rdbCheckError("Invalid or unsupported RDB stream envelope. "
                       "File may require a Valkey version with streaming RDB "
@@ -840,7 +840,8 @@ int redis_check_rdb(char *rdbfilename, FILE *fp) {
         if (rioRead(rdb, &cksum, 8) == 0) goto eoferr;
         memrev64ifbe(&cksum);
         if ((rdb->flags & RIO_FLAG_STREAMING_COMPRESSION) && (rdb->flags & RIO_FLAG_SKIP_RDB_CHECKSUM)) {
-            rdbCheckInfo("Skipping logical RDB checksum for streaming-compressed input.");
+            rdbCheckInfo("Logical RDB CRC64 skipped for streaming-compressed input; "
+                         "integrity is verified by the codec frame checksums.");
         } else if (rdb->flags & RIO_FLAG_SKIP_RDB_CHECKSUM) {
             rdbCheckInfo("RDB file was saved with checksum disabled: skipped checksum for this transfer.");
         } else if (cksum == 0) {

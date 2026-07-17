@@ -32,8 +32,6 @@
 #include "rio.h"
 #include "functions.h"
 #include "module.h"
-#include "compression_stream.h"
-
 #include <signal.h>
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -1006,30 +1004,15 @@ int startAppendOnly(void) {
     return C_OK;
 }
 
-static int rdbFileUsesStreamingCompression(const char *filename) {
-    unsigned char header[VCS_ENVELOPE_SIZE];
-    int fd = open(filename, O_RDONLY);
-    if (fd == -1) return -1;
-
-    ssize_t nread = read(fd, header, sizeof(header));
-    int read_errno = errno;
-    close(fd);
-
-    if (nread == -1) {
-        errno = read_errno;
-        return -1;
-    }
-    if (nread < (ssize_t)sizeof(header)) return 0;
-
-    streamReaderInfo info = {0};
-    return streamReadEnvelopeInfo(header, sizeof(header), STREAM_KIND_RDB, &info) == 0;
+bool aofCanReuseRdbAsBase(rdbLoadFormat loaded_format) {
+    return loaded_format == RDB_LOAD_FORMAT_PLAIN;
 }
 
 /* Try to restart AOF after replica full sync by adopting `server.rdb_filename`
  * as the new BASE file (RDB preamble mode), avoiding a redundant AOFRW.
  * Returns C_OK on success; on C_ERR caller should fallback to
  * restartAOFAfterSYNC(). */
-int restartAOFWithSyncRdb(void) {
+int restartAOFWithSyncRdb(rdbLoadFormat loaded_format) {
     serverAssert(server.aof_state == AOF_OFF);
 
     int ret = C_ERR;
@@ -1040,17 +1023,12 @@ int restartAOFWithSyncRdb(void) {
     sds new_incr_filepath = NULL;
     aofManifest *temp_am = NULL;
 
-    int compressed_sync_rdb = rdbFileUsesStreamingCompression(server.rdb_filename);
-    if (compressed_sync_rdb == -1) {
-        serverLog(LL_WARNING, "Error inspecting the RDB file %s before AOF reuse: %s",
-                  server.rdb_filename, strerror(errno));
-        goto cleanup;
-    }
-    if (compressed_sync_rdb) {
+    if (!aofCanReuseRdbAsBase(loaded_format)) {
         serverLog(LL_NOTICE,
-                  "Sync RDB file %s uses streaming compression, falling back to BGREWRITEAOF instead of reusing it as an AOF base",
-                  server.rdb_filename);
-        return C_ERR;
+                  "Sync RDB file %s has %s physical format, falling back to BGREWRITEAOF instead of reusing it as an AOF base",
+                  server.rdb_filename,
+                  loaded_format == RDB_LOAD_FORMAT_VCS ? "VCS" : "unknown");
+        goto cleanup;
     }
 
     if (dirCreateIfMissing(server.aof_dirname) == -1) {

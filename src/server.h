@@ -1605,6 +1605,12 @@ typedef enum {
     PROPAGATION_ERR_BEHAVIOR_PANIC_ON_REPLICAS
 } replicationErrorBehavior;
 
+typedef enum {
+    RDB_LOAD_FORMAT_UNKNOWN = 0,
+    RDB_LOAD_FORMAT_PLAIN,
+    RDB_LOAD_FORMAT_VCS,
+} rdbLoadFormat;
+
 /* This structure can be optionally passed to RDB save/load functions in
  * order to implement additional functionalities, by storing and loading
  * metadata to the RDB file.
@@ -1621,9 +1627,10 @@ typedef struct rdbSaveInfo {
     int repl_id_is_set;                   /* True if repl_id field is set. */
     char repl_id[CONFIG_RUN_ID_SIZE + 1]; /* Replication ID. */
     long long repl_offset;                /* Replication offset. */
+    rdbLoadFormat loaded_format;          /* Physical format classified by rdbLoad(). */
 } rdbSaveInfo;
 
-#define RDB_SAVE_INFO_INIT {-1, 0, "0000000000000000000000000000000000000000", -1}
+#define RDB_SAVE_INFO_INIT {-1, 0, "0000000000000000000000000000000000000000", -1, RDB_LOAD_FORMAT_UNKNOWN}
 
 struct malloc_stats {
     size_t zmalloc_used;
@@ -3299,7 +3306,8 @@ int rewriteAppendOnlyFileBackground(void);
 int loadAppendOnlyFiles(aofManifest *am);
 void stopAppendOnly(void);
 int startAppendOnly(void);
-int restartAOFWithSyncRdb(void);
+bool aofCanReuseRdbAsBase(rdbLoadFormat loaded_format);
+int restartAOFWithSyncRdb(rdbLoadFormat loaded_format);
 void backgroundRewriteDoneHandler(int exitcode, int bysignal);
 void killAppendOnlyChild(void);
 void restartAOFAfterSYNC(void);

@@ -152,7 +152,10 @@ ssize_t compressionLz4DecompressFeed(streamDecompressor *decompressor,
     LZ4F_dctx *dctx = (LZ4F_dctx *)decompressor->ctx;
     size_t dst_size = output_capacity;
     size_t src_size = input_len;
-    size_t ret = LZ4F_decompress(dctx, output, &dst_size, input, &src_size, NULL);
+    LZ4F_decompressOptions_t options = {
+        .skipChecksums = decompressor->skip_codec_checksum_validation,
+    };
+    size_t ret = LZ4F_decompress(dctx, output, &dst_size, input, &src_size, &options);
     if (LZ4F_isError(ret)) {
         decompressor->errored = true;
         return -1;

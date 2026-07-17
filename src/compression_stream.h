@@ -13,10 +13,10 @@
  *   [0..2] magic "VCS"
  *   [3]    version (currently VCS_VERSION)
  *   [4]    codec id
- *   [5]    flags (bit 0 = codec checksum enabled; other bits reserved)
+ *   [5]    reserved (must be zero)
  *   [6]    stream kind
  *
- * All fields are single-byte in version 1. Future multi-byte fields must use
+ * All fields are single-byte. Future multi-byte fields must use
  * network byte order. */
 #define VCS_MAGIC_0 0x56 /* 'V' */
 #define VCS_MAGIC_1 0x43 /* 'C' */
@@ -24,19 +24,24 @@
 #define VCS_MAGIC_SIZE 3
 #define VCS_ENVELOPE_SIZE 7
 #define VCS_VERSION 1
-#define VCS_FLAG_CODEC_CHECKSUM (1 << 0)
-
 /* Byte offsets of each envelope field. */
 #define VCS_OFFSET_VERSION 3
-#define VCS_OFFSET_ALGO 4
-#define VCS_OFFSET_FLAGS 5
+#define VCS_OFFSET_CODEC 4
+#define VCS_OFFSET_RESERVED 5
 #define VCS_OFFSET_STREAM_KIND 6
 
-/* Identifies what the compressed bytes decode to. The RDB loader rejects any
- * stream whose kind is not STREAM_KIND_RDB. */
+/* Protocol identifiers are independent of implementation enum values. */
 typedef enum {
-    STREAM_KIND_RDB = 0x00,
-} streamKind;
+    VCS_CODEC_LZ4 = 0x01,
+} vcsCodecId;
+
+/* Identifies what the compressed bytes decode to. */
+typedef enum {
+    VCS_STREAM_RDB = 0x01,
+} vcsStreamKind;
+
+bool compressionAlgoToVcsCodec(compressionAlgo algo, vcsCodecId *codec);
+bool vcsCodecToCompressionAlgo(uint8_t codec, compressionAlgo *algo);
 
 typedef int (*streamWriterEmitFn)(void *ctx, const uint8_t *data, size_t len);
 /* Returns >0 bytes read, 0 on EOF, -1 on error. Partial reads allowed. */
@@ -60,6 +65,7 @@ typedef struct {
 typedef struct {
     uint8_t expected_stream_kind;
     bool allow_passthrough;
+    bool skip_codec_checksum_validation;
     size_t buffer_size; /* Must be nonzero. */
 } streamReaderConfig;
 
@@ -67,7 +73,6 @@ typedef struct {
     compressionAlgo algo;
     uint8_t stream_kind;
     bool compressed;
-    bool codec_checksum_enabled;
 } streamReaderInfo;
 
 typedef enum {
@@ -104,10 +109,10 @@ typedef struct streamReader {
         compressionAlgo algo;
         bool ready;
         bool compressed;
-        bool codec_checksum_enabled;
     } probe;
     size_t probe_replay_pos; /* Passthrough bytes left to replay from probe. */
     size_t buffer_size;
+    bool skip_codec_checksum_validation;
     bool errored;
     streamReaderError error_kind;
 
@@ -143,7 +148,8 @@ int streamReadEnvelopeInfo(const uint8_t *buf,
 
 int streamReaderInit(streamReader *reader, streamReaderConfig *cfg, streamReaderReadFn read_cb, void *read_ctx);
 
-/* Full or fail: returns len on success, 0 on EOF, -1 on error. */
+/* Returns up to len bytes, 0 on EOF, or -1 on error. An error after partial
+ * output is reported on the next call. */
 ssize_t streamReaderRead(streamReader *reader, void *buf, size_t len);
 int streamReaderGetInfo(streamReader *reader, streamReaderInfo *info);
 int streamReaderValidateEnd(streamReader *reader);

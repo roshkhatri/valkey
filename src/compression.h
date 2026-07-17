@@ -37,6 +37,7 @@ typedef struct {
     compressionAlgo algo;
     bool errored;
     bool frame_done;
+    bool skip_codec_checksum_validation;
     void *ctx;
     size_t input_hint; /* Preferred compressed bytes for next feed, 0 if unknown. */
 } streamDecompressor;

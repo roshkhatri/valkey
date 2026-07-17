@@ -40,62 +40,67 @@ static bool streamReaderProbeHasMagicPrefix(streamReader *reader) {
 static void streamReaderProbeSetPassthrough(streamReader *reader) {
     reader->probe.ready = true;
     reader->probe.compressed = false;
-    reader->probe.codec_checksum_enabled = false;
     reader->probe.algo = ALGO_NONE;
     reader->probe.stream_kind = 0;
 }
 
 static void streamReaderProbeSetCompressed(streamReader *reader,
                                            compressionAlgo algo,
-                                           uint8_t stream_kind,
-                                           bool codec_checksum_enabled) {
+                                           uint8_t stream_kind) {
     reader->probe.ready = true;
     reader->probe.compressed = true;
-    reader->probe.codec_checksum_enabled = codec_checksum_enabled;
     reader->probe.algo = algo;
     reader->probe.stream_kind = stream_kind;
+}
+
+bool compressionAlgoToVcsCodec(compressionAlgo algo, vcsCodecId *codec) {
+    if (algo != ALGO_LZ4) return false;
+    if (codec) *codec = VCS_CODEC_LZ4;
+    return true;
+}
+
+bool vcsCodecToCompressionAlgo(uint8_t codec, compressionAlgo *algo) {
+    if (codec != VCS_CODEC_LZ4) return false;
+    if (algo) *algo = ALGO_LZ4;
+    return true;
 }
 
 static int writeVcsEnvelope(streamWriterEmitFn emit_fn,
                             void *ctx,
                             compressionAlgo algo,
-                            uint8_t stream_kind,
-                            bool codec_checksum_enabled) {
-    if (!compressionAlgoSupportsStreaming(algo)) return -1;
+                            uint8_t stream_kind) {
+    vcsCodecId codec;
+    if (!compressionAlgoToVcsCodec(algo, &codec)) return -1;
 
     uint8_t envelope[VCS_ENVELOPE_SIZE] = {
         VCS_MAGIC_0,
         VCS_MAGIC_1,
         VCS_MAGIC_2,
         [VCS_OFFSET_VERSION] = VCS_VERSION,
-        [VCS_OFFSET_ALGO] = (uint8_t)algo,
-        [VCS_OFFSET_FLAGS] = codec_checksum_enabled ? VCS_FLAG_CODEC_CHECKSUM : 0,
+        [VCS_OFFSET_CODEC] = codec,
+        [VCS_OFFSET_RESERVED] = 0,
         [VCS_OFFSET_STREAM_KIND] = stream_kind,
     };
     return emit_fn(ctx, envelope, VCS_ENVELOPE_SIZE) == 0 ? 0 : -1;
 }
 
-/* Rejects unknown flag bits so a future format extension fails loud rather
- * than silently corrupting load. */
+/* Reject a nonzero reserved byte so a future envelope extension fails loud
+ * rather than being silently misinterpreted. */
 static int readVcsEnvelope(const uint8_t *buf,
                            size_t len,
                            compressionAlgo *algo,
-                           uint8_t *stream_kind,
-                           bool *codec_checksum_enabled) {
+                           uint8_t *stream_kind) {
     if (len < VCS_ENVELOPE_SIZE) return -1;
 
     if (!vcsHasMagicPrefix(buf, VCS_MAGIC_SIZE)) return -1;
     if (buf[VCS_OFFSET_VERSION] != VCS_VERSION) return -1;
 
-    compressionAlgo parsed_algo = (compressionAlgo)buf[VCS_OFFSET_ALGO];
-    if (!compressionAlgoSupportsStreaming(parsed_algo)) return -1;
-
-    uint8_t flags = buf[VCS_OFFSET_FLAGS];
-    if (flags & ~VCS_FLAG_CODEC_CHECKSUM) return -1;
+    compressionAlgo parsed_algo;
+    if (!vcsCodecToCompressionAlgo(buf[VCS_OFFSET_CODEC], &parsed_algo)) return -1;
+    if (buf[VCS_OFFSET_RESERVED] != 0) return -1;
 
     if (algo) *algo = parsed_algo;
     if (stream_kind) *stream_kind = buf[VCS_OFFSET_STREAM_KIND];
-    if (codec_checksum_enabled) *codec_checksum_enabled = (flags & VCS_FLAG_CODEC_CHECKSUM) != 0;
     return 0;
 }
 
@@ -104,17 +109,15 @@ int streamReadEnvelopeInfo(const uint8_t *buf,
                            uint8_t expected_stream_kind,
                            streamReaderInfo *info) {
     uint8_t stream_kind = 0;
-    bool codec_checksum_enabled = false;
     compressionAlgo algo = ALGO_NONE;
 
     if (len < VCS_ENVELOPE_SIZE ||
-        readVcsEnvelope(buf, len, &algo, &stream_kind, &codec_checksum_enabled) != 0 ||
+        readVcsEnvelope(buf, len, &algo, &stream_kind) != 0 ||
         stream_kind != expected_stream_kind) {
         return -1;
     }
 
     info->compressed = true;
-    info->codec_checksum_enabled = codec_checksum_enabled;
     info->algo = algo;
     info->stream_kind = stream_kind;
     return 0;
@@ -157,8 +160,7 @@ static vcsProbeResult streamReaderProbeFeed(streamReader *reader,
                 *src_consumed = consumed;
                 return VCS_PROBE_ERROR;
             }
-            streamReaderProbeSetCompressed(reader, info.algo, info.stream_kind,
-                                           info.codec_checksum_enabled);
+            streamReaderProbeSetCompressed(reader, info.algo, info.stream_kind);
             *src_consumed = consumed;
             return VCS_PROBE_COMPRESSED;
         }
@@ -197,7 +199,7 @@ int streamWriterInit(streamWriter *writer, streamWriterConfig *cfg, streamWriter
 static int streamWriterEnsureEnvelope(streamWriter *writer) {
     if (writer->envelope_written) return 0;
     if (writeVcsEnvelope(writer->emit_fn, writer->emit_ctx, writer->compressor.algo,
-                         writer->stream_kind, writer->compressor.codec_checksum) != 0) {
+                         writer->stream_kind) != 0) {
         writer->errored = true;
         return -1;
     }
@@ -313,6 +315,7 @@ static ssize_t streamReaderFailWithError(streamReader *reader,
 
 static int streamReaderInitCompressedState(streamReader *reader, size_t buffer_size) {
     if (streamDecompressorInit(&reader->decompressor, reader->probe.algo) != 0) return -1;
+    reader->decompressor.skip_codec_checksum_validation = reader->skip_codec_checksum_validation;
     reader->decompressor_initialized = true;
     reader->compressed_buf = zmalloc(buffer_size);
     reader->decompressed_buf = zmalloc(buffer_size);
@@ -346,6 +349,7 @@ int streamReaderInit(streamReader *reader, streamReaderConfig *cfg, streamReader
     reader->read_ctx = read_ctx;
     reader->probe_cfg.allow_passthrough = cfg->allow_passthrough;
     reader->probe_cfg.expected_stream_kind = cfg->expected_stream_kind;
+    reader->skip_codec_checksum_validation = cfg->skip_codec_checksum_validation;
     reader->buffer_size = cfg->buffer_size;
     if (reader->buffer_size < STREAM_READER_BUFFER_SIZE_MIN) {
         reader->buffer_size = STREAM_READER_BUFFER_SIZE_MIN;
@@ -587,7 +591,6 @@ int streamReaderGetInfo(streamReader *reader, streamReaderInfo *info) {
     if (streamReaderProbe(reader) != 0) return -1;
 
     info->compressed = reader->probe.compressed;
-    info->codec_checksum_enabled = reader->probe.compressed ? reader->probe.codec_checksum_enabled : false;
     info->algo = reader->probe.compressed ? reader->probe.algo : ALGO_NONE;
     info->stream_kind = reader->probe.stream_kind;
     return 0;
