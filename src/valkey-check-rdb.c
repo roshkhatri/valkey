@@ -30,7 +30,6 @@
 #include "mt19937-64.h"
 #include "server.h"
 #include "rdb.h"
-#include "compression_rio.h"
 #include "module.h"
 #include "hdr_histogram.h"
 #include "fpconv_dtoa.h"
@@ -610,8 +609,8 @@ int redis_check_rdb(char *rdbfilename, FILE *fp) {
     long long expiretime;
     static rio file_rdb;
     rio *rdb = &file_rdb; /* Pointed by global struct riostate. */
-    decompressRio decompressor;
-    bool decompressor_initialized = false;
+    streamReader stream_reader;
+    bool stream_reader_initialized = false;
     struct stat sb;
 
     now = mstime();
@@ -624,19 +623,18 @@ int redis_check_rdb(char *rdbfilename, FILE *fp) {
     rioInitWithFile(&file_rdb, fp);
 
     /* Support both plain RDB files and VCS-wrapped streaming-compressed RDBs. */
-    decompressRioInitResult init_rc = rioInitWithRdbDecompression(&decompressor, &file_rdb, false, NULL);
-    if (init_rc == DECOMPRESS_RIO_INIT_INCOMPATIBLE) {
+    rdbStreamReaderInitResult init_rc = rdbInitStreamReader(&file_rdb, &stream_reader, false, NULL);
+    if (init_rc == RDB_STREAM_READER_INIT_INCOMPATIBLE) {
         rdbCheckError("Invalid or unsupported RDB stream envelope. "
                       "File may require a Valkey version with streaming RDB "
                       "compression support.");
         goto err;
     }
-    if (init_rc != DECOMPRESS_RIO_INIT_OK) {
+    if (init_rc != RDB_STREAM_READER_INIT_OK) {
         rdbCheckError("Failed to inspect RDB stream metadata");
         goto err;
     }
-    decompressor_initialized = true;
-    rdb = (rio *)&decompressor;
+    stream_reader_initialized = true;
 
     rdbstate.rio = rdb;
     rdb->update_cksum = rdbLoadProgressCallback;
@@ -854,12 +852,12 @@ int redis_check_rdb(char *rdbfilename, FILE *fp) {
         }
     }
 
-    if (decompressRioValidateEnd(&decompressor) != 0) {
+    if (streamReaderValidateEnd(&stream_reader) != 0) {
         rdbCheckError("Compressed RDB stream did not end cleanly");
         goto err;
     }
 
-    if (decompressor_initialized) decompressRioFree(&decompressor);
+    if (stream_reader_initialized) rdbFreeStreamReader(&file_rdb, &stream_reader);
     rdbstate.rio = &file_rdb;
     if (closefile) fclose(fp);
     stopLoading(1);
@@ -874,7 +872,7 @@ eoferr: /* unexpected end of file is handled here with a fatal exit */
         rdbCheckError("Unexpected EOF reading RDB file");
     }
 err:
-    if (decompressor_initialized) decompressRioFree(&decompressor);
+    if (stream_reader_initialized) rdbFreeStreamReader(&file_rdb, &stream_reader);
     rdbstate.rio = &file_rdb;
     if (closefile) fclose(fp);
     stopLoading(0);

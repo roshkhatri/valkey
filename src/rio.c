@@ -56,6 +56,7 @@
 #include "config.h"
 #include "server.h"
 #include "connhelpers.h"
+#include "compression_stream.h"
 
 /* ------------------------- Buffer I/O implementation ----------------------- */
 
@@ -140,7 +141,7 @@ static size_t rioFileWrite(rio *r, const void *buf, size_t len) {
         if (r->io.file.buffered >= r->io.file.autosync) {
             fflush(r->io.file.fp);
 
-            size_t processed = r->processed_bytes + nwritten;
+            size_t processed = r->backend_processed_bytes + nwritten;
             serverAssert(processed % r->io.file.autosync == 0);
             serverAssert(r->io.file.buffered == r->io.file.autosync);
 
@@ -341,7 +342,7 @@ static const rio rioConnIO = {
     .read_some = rioConnReadSome,
     .update_cksum = NULL,
     .cksum = 0,
-    .flags = RIO_FLAG_CONN_BACKED,
+    .flags = 0,
     .processed_bytes = 0,
     .max_processing_chunk = 0,
     .io = {{NULL, 0}},
@@ -485,14 +486,70 @@ void rioGenericUpdateChecksum(rio *r, const void *buf, size_t len) {
     r->cksum = crc64(r->cksum, buf, len);
 }
 
-/* rioRead() is for callers that know an exact field size. A stream transformer
- * instead treats its input buffer size as a capacity and may still use a short
- * final chunk, so it uses this upper-bound read. Read up to `len` bytes from a
- * readable rio without requiring a full-length transfer. Returns:
+void rioAttachStreamWriter(rio *r, streamWriter *writer) {
+    serverAssert(writer != NULL);
+    serverAssert(r->stream_writer == NULL);
+    serverAssert(r->stream_reader == NULL);
+    r->stream_writer = writer;
+}
+
+void rioDetachStreamWriter(rio *r) {
+    r->stream_writer = NULL;
+}
+
+void rioAttachStreamReader(rio *r, streamReader *reader) {
+    serverAssert(reader != NULL);
+    serverAssert(r->stream_reader == NULL);
+    serverAssert(r->stream_writer == NULL);
+    r->stream_reader = reader;
+}
+
+void rioDetachStreamReader(rio *r) {
+    r->stream_reader = NULL;
+}
+
+size_t rioWriteStream(rio *r, const void *buf, size_t len) {
+    serverAssert(r->stream_writer != NULL);
+    if (streamWriterWrite(r->stream_writer, buf, len) == 0) return 1;
+    r->flags |= RIO_FLAG_WRITE_ERROR;
+    return 0;
+}
+
+size_t rioReadStream(rio *r, void *buf, size_t len) {
+    serverAssert(r->stream_reader != NULL);
+
+    uint8_t *dst = (uint8_t *)buf;
+    size_t remaining = len;
+    while (remaining > 0) {
+        ssize_t nread = streamReaderRead(r->stream_reader, dst, remaining);
+        if (nread <= 0) {
+            r->flags |= RIO_FLAG_READ_ERROR;
+            return 0;
+        }
+        remaining -= (size_t)nread;
+        dst += nread;
+    }
+    return 1;
+}
+
+int rioFlushStream(rio *r) {
+    serverAssert(r->stream_writer != NULL);
+    if (r->flags & (RIO_FLAG_WRITE_ERROR | RIO_FLAG_CLOSE_ASAP)) return 0;
+    if (streamWriterFlush(r->stream_writer) != 0 || rioFlushRaw(r) == 0) {
+        r->flags |= RIO_FLAG_WRITE_ERROR;
+        return 0;
+    }
+    return 1;
+}
+
+/* rioRead() is for callers that know an exact logical field size. A stream
+ * reader instead treats its input buffer size as a capacity, so its callback
+ * uses this upper-bound raw read. Read up to `len` bytes from the concrete
+ * backend without stream dispatch or logical checksum/accounting. Returns:
  * - >0 bytes read
  * -  0 on EOF
  * - -1 on error (sticky read error is latched on the rio) */
-ssize_t rioReadPartial(rio *r, void *buf, size_t len) {
+ssize_t rioReadRawPartial(rio *r, void *buf, size_t len) {
     if (r->flags & (RIO_FLAG_READ_ERROR | RIO_FLAG_CLOSE_ASAP)) return -1;
     if (len == 0) return 0;
     if (!r->read_some) {
@@ -509,8 +566,7 @@ ssize_t rioReadPartial(rio *r, void *buf, size_t len) {
         return -1;
     }
     if (got > 0) {
-        if (r->update_cksum) r->update_cksum(r, buf, (size_t)got);
-        r->processed_bytes += (size_t)got;
+        r->backend_processed_bytes += (size_t)got;
     }
     return got;
 }
@@ -535,12 +591,6 @@ void rioSetAutoSync(rio *r, off_t bytes) {
  * This feature can reduce the cache footprint backed by the file. */
 void rioSetReclaimCache(rio *r, int enabled) {
     r->io.file.reclaim_cache = enabled;
-}
-
-int rioIsConnBacked(rio *r) {
-    /* Test the propagated transport property instead of comparing function
-     * pointers, which would identify a decorator rather than its inner rio. */
-    return (r->flags & RIO_FLAG_CONN_BACKED) != 0;
 }
 
 /* --------------------------- Higher level interface --------------------------
@@ -689,7 +739,7 @@ static const rio rioConnsetIO = {
     .read_some = NULL,
     .update_cksum = NULL,
     .cksum = 0,
-    .flags = RIO_FLAG_CONN_BACKED,
+    .flags = 0,
     .processed_bytes = 0,
     .max_processing_chunk = 0,
     .io = {{NULL, 0}},
@@ -713,4 +763,8 @@ void rioFreeConnset(rio *r) {
     zfree(r->io.connset.conns);
     zfree(r->io.connset.state);
     sdsfree(r->io.connset.buf);
+}
+
+int rioIsConnBacked(rio *r) {
+    return r->read == rioConnRead || r->write == rioConnsetWrite;
 }

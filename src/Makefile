@@ -491,7 +491,6 @@ ENGINE_SERVER_OBJ = \
     compression.o \
     compression_lz4.o \
     compression_stream.o \
-    compression_rio.o \
     config.o \
     connection.o \
     crc16.o \
