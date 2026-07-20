@@ -259,10 +259,11 @@ static ssize_t streamReaderReadPassthrough(streamReader *reader, uint8_t *dst, s
 }
 
 /* Fill the decoded-output buffer by alternating between consuming buffered
- * input and refilling it. Errors remain sticky, while output produced before
- * an error is returned to the caller first. */
-static ssize_t streamReaderFillDecompressedBuf(streamReader *reader) {
+ * input and refilling it. Returns -1 after latching an error, but preserves
+ * any output produced before that error in the output buffer. */
+static int streamReaderFillDecompressedBuf(streamReader *reader) {
     size_t written = 0;
+    int result = 0;
 
     reader->decompressed_buf_pos = 0;
     reader->decompressed_buf_len = 0;
@@ -282,8 +283,8 @@ static ssize_t streamReaderFillDecompressedBuf(streamReader *reader) {
             if (produced < 0 || consumed > feed_len ||
                 (size_t)produced > reader->buffer_size - written) {
                 streamReaderSetError(reader, STREAM_READER_ERROR_CORRUPT);
-                if (written == 0) return -1;
-                break;
+                result = -1;
+                goto done;
             }
 
             written += (size_t)produced;
@@ -292,8 +293,7 @@ static ssize_t streamReaderFillDecompressedBuf(streamReader *reader) {
             if (reader->decompressor.frame_done || (consumed == 0 && produced == 0)) break;
         }
         if (reader->compressed_buf_len == 0) reader->compressed_buf_pos = 0;
-        if (reader->error_kind != STREAM_READER_ERROR_NONE ||
-            written >= reader->buffer_size || reader->decompressor.frame_done)
+        if (written >= reader->buffer_size || reader->decompressor.frame_done)
             break;
 
         size_t read_size = reader->buffer_size - reader->compressed_buf_pos - reader->compressed_buf_len;
@@ -306,8 +306,8 @@ static ssize_t streamReaderFillDecompressedBuf(streamReader *reader) {
         /* A full input buffer with no codec progress is invalid. */
         if (read_size == 0) {
             streamReaderSetError(reader, STREAM_READER_ERROR_CORRUPT);
-            if (written == 0) return -1;
-            break;
+            result = -1;
+            goto done;
         }
 
         size_t input_hint = reader->decompressor.input_hint;
@@ -320,15 +320,16 @@ static ssize_t streamReaderFillDecompressedBuf(streamReader *reader) {
             read_size);
         if (got < 0 || (size_t)got > read_size) {
             streamReaderSetError(reader, STREAM_READER_ERROR_IO);
-            if (written == 0) return -1;
-            break;
+            result = -1;
+            goto done;
         }
         if (got == 0) break;
         reader->compressed_buf_len += (size_t)got;
     }
 
+done:
     reader->decompressed_buf_len = written;
-    return (ssize_t)written;
+    return result;
 }
 
 ssize_t streamReaderRead(streamReader *reader, void *buf, size_t len) {
@@ -345,16 +346,17 @@ ssize_t streamReaderRead(streamReader *reader, void *buf, size_t len) {
     size_t remaining = len;
     size_t total = 0;
     while (remaining > 0) {
+        int fill_result = 0;
         size_t available = reader->decompressed_buf_len - reader->decompressed_buf_pos;
         if (available == 0) {
-            ssize_t filled = streamReaderFillDecompressedBuf(reader);
-            if (filled < 0) return total > 0 ? (ssize_t)total : -1;
-            if (filled == 0 && !reader->decompressor.frame_done) {
+            fill_result = streamReaderFillDecompressedBuf(reader);
+            available = reader->decompressed_buf_len;
+            if (available == 0 && fill_result != 0) return total > 0 ? (ssize_t)total : -1;
+            if (available == 0 && !reader->decompressor.frame_done) {
                 streamReaderSetError(reader, STREAM_READER_ERROR_CORRUPT);
                 return total > 0 ? (ssize_t)total : -1;
             }
-            if (filled == 0) break;
-            available = (size_t)filled;
+            if (available == 0) break;
         }
 
         size_t to_copy = available < remaining ? available : remaining;
@@ -363,7 +365,7 @@ ssize_t streamReaderRead(streamReader *reader, void *buf, size_t len) {
         dst += to_copy;
         remaining -= to_copy;
         total += to_copy;
-        if (reader->error_kind != STREAM_READER_ERROR_NONE) break;
+        if (fill_result != 0) break;
     }
     return (ssize_t)total;
 }

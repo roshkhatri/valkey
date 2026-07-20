@@ -614,6 +614,7 @@ TEST_F(CompressionTest, streamReaderPartialThenErrorSetsErrored) {
     ASSERT_GT(n1, 0) << "first read should return partial output";
     ASSERT_LT(n1, (ssize_t)out_len) << "injected read error should stop the first read early";
     ASSERT_EQ(memcmp(out, payload, (size_t)n1), 0);
+    ASSERT_EQ(r.error_kind, STREAM_READER_ERROR_IO) << "error must be latched before returning partial output";
     ASSERT_EQ(streamReaderRead(&r, out, out_len), -1) << "second read should fail immediately";
     ASSERT_EQ(r.error_kind, STREAM_READER_ERROR_IO);
 
