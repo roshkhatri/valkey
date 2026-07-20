@@ -130,6 +130,29 @@ tags {"check-rdb network external:skip logreqres:skip"} {
             assert_no_match {*RDB looks OK*} $result
         }
 
+        test "valkey-check-rdb rejects trailing data after a compressed RDB" {
+            r flushall
+            r config set rdbcompression lz4-stream
+            r set lz4:trailing payload
+            r save
+
+            set dir [lindex [r config get dir] 1]
+            set dump_rdb [file join $dir dump.rdb]
+            set trailing_rdb [file join $dir trailing-vcs.rdb]
+            set data [check_rdb_read_binary_file $dump_rdb]
+            check_rdb_write_binary_file $trailing_rdb "${data}trailing-data"
+
+            set failed [catch {
+                exec $::VALKEY_CHECK_RDB_BIN $trailing_rdb
+            } result]
+            file delete -force $trailing_rdb
+            r config set rdbcompression yes
+
+            assert_equal 1 $failed
+            assert_match {*Compressed RDB stream has trailing data*} $result
+            assert_no_match {*RDB looks OK*} $result
+        }
+
         test "test valkey-check-rdb stats with empty RDB" {
             r flushall
             r save

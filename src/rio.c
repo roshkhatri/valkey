@@ -240,7 +240,7 @@ static size_t rioConnWrite(rio *r, const void *buf, size_t len) {
 /* Fill the conn read buffer until at least min_read bytes are available.
  * When strict_limit is set, returns -1 if the request exceeds read_limit.
  * Returns 1 on success, 0 on EOF, -1 on error. */
-static int rioConnFillBuffer(rio *r, size_t min_read, int strict_limit) {
+static int rioConnFillBuffer(rio *r, size_t min_read, bool strict_limit) {
     size_t avail = sdslen(r->io.conn.buf) - r->io.conn.pos;
 
     if (strict_limit && r->io.conn.read_limit != 0 &&
@@ -295,7 +295,7 @@ static ssize_t rioConnReadSome(rio *r, void *buf, size_t len) {
         return 0;
     }
     if (avail == 0) {
-        int fill_rc = rioConnFillBuffer(r, 1, 0);
+        int fill_rc = rioConnFillBuffer(r, 1, false);
         if (fill_rc <= 0) return fill_rc;
         avail = sdslen(r->io.conn.buf) - r->io.conn.pos;
     }
@@ -313,7 +313,7 @@ static ssize_t rioConnReadSome(rio *r, void *buf, size_t len) {
 
 /* Returns 1 or 0 for success/failure. */
 static size_t rioConnRead(rio *r, void *buf, size_t len) {
-    if (rioConnFillBuffer(r, len, 1) != 1) return 0;
+    if (rioConnFillBuffer(r, len, true) != 1) return 0;
 
     memcpy(buf, (char *)r->io.conn.buf + r->io.conn.pos, len);
     r->io.conn.read_so_far += len;
@@ -765,6 +765,6 @@ void rioFreeConnset(rio *r) {
     sdsfree(r->io.connset.buf);
 }
 
-int rioIsConnBacked(rio *r) {
+bool rioIsConnBacked(rio *r) {
     return r->read == rioConnRead || r->write == rioConnsetWrite;
 }

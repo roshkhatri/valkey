@@ -852,9 +852,20 @@ int redis_check_rdb(char *rdbfilename, FILE *fp) {
         }
     }
 
-    if (streamReaderValidateEnd(&stream_reader) != 0) {
+    if (streamReaderFinish(&stream_reader) != 0) {
         rdbCheckError("Compressed RDB stream did not end cleanly");
         goto err;
+    }
+    if (rdb->flags & RIO_FLAG_STREAMING_COMPRESSION) {
+        uint8_t trailing_byte;
+        ssize_t trailing_len = rioReadRawPartial(rdb, &trailing_byte, 1);
+        if (trailing_len < 0) {
+            rdbCheckError("I/O error while checking the end of compressed RDB stream");
+            goto err;
+        } else if (trailing_len > 0) {
+            rdbCheckError("Compressed RDB stream has trailing data");
+            goto err;
+        }
     }
 
     if (stream_reader_initialized) rdbFreeStreamReader(&file_rdb, &stream_reader);

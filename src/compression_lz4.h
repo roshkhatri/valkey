@@ -9,17 +9,13 @@
 
 #include "compression.h"
 
-/* LZ4 codec hooks used by the generic streaming compression layer. Callers
- * allocate the streamCompressor/streamDecompressor and free initialized codec
- * state with the matching Free function. */
-
-/* Initializes LZ4 compressor state. Returns 0 on success. */
+/* Initializes LZ4 compressor state. */
 int compressionLz4CompressorInit(streamCompressor *compressor);
 
 /* Releases LZ4 compressor resources. */
 void compressionLz4CompressorFree(streamCompressor *compressor);
 
-/* Initializes LZ4 decompressor state. Returns 0 on success. */
+/* Initializes LZ4 decompressor state. */
 int compressionLz4DecompressorInit(streamDecompressor *decompressor);
 
 /* Releases LZ4 decompressor resources. */

@@ -304,6 +304,25 @@ start_server {overrides {save "" enable-debug-command local}} {
         write_binary_file $rdbfile $original
     }
 
+    test {RDB loader rejects trailing data after an LZ4 frame} {
+        r config set rdbcompression lz4-stream
+        r flushall
+        r set trailing-data:key value
+        assert_equal "OK" [r save]
+
+        set rdbfile [dump_rdb_path r]
+        set fd [open $rdbfile a]
+        fconfigure $fd -translation binary
+        puts -nonewline $fd "trailing-data"
+        close $fd
+
+        set loglines [count_log_lines 0]
+        set failed [catch {r debug reload nosave} err]
+        assert_equal 1 $failed
+        assert_match "*Error trying to load the RDB*" $err
+        verify_log_message 0 "*Compressed RDB stream*has trailing data*" $loglines
+    }
+
     test {LZ4 compressed RDB detects corruption in compressed payload} {
         r config set rdbcompression lz4-stream
         r flushall

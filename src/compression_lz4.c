@@ -88,11 +88,6 @@ ssize_t compressionLz4CompressFeed(streamCompressor *compressor,
     LZ4F_cctx *cctx = (LZ4F_cctx *)compressor->ctx;
     size_t offset = 0;
 
-    /* Capacity-shortage returns are retriable: they happen before LZ4F mutates
-     * its own state, so the caller can grow the buffer and retry without
-     * breaking the frame. An LZ4F error after that point is permanent: the
-     * frame is partially emitted and cannot be retried. */
-
     if (!compressor->stream_started) {
         LZ4F_preferences_t prefs = lz4f_prefs;
         prefs.compressionLevel = compressor->level;
@@ -103,30 +98,30 @@ ssize_t compressionLz4CompressFeed(streamCompressor *compressor,
                                                   ? LZ4F_contentChecksumEnabled
                                                   : LZ4F_noContentChecksum;
         size_t r = LZ4F_compressBegin(cctx, output, output_capacity, &prefs);
-        if (LZ4F_isError(r)) return -1; /* No frame bytes emitted yet: retriable, don't latch errored. */
+        if (LZ4F_isError(r)) return -1;
         offset = r;
         compressor->stream_started = true;
     }
 
     if (input_len > 0) {
-        if (offset >= output_capacity) return -1; /* Retriable: buffer too small, frame not yet advanced. */
+        if (offset >= output_capacity) return -1;
         size_t r = LZ4F_compressUpdate(cctx, output + offset, output_capacity - offset, input, input_len, NULL);
         if (LZ4F_isError(r)) return -1;
         offset += r;
     }
 
     switch (flush_mode) {
-    case FLUSH_CONTINUE:
+    case COMPRESS_FLUSH_CONTINUE:
         break;
-    case FLUSH_SYNC: {
-        if (offset >= output_capacity) return -1; /* Retriable: buffer too small, frame not yet advanced. */
+    case COMPRESS_FLUSH_SYNC: {
+        if (offset >= output_capacity) return -1;
         size_t r = LZ4F_flush(cctx, output + offset, output_capacity - offset, NULL);
         if (LZ4F_isError(r)) return -1;
         offset += r;
         break;
     }
-    case FLUSH_END: {
-        if (offset >= output_capacity) return -1; /* Retriable: buffer too small, frame not yet advanced. */
+    case COMPRESS_FLUSH_END: {
+        if (offset >= output_capacity) return -1;
         size_t r = LZ4F_compressEnd(cctx, output + offset, output_capacity - offset, NULL);
         if (LZ4F_isError(r)) return -1;
         offset += r;
@@ -134,7 +129,7 @@ ssize_t compressionLz4CompressFeed(streamCompressor *compressor,
         break;
     }
     default:
-        assert(0 && "invalid compressFlushMode");
+        panic("Invalid compression flush mode: %d", flush_mode);
     }
 
     if (offset > (size_t)SSIZE_MAX) return -1;
@@ -148,6 +143,8 @@ ssize_t compressionLz4DecompressFeed(streamDecompressor *decompressor,
                                      size_t input_len,
                                      size_t *input_consumed) {
     assert(decompressor->ctx != NULL);
+    *input_consumed = 0;
+    if (decompressor->frame_done) return 0;
 
     LZ4F_dctx *dctx = (LZ4F_dctx *)decompressor->ctx;
     size_t dst_size = output_capacity;
@@ -156,10 +153,7 @@ ssize_t compressionLz4DecompressFeed(streamDecompressor *decompressor,
         .skipChecksums = decompressor->skip_codec_checksum_validation,
     };
     size_t ret = LZ4F_decompress(dctx, output, &dst_size, input, &src_size, &options);
-    if (LZ4F_isError(ret)) {
-        decompressor->errored = true;
-        return -1;
-    }
+    if (LZ4F_isError(ret)) return -1;
     *input_consumed = src_size;
     decompressor->input_hint = ret;
     if (ret == 0) decompressor->frame_done = true;
