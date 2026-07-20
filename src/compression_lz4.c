@@ -46,31 +46,11 @@ static const LZ4F_preferences_t lz4f_prefs = {
     .compressionLevel = 0,
 };
 
-int compressionLz4CompressorInit(streamCompressor *compressor) {
+/* ===== Compressor ===== */
+
+void compressionLz4CompressorInit(streamCompressor *compressor) {
     compressor->ctx = LZ4F_createCompressionContext_advanced(lz4f_mem, LZ4F_VERSION);
     assert(compressor->ctx != NULL);
-    return 0;
-}
-
-void compressionLz4CompressorFree(streamCompressor *compressor) {
-    if (compressor->ctx) {
-        LZ4F_freeCompressionContext((LZ4F_cctx *)compressor->ctx);
-        compressor->ctx = NULL;
-    }
-}
-
-int compressionLz4DecompressorInit(streamDecompressor *decompressor) {
-    decompressor->ctx = LZ4F_createDecompressionContext_advanced(lz4f_mem, LZ4F_VERSION);
-    assert(decompressor->ctx != NULL);
-    decompressor->input_hint = LZ4F_HEADER_SIZE_MIN;
-    return 0;
-}
-
-void compressionLz4DecompressorFree(streamDecompressor *decompressor) {
-    if (decompressor->ctx) {
-        LZ4F_freeDecompressionContext((LZ4F_dctx *)decompressor->ctx);
-        decompressor->ctx = NULL;
-    }
 }
 
 size_t compressionLz4OutputBound(size_t input_len) {
@@ -136,6 +116,21 @@ ssize_t compressionLz4CompressFeed(streamCompressor *compressor,
     return (ssize_t)offset;
 }
 
+void compressionLz4CompressorFree(streamCompressor *compressor) {
+    if (compressor->ctx) {
+        LZ4F_freeCompressionContext((LZ4F_cctx *)compressor->ctx);
+        compressor->ctx = NULL;
+    }
+}
+
+/* ===== Decompressor ===== */
+
+void compressionLz4DecompressorInit(streamDecompressor *decompressor) {
+    decompressor->ctx = LZ4F_createDecompressionContext_advanced(lz4f_mem, LZ4F_VERSION);
+    assert(decompressor->ctx != NULL);
+    decompressor->input_hint = LZ4F_HEADER_SIZE_MIN;
+}
+
 ssize_t compressionLz4DecompressFeed(streamDecompressor *decompressor,
                                      uint8_t *output,
                                      size_t output_capacity,
@@ -158,4 +153,11 @@ ssize_t compressionLz4DecompressFeed(streamDecompressor *decompressor,
     decompressor->input_hint = ret;
     if (ret == 0) decompressor->frame_done = true;
     return (ssize_t)dst_size;
+}
+
+void compressionLz4DecompressorFree(streamDecompressor *decompressor) {
+    if (decompressor->ctx) {
+        LZ4F_freeDecompressionContext((LZ4F_dctx *)decompressor->ctx);
+        decompressor->ctx = NULL;
+    }
 }

@@ -119,11 +119,6 @@ static int streamWriterFeedAndWrite(streamWriter *writer,
     return 0;
 }
 
-void streamWriterFree(streamWriter *writer) {
-    streamCompressorFree(&writer->compressor);
-    zfree(writer->out_buf);
-}
-
 int streamWriterWrite(streamWriter *writer, const void *buf, size_t len) {
     /* Writes after finish are a caller bug; silently dropping them would
      * corrupt the consumer's view of the stream. */
@@ -163,6 +158,11 @@ int streamWriterFinish(streamWriter *writer) {
     if (streamWriterFeedAndWrite(writer, NULL, 0, COMPRESS_FLUSH_END) != 0) return -1;
     writer->state = STREAM_WRITER_STATE_FINISHED;
     return 0;
+}
+
+void streamWriterFree(streamWriter *writer) {
+    streamCompressorFree(&writer->compressor);
+    zfree(writer->out_buf);
 }
 
 /* ===== Streaming Reader ===== */

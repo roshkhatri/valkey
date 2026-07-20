@@ -22,6 +22,8 @@ const char *compressionAlgoName(compressionAlgo algo) {
     }
 }
 
+/* ===== Compressor ===== */
+
 int streamCompressorInit(streamCompressor *compressor,
                          compressionAlgo algo,
                          int level,
@@ -33,19 +35,10 @@ int streamCompressorInit(streamCompressor *compressor,
 
     switch (algo) {
     case ALGO_LZ4:
-        return compressionLz4CompressorInit(compressor);
+        compressionLz4CompressorInit(compressor);
+        return 0;
     default:
         return -1;
-    }
-}
-
-void streamCompressorFree(streamCompressor *compressor) {
-    switch (compressor->algo) {
-    case ALGO_LZ4:
-        compressionLz4CompressorFree(compressor);
-        break;
-    default:
-        break;
     }
 }
 
@@ -72,6 +65,18 @@ ssize_t streamCompressorFeed(streamCompressor *compressor,
     }
 }
 
+void streamCompressorFree(streamCompressor *compressor) {
+    switch (compressor->algo) {
+    case ALGO_LZ4:
+        compressionLz4CompressorFree(compressor);
+        break;
+    default:
+        break;
+    }
+}
+
+/* ===== Decompressor ===== */
+
 int streamDecompressorInit(streamDecompressor *decompressor,
                            compressionAlgo algo,
                            bool skip_codec_checksum_validation) {
@@ -81,19 +86,10 @@ int streamDecompressorInit(streamDecompressor *decompressor,
 
     switch (algo) {
     case ALGO_LZ4:
-        return compressionLz4DecompressorInit(decompressor);
+        compressionLz4DecompressorInit(decompressor);
+        return 0;
     default:
         return -1;
-    }
-}
-
-void streamDecompressorFree(streamDecompressor *decompressor) {
-    switch (decompressor->algo) {
-    case ALGO_LZ4:
-        compressionLz4DecompressorFree(decompressor);
-        break;
-    default:
-        break;
     }
 }
 
@@ -112,5 +108,15 @@ ssize_t streamDecompressorFeed(streamDecompressor *decompressor,
                                             input, input_len, input_consumed);
     default:
         panic("Unsupported stream decompression algorithm: %d", decompressor->algo);
+    }
+}
+
+void streamDecompressorFree(streamDecompressor *decompressor) {
+    switch (decompressor->algo) {
+    case ALGO_LZ4:
+        compressionLz4DecompressorFree(decompressor);
+        break;
+    default:
+        break;
     }
 }

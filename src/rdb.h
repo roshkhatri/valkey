@@ -230,6 +230,10 @@ typedef enum {
     RDB_STREAM_READER_INIT_INCOMPATIBLE = 1,
 } rdbStreamReaderInitResult;
 
+/* Attaches a probing stream reader that accepts both plain and VCS-wrapped
+ * RDB input. When non-NULL, algo receives the detected codec or ALGO_NONE for
+ * plain input. The caller must detach and release a successfully initialized
+ * reader with rdbFreeStreamReader. */
 rdbStreamReaderInitResult rdbInitStreamReader(rio *rdb,
                                               streamReader *reader,
                                               bool skip_codec_checksum_validation,
