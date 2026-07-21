@@ -765,6 +765,16 @@ void rioFreeConnset(rio *r) {
     sdsfree(r->io.connset.buf);
 }
 
-bool rioIsConnBacked(rio *r) {
-    return r->read == rioConnRead || r->write == rioConnsetWrite;
+/* Check the type of rio. */
+uint8_t rioCheckType(rio *r) {
+    if (r->read == rioFileRead) {
+        return RIO_TYPE_FILE;
+    } else if (r->read == rioBufferRead) {
+        return RIO_TYPE_BUFFER;
+    } else if (r->read == rioConnRead) {
+        return RIO_TYPE_CONN;
+    } else {
+        /* r->read == rioFdRead */
+        return RIO_TYPE_FD;
+    }
 }

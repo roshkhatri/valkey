@@ -1576,18 +1576,6 @@ static int rdbCompressionInit(rio *rdb,
     return 0;
 }
 
-static int rdbCompressionFinish(rio *rdb, streamWriter *writer) {
-    if (streamWriterFinish(writer) != 0) {
-        rdb->flags |= RIO_FLAG_WRITE_ERROR;
-        return -1;
-    }
-    if (rioFlushRaw(rdb) == 0) {
-        rdb->flags |= RIO_FLAG_WRITE_ERROR;
-        return -1;
-    }
-    return 0;
-}
-
 static void rdbCompressionFree(rio *rdb, streamWriter *writer) {
     rioDetachStreamWriter(rdb);
     streamWriterFree(writer);
@@ -1620,7 +1608,6 @@ static int rdbSaveInternal(int req, const char *filename, rdbSaveInfo *rsi, int 
     }
 
     rioInitWithFile(&rdb, fp);
-    if (!server.rdb_checksum) rdb.flags |= RIO_FLAG_SKIP_RDB_CHECKSUM;
 
     if (server.rdb_save_incremental_fsync) {
         rioSetAutoSync(&rdb, REDIS_AUTOSYNC_BYTES);
@@ -1660,11 +1647,10 @@ static int rdbSaveInternal(int req, const char *filename, rdbSaveInfo *rsi, int 
 
     /* Finalize the compression frame before flushing to disk. */
     if (compression_initialized) {
-        if (rdbCompressionFinish(&rdb, &compression_writer) != 0) {
+        if (streamWriterFinish(&compression_writer) != 0) {
+            rdb.flags |= RIO_FLAG_WRITE_ERROR;
             errno = EIO; /* Compression finalization failure */
-            err_op = "rdbCompressionFinish";
-            rdbCompressionFree(&rdb, &compression_writer);
-            compression_initialized = false;
+            err_op = "streamWriterFinish";
             goto werr;
         }
         rdbCompressionFree(&rdb, &compression_writer);
@@ -1753,7 +1739,7 @@ int rdbSave(int req, char *filename, rdbSaveInfo *rsi, int rdbflags) {
         return C_ERR;
     }
 
-    serverLog(LL_NOTICE, "DB saved on disk%s", server.rdb_compression ? " with compression" : "");
+    serverLog(LL_NOTICE, "DB saved on disk");
     server.dirty = 0;
     server.lastsave = time(NULL);
     server.lastbgsave_status = C_OK;
@@ -3183,7 +3169,7 @@ void rdbLoadProgressCallback(rio *r, const void *buf, size_t len) {
         processEventsWhileBlocked();
         processModuleLoadingProgressEvent(0);
     }
-    if (server.repl_state == REPL_STATE_TRANSFER && rioIsConnBacked(r)) {
+    if (server.repl_state == REPL_STATE_TRANSFER && rioCheckType(r) == RIO_TYPE_CONN) {
         server.stat_net_repl_input_bytes += len;
     }
 }

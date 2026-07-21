@@ -45,6 +45,11 @@
 #define RIO_FLAG_SKIP_RDB_CHECKSUM (1 << 3)
 #define RIO_FLAG_STREAMING_COMPRESSION (1 << 4) /* Input uses whole-stream compression. */
 
+#define RIO_TYPE_FILE (1 << 0)
+#define RIO_TYPE_BUFFER (1 << 1)
+#define RIO_TYPE_CONN (1 << 2)
+#define RIO_TYPE_FD (1 << 3)
+
 struct streamWriter;
 struct streamReader;
 
@@ -264,7 +269,7 @@ void rioGenericUpdateChecksum(rio *r, const void *buf, size_t len);
 ssize_t rioReadRawPartial(rio *r, void *buf, size_t len);
 void rioSetAutoSync(rio *r, off_t bytes);
 void rioSetReclaimCache(rio *r, int enabled);
-bool rioIsConnBacked(rio *r);
+uint8_t rioCheckType(rio *r);
 void rioInitWithConnset(rio *r, connection **conns, int numconns);
 void rioFreeConnset(rio *r);
 #endif
