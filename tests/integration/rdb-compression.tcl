@@ -1,3 +1,5 @@
+source tests/support/aofmanifest.tcl
+
 tags {"rdb-compression external:skip needs:debug"} {
 
 proc read_binary_file_prefix {path count} {
@@ -374,12 +376,31 @@ start_server {overrides {save "" enable-debug-command local rdbchecksum no}} {
         set loglines [count_log_lines 0]
         assert_equal "OK" [r debug reload nosave]
         verify_log_message 0 "*Logical RDB CRC64 skipped for streaming-compressed input*" $loglines
+        verify_no_log_message 0 "*integrity is verified by the codec frame checksums*" $loglines
 
         set digest [debug_digest]
         restart_server 0 true false
         set newdigest [debug_digest]
         assert {$digest eq $newdigest}
         assert_equal [string repeat "data10 " 100] [r get nocksum:10]
+    }
+}
+
+start_server {overrides {save "" appendonly yes aof-use-rdb-preamble yes rdbcompression lz4-stream}} {
+    test {AOF rewrite RDB preamble remains plain with LZ4 stream snapshots} {
+        r set aof-lz4:key [string repeat "aof-lz4-value " 100]
+        set digest [debug_digest]
+
+        r bgrewriteaof
+        waitForBgrewriteaof r
+
+        set base_aof [get_base_aof_path r]
+        assert {[file exists $base_aof]}
+        assert_equal "VALKEY" [string range [read_binary_file_prefix $base_aof 7] 0 5]
+
+        restart_server 0 true false
+        assert_equal $digest [debug_digest]
+        assert_equal [string repeat "aof-lz4-value " 100] [r get aof-lz4:key]
     }
 }
 

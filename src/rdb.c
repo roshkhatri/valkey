@@ -3720,8 +3720,7 @@ int rdbLoadRioWithLoadingCtx(rio *rdb, int rdbflags, rdbSaveInfo *rsi, rdbLoadin
         if (rioRead(rdb, &cksum, 8) == 0) goto eoferr;
         if ((rdb->flags & RIO_FLAG_STREAMING_COMPRESSION) &&
             (rdb->flags & RIO_FLAG_SKIP_RDB_CHECKSUM)) {
-            serverLog(LL_NOTICE, "Logical RDB CRC64 skipped for streaming-compressed input; "
-                                 "integrity is verified by the codec frame checksums.");
+            serverLog(LL_NOTICE, "Logical RDB CRC64 skipped for streaming-compressed input.");
         } else if (server.rdb_checksum && !server.skip_checksum_validation) {
             memrev64ifbe(&cksum);
             if (rdb->flags & RIO_FLAG_SKIP_RDB_CHECKSUM) {
