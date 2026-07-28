@@ -2,6 +2,21 @@ proc get_function_code {args} {
     return [format "#!%s name=%s\nserver.register_function('%s', function(KEYS, ARGV)\n %s \nend)" [lindex $args 0] [lindex $args 1] [lindex $args 2] [lindex $args 3]]
 }
 
+proc check_rdb_read_binary_file {path} {
+    set fd [open $path r]
+    fconfigure $fd -translation binary
+    set data [read $fd]
+    close $fd
+    return $data
+}
+
+proc check_rdb_write_binary_file {path data} {
+    set fd [open $path w]
+    fconfigure $fd -translation binary
+    puts -nonewline $fd $data
+    close $fd
+}
+
 tags {"check-rdb external:skip logreqres:skip"} {
     test {Check old valid RDB} {
         catch {
@@ -49,6 +64,95 @@ tags {"check-rdb external:skip logreqres:skip"} {
 
 tags {"check-rdb network external:skip logreqres:skip"} {
     start_server {} {
+        test "valkey-check-rdb validates the contents of an LZ4-compressed RDB" {
+            r flushall
+            r config set rdbcompression lz4-stream
+            r set lz4:key [string repeat "payload " 200]
+            r save
+
+            set dump_rdb [file join [lindex [r config get dir] 1] dump.rdb]
+            set failed [catch {
+                exec $::VALKEY_CHECK_RDB_BIN $dump_rdb --stats --format info
+            } result]
+            r config set rdbcompression yes
+
+            assert_equal 0 $failed
+            assert_match {*RDB looks OK!*} $result
+            assert_match {*Logical RDB CRC64 skipped for streaming-compressed input*} $result
+            assert_match {*type.string.keys.total:1*} $result
+            assert_no_match {*Checksum OK*} $result
+        }
+
+        test "valkey-check-rdb rejects an incompatible VCS envelope" {
+            r flushall
+            r config set rdbcompression lz4-stream
+            r set lz4:incompatible payload
+            r save
+
+            set dir [lindex [r config get dir] 1]
+            set dump_rdb [file join $dir dump.rdb]
+            set incompatible_rdb [file join $dir incompatible-vcs.rdb]
+            set data [check_rdb_read_binary_file $dump_rdb]
+            set data [string replace $data 3 3 [binary format c 2]]
+            check_rdb_write_binary_file $incompatible_rdb $data
+
+            set failed [catch {
+                exec $::VALKEY_CHECK_RDB_BIN $incompatible_rdb
+            } result]
+            file delete -force $incompatible_rdb
+            r config set rdbcompression yes
+
+            assert_equal 1 $failed
+            assert_match {*Invalid or unsupported RDB stream envelope*} $result
+            assert_no_match {*RDB looks OK*} $result
+        }
+
+        test "valkey-check-rdb rejects a compressed RDB with a truncated frame trailer" {
+            r flushall
+            r config set rdbcompression lz4-stream
+            r set lz4:truncated [string repeat "payload " 200]
+            r save
+
+            set dir [lindex [r config get dir] 1]
+            set dump_rdb [file join $dir dump.rdb]
+            set truncated_rdb [file join $dir truncated-vcs.rdb]
+            set data [check_rdb_read_binary_file $dump_rdb]
+            check_rdb_write_binary_file $truncated_rdb [string range $data 0 end-1]
+
+            set failed [catch {
+                exec $::VALKEY_CHECK_RDB_BIN $truncated_rdb
+            } result]
+            file delete -force $truncated_rdb
+            r config set rdbcompression yes
+
+            assert_equal 1 $failed
+            assert_match {*Compressed RDB stream did not end cleanly*} $result
+            assert_no_match {*RDB looks OK*} $result
+        }
+
+        test "valkey-check-rdb rejects trailing data after a compressed RDB" {
+            r flushall
+            r config set rdbcompression lz4-stream
+            r set lz4:trailing payload
+            r save
+
+            set dir [lindex [r config get dir] 1]
+            set dump_rdb [file join $dir dump.rdb]
+            set trailing_rdb [file join $dir trailing-vcs.rdb]
+            set data [check_rdb_read_binary_file $dump_rdb]
+            check_rdb_write_binary_file $trailing_rdb "${data}trailing-data"
+
+            set failed [catch {
+                exec $::VALKEY_CHECK_RDB_BIN $trailing_rdb
+            } result]
+            file delete -force $trailing_rdb
+            r config set rdbcompression yes
+
+            assert_equal 1 $failed
+            assert_match {*Compressed RDB stream has trailing data*} $result
+            assert_no_match {*RDB looks OK*} $result
+        }
+
         test "test valkey-check-rdb stats with empty RDB" {
             r flushall
             r save
@@ -139,6 +243,27 @@ tags {"check-rdb network external:skip logreqres:skip"} {
             assert_match "*db.3.type.zset.keys.total:10*" $result
             assert_match "*db.4.type.hash.keys.total:10*" $result
             assert_match "*db.5.type.stream.keys.total:10*" $result
+        }
+    }
+}
+
+tags {"check-rdb network external:skip logreqres:skip"} {
+    start_server {overrides {save "" rdbchecksum no}} {
+        test "valkey-check-rdb reports checksum-disabled compressed RDBs accurately" {
+            r flushall
+            r config set rdbcompression lz4-stream
+            r set lz4:no-cksum [string repeat "payload " 200]
+            r save
+
+            set dump_rdb [file join [lindex [r config get dir] 1] dump.rdb]
+            set failed [catch {
+                exec $::VALKEY_CHECK_RDB_BIN $dump_rdb
+            } result]
+            assert_equal 0 $failed
+            assert_match {*Logical RDB CRC64 skipped for streaming-compressed input*} $result
+            assert_match {*RDB looks OK!*} $result
+            assert_no_match {*Checksum OK*} $result
+            assert_no_match {*integrity is verified by the codec frame checksums*} $result
         }
     }
 }
