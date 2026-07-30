@@ -69,13 +69,12 @@ static int readVcsEnvelope(const uint8_t *buf, compressionAlgo *algo) {
 
 #define STREAM_WRITER_INPUT_CHUNK_SIZE (1024 * 1024)
 
-int streamWriterInit(streamWriter *writer, const streamWriterConfig *cfg, streamWriterWriteFn write_cb, void *write_ctx) {
+int streamWriterInit(streamWriter *writer, compressionAlgo algo, streamWriterWriteFn write_cb, void *write_ctx) {
     memset(writer, 0, sizeof(*writer));
     writer->write_cb = write_cb;
     writer->write_ctx = write_ctx;
 
-    if (streamCompressorInit(&writer->compressor, cfg->algo, cfg->level,
-                             cfg->codec_checksum_enabled) != 0) {
+    if (streamCompressorInit(&writer->compressor, algo, 0, true) != 0) {
         writer->state = STREAM_WRITER_STATE_ERROR;
         return -1;
     }
@@ -236,7 +235,11 @@ int streamReaderInit(streamReader *reader, const streamReaderConfig *cfg, stream
     return 0;
 }
 
-/* Replay any probe-buffered bytes before reading from the wrapped source. */
+/* Initialization must consume enough bytes to distinguish a VCS envelope from
+ * a plain stream. If the source is plain, those probe bytes are part of the
+ * caller's payload and cannot be discarded. Replay them first, then continue
+ * reading directly from the wrapped source so passthrough is byte-for-byte
+ * transparent to the logical parser. */
 static ssize_t streamReaderReadPassthrough(streamReader *reader, uint8_t *dst, size_t len) {
     size_t total = 0;
     size_t prefix_avail = reader->probe.header_len - reader->probe_replay_pos;

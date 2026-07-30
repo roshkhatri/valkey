@@ -10,7 +10,6 @@
 #include <string.h>
 
 extern "C" {
-#include "../../deps/lz4/lz4frame.h"
 #include "compression.h"
 #include "compression_stream.h"
 #include "server.h"
@@ -64,58 +63,6 @@ static streamReaderConfig makeReaderConfig(bool allow_passthrough,
     cfg.skip_codec_checksum_validation = skip_codec_checksum_validation;
     cfg.buffer_size = buffer_size;
     return cfg;
-}
-
-static streamWriterConfig makeWriterConfig(compressionAlgo algo,
-                                           int level,
-                                           bool codec_checksum_enabled) {
-    streamWriterConfig cfg = {};
-    cfg.algo = algo;
-    cfg.level = level;
-    cfg.codec_checksum_enabled = codec_checksum_enabled;
-    return cfg;
-}
-
-static bool lz4FrameHasBlockChecksum(const uint8_t *data, size_t len) {
-    LZ4F_dctx *dctx = NULL;
-    EXPECT_FALSE(LZ4F_isError(LZ4F_createDecompressionContext(&dctx, LZ4F_VERSION)));
-    if (dctx == NULL) return false;
-
-    LZ4F_frameInfo_t frame_info = {};
-    size_t src_size = len;
-    size_t ret = LZ4F_getFrameInfo(dctx, &frame_info, data, &src_size);
-    bool has_block_checksum = !LZ4F_isError(ret) &&
-                              frame_info.blockChecksumFlag == LZ4F_blockChecksumEnabled;
-    LZ4F_freeDecompressionContext(dctx);
-    return has_block_checksum;
-}
-
-static bool lz4FrameHasContentChecksum(const uint8_t *data, size_t len) {
-    LZ4F_dctx *dctx = NULL;
-    EXPECT_FALSE(LZ4F_isError(LZ4F_createDecompressionContext(&dctx, LZ4F_VERSION)));
-    if (dctx == NULL) return false;
-
-    LZ4F_frameInfo_t frame_info = {};
-    size_t src_size = len;
-    size_t ret = LZ4F_getFrameInfo(dctx, &frame_info, data, &src_size);
-    bool has_content_checksum = !LZ4F_isError(ret) &&
-                                frame_info.contentChecksumFlag == LZ4F_contentChecksumEnabled;
-    LZ4F_freeDecompressionContext(dctx);
-    return has_content_checksum;
-}
-
-static bool lz4FrameUsesLinkedBlocks(const uint8_t *data, size_t len) {
-    LZ4F_dctx *dctx = NULL;
-    EXPECT_FALSE(LZ4F_isError(LZ4F_createDecompressionContext(&dctx, LZ4F_VERSION)));
-    if (dctx == NULL) return false;
-
-    LZ4F_frameInfo_t frame_info = {};
-    size_t src_size = len;
-    size_t ret = LZ4F_getFrameInfo(dctx, &frame_info, data, &src_size);
-    bool has_linked_blocks = !LZ4F_isError(ret) &&
-                             frame_info.blockMode == LZ4F_blockLinked;
-    LZ4F_freeDecompressionContext(dctx);
-    return has_linked_blocks;
 }
 
 static ssize_t memReaderRead(void *ctx, void *buf, size_t len) {
@@ -463,10 +410,8 @@ static int emitToRioBackend(void *ctx, const uint8_t *data, size_t len) {
     return rioWriteRaw((rio *)ctx, data, len) ? 0 : -1;
 }
 
-static int attachCompressionWriter(rio *r, streamWriter *writer, bool codec_checksum) {
-    streamWriterConfig cfg = makeWriterConfig(ALGO_LZ4, 0, false);
-    cfg.codec_checksum_enabled = codec_checksum;
-    if (streamWriterInit(writer, &cfg, emitToRioBackend, r) != 0) return -1;
+static int attachCompressionWriter(rio *r, streamWriter *writer) {
+    if (streamWriterInit(writer, ALGO_LZ4, emitToRioBackend, r) != 0) return -1;
     rioAttachStreamWriter(r, writer);
     return 0;
 }
@@ -497,9 +442,8 @@ TEST(CompressionTest, streamReaderClassifiesSourceCallbackFailuresAsIoErrors) {
 
     DynamicBuf db;
     dynamicBufInit(&db);
-    streamWriterConfig wcfg = makeWriterConfig(ALGO_LZ4, 0, false);
     streamWriter writer;
-    ASSERT_EQ(streamWriterInit(&writer, &wcfg, emitToDynamicBuf, &db), 0);
+    ASSERT_EQ(streamWriterInit(&writer, ALGO_LZ4, emitToDynamicBuf, &db), 0);
     ASSERT_EQ(streamWriterWrite(&writer, "source callback contract", 24), 0);
     ASSERT_EQ(streamWriterFinish(&writer), 0);
     streamWriterFree(&writer);
@@ -584,9 +528,8 @@ TEST(CompressionTest, streamReaderPartialThenErrorSetsErrored) {
 
     DynamicBuf db;
     dynamicBufInit(&db);
-    streamWriterConfig wcfg = makeWriterConfig(ALGO_LZ4, 0, false);
     streamWriter w;
-    ASSERT_EQ(streamWriterInit(&w, &wcfg, emitToDynamicBuf, &db), 0);
+    ASSERT_EQ(streamWriterInit(&w, ALGO_LZ4, emitToDynamicBuf, &db), 0);
     const size_t first_chunk_len = 4 * 1024;
     ASSERT_EQ(streamWriterWrite(&w, payload, first_chunk_len), 0);
     ASSERT_EQ(streamWriterFlush(&w), 0);
@@ -647,28 +590,23 @@ TEST(CompressionTest, streamReaderPartialThenErrorSetsErrored) {
 TEST(CompressionTest, streamWriterInitFree) {
     DynamicBuf db;
     dynamicBufInit(&db);
-
-    streamWriterConfig cfg = makeWriterConfig(ALGO_LZ4, 0, false);
     streamWriter t;
-    ASSERT_EQ(streamWriterInit(&t, &cfg, emitToDynamicBuf, &db), 0);
+    ASSERT_EQ(streamWriterInit(&t, ALGO_LZ4, emitToDynamicBuf, &db), 0);
     ASSERT_EQ(t.state, STREAM_WRITER_STATE_INITIAL);
 
     streamWriterFree(&t);
     dynamicBufFree(&db);
 
-    streamWriterConfig bad_cfg = makeWriterConfig(ALGO_NONE, 0, false);
     streamWriter bad_writer;
-    ASSERT_EQ(streamWriterInit(&bad_writer, &bad_cfg, emitToDynamicBuf, &db), -1) << "ALGO_NONE should fail init";
-    bad_cfg = makeWriterConfig(ALGO_LZF, 0, false);
-    ASSERT_EQ(streamWriterInit(&bad_writer, &bad_cfg, emitToDynamicBuf, &db), -1) << "ALGO_LZF should fail init";
+    ASSERT_EQ(streamWriterInit(&bad_writer, ALGO_NONE, emitToDynamicBuf, &db), -1) << "ALGO_NONE should fail init";
+    ASSERT_EQ(streamWriterInit(&bad_writer, ALGO_LZF, emitToDynamicBuf, &db), -1) << "ALGO_LZF should fail init";
 }
 
 TEST(CompressionTest, streamWriterFinishProducesAValidEmptyStream) {
     DynamicBuf db;
     dynamicBufInit(&db);
-    streamWriterConfig cfg = makeWriterConfig(ALGO_LZ4, 0, false);
     streamWriter writer;
-    ASSERT_EQ(streamWriterInit(&writer, &cfg, emitToDynamicBuf, &db), 0);
+    ASSERT_EQ(streamWriterInit(&writer, ALGO_LZ4, emitToDynamicBuf, &db), 0);
 
     ASSERT_EQ(streamWriterWrite(&writer, NULL, 0), 0);
     ASSERT_EQ(streamWriterFlush(&writer), 0);
@@ -689,13 +627,12 @@ TEST(CompressionTest, streamWriterFinishProducesAValidEmptyStream) {
 }
 
 TEST(CompressionTest, streamWriterSinkFailuresAreSticky) {
-    streamWriterConfig cfg = makeWriterConfig(ALGO_LZ4, 0, false);
     const int failing_calls[] = {1, 2};
     for (size_t i = 0; i < sizeof(failing_calls) / sizeof(failing_calls[0]); i++) {
         int fail_on_call = failing_calls[i];
         FailingEmitter emitter = {0, fail_on_call};
         streamWriter writer;
-        ASSERT_EQ(streamWriterInit(&writer, &cfg, failSelectedEmit, &emitter), 0);
+        ASSERT_EQ(streamWriterInit(&writer, ALGO_LZ4, failSelectedEmit, &emitter), 0);
 
         ASSERT_EQ(streamWriterWrite(&writer, "payload", 7), -1) << "sink call " << fail_on_call;
         ASSERT_EQ(writer.state, STREAM_WRITER_STATE_ERROR);
@@ -708,7 +645,7 @@ TEST(CompressionTest, streamWriterSinkFailuresAreSticky) {
 
     FailingEmitter emitter = {0, 0};
     streamWriter writer;
-    ASSERT_EQ(streamWriterInit(&writer, &cfg, failSelectedEmit, &emitter), 0);
+    ASSERT_EQ(streamWriterInit(&writer, ALGO_LZ4, failSelectedEmit, &emitter), 0);
     ASSERT_EQ(streamWriterWrite(&writer, "payload", 7), 0);
     emitter.fail_on_call = emitter.calls + 1;
     ASSERT_EQ(streamWriterFinish(&writer), -1);
@@ -722,10 +659,8 @@ TEST(CompressionTest, streamWriterSinkFailuresAreSticky) {
 TEST(CompressionTest, streamWriterRoundTrip) {
     DynamicBuf db;
     dynamicBufInit(&db);
-
-    streamWriterConfig cfg = makeWriterConfig(ALGO_LZ4, 0, false);
     streamWriter t;
-    ASSERT_EQ(streamWriterInit(&t, &cfg, emitToDynamicBuf, &db), 0);
+    ASSERT_EQ(streamWriterInit(&t, ALGO_LZ4, emitToDynamicBuf, &db), 0);
 
     const char *test_data = "Hello, compression world! This is a test of the stream writer API.";
     size_t data_len = strlen(test_data);
@@ -787,10 +722,8 @@ TEST(CompressionTest, streamWriterLargeSingleWrite) {
 
     DynamicBuf db;
     dynamicBufInit(&db);
-
-    streamWriterConfig cfg = makeWriterConfig(ALGO_LZ4, 0, false);
     streamWriter t;
-    ASSERT_EQ(streamWriterInit(&t, &cfg, emitToDynamicBuf, &db), 0);
+    ASSERT_EQ(streamWriterInit(&t, ALGO_LZ4, emitToDynamicBuf, &db), 0);
     ASSERT_EQ(streamWriterWrite(&t, payload, payload_len), 0);
     ASSERT_EQ(streamWriterFinish(&t), 0);
     streamWriterFree(&t);
@@ -836,10 +769,8 @@ TEST(CompressionTest, streamReaderSmallReadsRoundTrip) {
 
     DynamicBuf db;
     dynamicBufInit(&db);
-
-    streamWriterConfig wcfg = makeWriterConfig(ALGO_LZ4, -5, false);
     streamWriter w;
-    ASSERT_EQ(streamWriterInit(&w, &wcfg, emitToDynamicBuf, &db), 0);
+    ASSERT_EQ(streamWriterInit(&w, ALGO_LZ4, emitToDynamicBuf, &db), 0);
     ASSERT_EQ(streamWriterWrite(&w, payload, payload_len), 0);
     ASSERT_EQ(streamWriterFinish(&w), 0);
     streamWriterFree(&w);
@@ -881,10 +812,8 @@ TEST(CompressionTest, streamReaderSmallReadsRoundTrip) {
 TEST(CompressionTest, streamWriterFlushBehavior) {
     DynamicBuf db;
     dynamicBufInit(&db);
-
-    streamWriterConfig cfg = makeWriterConfig(ALGO_LZ4, 0, false);
     streamWriter t;
-    ASSERT_EQ(streamWriterInit(&t, &cfg, emitToDynamicBuf, &db), 0);
+    ASSERT_EQ(streamWriterInit(&t, ALGO_LZ4, emitToDynamicBuf, &db), 0);
 
     ASSERT_EQ(streamWriterFlush(&t), 0) << "flush before write should be no-op success";
     ASSERT_EQ(sdslen((const char *)db.data), 0u) << "flush before write should not emit bytes";
@@ -928,10 +857,8 @@ TEST(CompressionTest, streamWriterFlushBehavior) {
 TEST(CompressionTest, streamWriterFlushAfterFinishIsNoop) {
     DynamicBuf db;
     dynamicBufInit(&db);
-
-    streamWriterConfig cfg = makeWriterConfig(ALGO_LZ4, 0, false);
     streamWriter t;
-    ASSERT_EQ(streamWriterInit(&t, &cfg, emitToDynamicBuf, &db), 0);
+    ASSERT_EQ(streamWriterInit(&t, ALGO_LZ4, emitToDynamicBuf, &db), 0);
 
     ASSERT_EQ(streamWriterWrite(&t, "payload", 7), 0);
     ASSERT_EQ(streamWriterFinish(&t), 0);
@@ -944,43 +871,12 @@ TEST(CompressionTest, streamWriterFlushAfterFinishIsNoop) {
     dynamicBufFree(&db);
 }
 
-TEST(CompressionTest, streamWriterCodecChecksumToggle) {
-    const char *payload = "codec checksum payload codec checksum payload";
-    const bool checksum_cases[] = {false, true};
-
-    for (size_t i = 0; i < sizeof(checksum_cases) / sizeof(checksum_cases[0]); i++) {
-        bool codec_checksum = checksum_cases[i];
-        DynamicBuf db;
-        dynamicBufInit(&db);
-
-        streamWriterConfig cfg = makeWriterConfig(ALGO_LZ4, 0, codec_checksum);
-        streamWriter t;
-        ASSERT_EQ(streamWriterInit(&t, &cfg, emitToDynamicBuf, &db), 0);
-        ASSERT_EQ(streamWriterWrite(&t, payload, strlen(payload)), 0);
-        ASSERT_EQ(streamWriterFinish(&t), 0);
-
-        ASSERT_GT(sdslen((const char *)db.data), (size_t)VCS_ENVELOPE_SIZE);
-        ASSERT_EQ(lz4FrameHasBlockChecksum(db.data + VCS_ENVELOPE_SIZE,
-                                           sdslen((const char *)db.data) - VCS_ENVELOPE_SIZE),
-                  codec_checksum)
-            << "LZ4 block checksum should reflect configured codec checksum setting";
-        ASSERT_EQ(lz4FrameHasContentChecksum(db.data + VCS_ENVELOPE_SIZE,
-                                             sdslen((const char *)db.data) - VCS_ENVELOPE_SIZE),
-                  codec_checksum)
-            << "LZ4 content checksum should reflect configured codec checksum setting";
-
-        streamWriterFree(&t);
-        dynamicBufFree(&db);
-    }
-}
-
 TEST(CompressionTest, checksumBypassSkipsOnlyCodecVerification) {
     const char *payload = "checksum bypass payload";
     DynamicBuf db;
     dynamicBufInit(&db);
-    streamWriterConfig wcfg = makeWriterConfig(ALGO_LZ4, 0, true);
     streamWriter writer;
-    ASSERT_EQ(streamWriterInit(&writer, &wcfg, emitToDynamicBuf, &db), 0);
+    ASSERT_EQ(streamWriterInit(&writer, ALGO_LZ4, emitToDynamicBuf, &db), 0);
     ASSERT_EQ(streamWriterWrite(&writer, payload, strlen(payload)), 0);
     ASSERT_EQ(streamWriterFinish(&writer), 0);
     streamWriterFree(&writer);
@@ -1021,10 +917,8 @@ TEST(CompressionTest, streamReaderFinishAcceptsClosedFrame) {
     const char *payload = "validate frame end payload";
     DynamicBuf db;
     dynamicBufInit(&db);
-
-    streamWriterConfig wcfg = makeWriterConfig(ALGO_LZ4, 0, true);
     streamWriter w;
-    ASSERT_EQ(streamWriterInit(&w, &wcfg, emitToDynamicBuf, &db), 0);
+    ASSERT_EQ(streamWriterInit(&w, ALGO_LZ4, emitToDynamicBuf, &db), 0);
     ASSERT_EQ(streamWriterWrite(&w, payload, strlen(payload)), 0);
     ASSERT_EQ(streamWriterFinish(&w), 0);
 
@@ -1053,10 +947,8 @@ TEST(CompressionTest, streamReaderFinishRejectsUnreadDecodedBytes) {
     const size_t payload_len = strlen(payload);
     DynamicBuf db;
     dynamicBufInit(&db);
-
-    streamWriterConfig wcfg = makeWriterConfig(ALGO_LZ4, 0, true);
     streamWriter w;
-    ASSERT_EQ(streamWriterInit(&w, &wcfg, emitToDynamicBuf, &db), 0);
+    ASSERT_EQ(streamWriterInit(&w, ALGO_LZ4, emitToDynamicBuf, &db), 0);
     ASSERT_EQ(streamWriterWrite(&w, payload, payload_len), 0);
     ASSERT_EQ(streamWriterFinish(&w), 0);
 
@@ -1082,7 +974,7 @@ TEST(CompressionTest, rioCompressionWriterRoundTrip) {
     rioInitWithBuffer(&buffer_rio, buf);
 
     streamWriter writer;
-    ASSERT_EQ(attachCompressionWriter(&buffer_rio, &writer, false), 0);
+    ASSERT_EQ(attachCompressionWriter(&buffer_rio, &writer), 0);
     const char *test_data = "The quick brown fox jumps over the lazy dog. "
                             "Pack my box with five dozen liquor jugs.";
     size_t data_len = strlen(test_data);
@@ -1136,24 +1028,21 @@ TEST(CompressionTest, rioCompressionWriterDoesNotOwnRdbChecksumPolicy) {
     const bool checksum_cases[] = {false, true};
     for (size_t i = 0; i < sizeof(checksum_cases) / sizeof(checksum_cases[0]); i++) {
         bool inner_skips_checksum = checksum_cases[i];
-        for (size_t j = 0; j < sizeof(checksum_cases) / sizeof(checksum_cases[0]); j++) {
-            bool codec_checksum = checksum_cases[j];
-            sds buf = sdsempty();
-            rio inner;
-            rioInitWithBuffer(&inner, buf);
-            if (inner_skips_checksum) inner.flags |= RIO_FLAG_SKIP_RDB_CHECKSUM;
+        sds buf = sdsempty();
+        rio inner;
+        rioInitWithBuffer(&inner, buf);
+        if (inner_skips_checksum) inner.flags |= RIO_FLAG_SKIP_RDB_CHECKSUM;
 
-            streamWriter writer;
-            ASSERT_EQ(attachCompressionWriter(&inner, &writer, codec_checksum), 0);
-            ASSERT_TRUE(inner.update_cksum == NULL);
-            ASSERT_EQ((inner.flags & RIO_FLAG_SKIP_RDB_CHECKSUM) != 0, inner_skips_checksum);
-            ASSERT_NE(rioWrite(&inner, "checksum policy", 15), 0u);
-            ASSERT_EQ(inner.cksum, 0u);
-            ASSERT_EQ(finishCompressionWriter(&inner, &writer), 0);
+        streamWriter writer;
+        ASSERT_EQ(attachCompressionWriter(&inner, &writer), 0);
+        ASSERT_TRUE(inner.update_cksum == NULL);
+        ASSERT_EQ((inner.flags & RIO_FLAG_SKIP_RDB_CHECKSUM) != 0, inner_skips_checksum);
+        ASSERT_NE(rioWrite(&inner, "checksum policy", 15), 0u);
+        ASSERT_EQ(inner.cksum, 0u);
+        ASSERT_EQ(finishCompressionWriter(&inner, &writer), 0);
 
-            freeCompressionWriter(&inner, &writer);
-            sdsfree(inner.io.buffer.ptr);
-        }
+        freeCompressionWriter(&inner, &writer);
+        sdsfree(inner.io.buffer.ptr);
     }
 }
 
@@ -1162,7 +1051,7 @@ TEST(CompressionTest, rioCompressionWriterFlushFailureSetsWriteError) {
     initFailingFlushRio(&inner);
 
     streamWriter writer;
-    ASSERT_EQ(attachCompressionWriter(&inner, &writer, false), 0);
+    ASSERT_EQ(attachCompressionWriter(&inner, &writer), 0);
 
     const char *payload = "flush failure should latch rio write error";
     ASSERT_NE(rioWrite(&inner, payload, strlen(payload)), 0u);
@@ -1177,7 +1066,7 @@ TEST(CompressionTest, rioCompressionWriterFinishFailureSetsWriteError) {
     initFailingFlushRio(&inner);
 
     streamWriter writer;
-    ASSERT_EQ(attachCompressionWriter(&inner, &writer, false), 0);
+    ASSERT_EQ(attachCompressionWriter(&inner, &writer), 0);
 
     const char *payload = "finish failure should latch rio write error";
     ASSERT_NE(rioWrite(&inner, payload, strlen(payload)), 0u);
@@ -1190,10 +1079,8 @@ TEST(CompressionTest, rioCompressionWriterFinishFailureSetsWriteError) {
 TEST(CompressionTest, rioStreamReaderRoundTrip) {
     DynamicBuf db;
     dynamicBufInit(&db);
-
-    streamWriterConfig cfg = makeWriterConfig(ALGO_LZ4, 0, false);
     streamWriter t;
-    ASSERT_EQ(streamWriterInit(&t, &cfg, emitToDynamicBuf, &db), 0);
+    ASSERT_EQ(streamWriterInit(&t, ALGO_LZ4, emitToDynamicBuf, &db), 0);
 
     const char *test_data = "Decompression rio test data. "
                             "This should round-trip through compress then decompress.";
@@ -1225,9 +1112,8 @@ TEST(CompressionTest, rioStreamReaderTellTracksSourceProgress) {
 
     char payload[4096];
     memset(payload, 'A', sizeof(payload));
-    streamWriterConfig cfg = makeWriterConfig(ALGO_LZ4, 0, false);
     streamWriter t;
-    ASSERT_EQ(streamWriterInit(&t, &cfg, emitToDynamicBuf, &db), 0);
+    ASSERT_EQ(streamWriterInit(&t, ALGO_LZ4, emitToDynamicBuf, &db), 0);
     ASSERT_EQ(streamWriterWrite(&t, payload, sizeof(payload)), 0);
     ASSERT_EQ(streamWriterFinish(&t), 0);
     streamWriterFree(&t);
@@ -1260,9 +1146,8 @@ TEST(CompressionTest, rioStreamReaderHonorsMaxProcessingChunk) {
 
     DynamicBuf db;
     dynamicBufInit(&db);
-    streamWriterConfig cfg = makeWriterConfig(ALGO_LZ4, 0, false);
     streamWriter writer;
-    ASSERT_EQ(streamWriterInit(&writer, &cfg, emitToDynamicBuf, &db), 0);
+    ASSERT_EQ(streamWriterInit(&writer, ALGO_LZ4, emitToDynamicBuf, &db), 0);
     ASSERT_EQ(streamWriterWrite(&writer, payload, payload_len), 0);
     ASSERT_EQ(streamWriterFinish(&writer), 0);
     streamWriterFree(&writer);
@@ -1329,7 +1214,7 @@ TEST(CompressionTest, rioCompressionWriterFinishIdempotent) {
     rioInitWithBuffer(&buffer_rio, buf);
 
     streamWriter writer;
-    ASSERT_EQ(attachCompressionWriter(&buffer_rio, &writer, false), 0);
+    ASSERT_EQ(attachCompressionWriter(&buffer_rio, &writer), 0);
 
     ASSERT_NE(rioWrite(&buffer_rio, "test", 4), 0u);
     ASSERT_EQ(finishCompressionWriter(&buffer_rio, &writer), 0);
@@ -1349,7 +1234,7 @@ TEST(CompressionTest, rioCompressionWriterFlushMidStream) {
     rioInitWithBuffer(&buffer_rio, buf);
 
     streamWriter writer;
-    ASSERT_EQ(attachCompressionWriter(&buffer_rio, &writer, false), 0);
+    ASSERT_EQ(attachCompressionWriter(&buffer_rio, &writer), 0);
 
     ASSERT_NE(rioWrite(&buffer_rio, "first chunk", 11), 0u);
 
@@ -1401,7 +1286,7 @@ TEST(CompressionTest, rdbLoadProgressCallbackStreamingGuard) {
     rioInitWithBuffer(&inner, buf);
 
     streamWriter writer;
-    ASSERT_EQ(attachCompressionWriter(&inner, &writer, false), 0);
+    ASSERT_EQ(attachCompressionWriter(&inner, &writer), 0);
 
     const char sample[] = "progress-guard";
     rdbLoadProgressCallback(&inner, sample, sizeof(sample) - 1);
@@ -1423,10 +1308,8 @@ TEST(CompressionTest, rioStreamReaderLargePayload) {
 
     DynamicBuf db;
     dynamicBufInit(&db);
-
-    streamWriterConfig cfg = makeWriterConfig(ALGO_LZ4, 0, false);
     streamWriter t;
-    ASSERT_EQ(streamWriterInit(&t, &cfg, emitToDynamicBuf, &db), 0);
+    ASSERT_EQ(streamWriterInit(&t, ALGO_LZ4, emitToDynamicBuf, &db), 0);
 
     ASSERT_EQ(streamWriterWrite(&t, payload, payload_len), 0);
     ASSERT_EQ(streamWriterFinish(&t), 0);
@@ -1468,10 +1351,8 @@ TEST(CompressionTest, streamReaderFinishStopsAtFrameEndBeforeTrailingBytes) {
 
     DynamicBuf db;
     dynamicBufInit(&db);
-
-    streamWriterConfig cfg = makeWriterConfig(ALGO_LZ4, 0, false);
     streamWriter w;
-    ASSERT_EQ(streamWriterInit(&w, &cfg, emitToDynamicBuf, &db), 0);
+    ASSERT_EQ(streamWriterInit(&w, ALGO_LZ4, emitToDynamicBuf, &db), 0);
     ASSERT_EQ(streamWriterWrite(&w, payload, payload_len), 0);
     ASSERT_EQ(streamWriterFinish(&w), 0);
     streamWriterFree(&w);
@@ -1511,10 +1392,8 @@ TEST(CompressionTest, streamReaderRejectsTruncatedFrameTrailer) {
 
     DynamicBuf db;
     dynamicBufInit(&db);
-
-    streamWriterConfig cfg = makeWriterConfig(ALGO_LZ4, 0, false);
     streamWriter w;
-    ASSERT_EQ(streamWriterInit(&w, &cfg, emitToDynamicBuf, &db), 0);
+    ASSERT_EQ(streamWriterInit(&w, ALGO_LZ4, emitToDynamicBuf, &db), 0);
     ASSERT_EQ(streamWriterWrite(&w, payload, payload_len), 0);
     ASSERT_EQ(streamWriterFinish(&w), 0);
     streamWriterFree(&w);
@@ -1542,10 +1421,8 @@ TEST(CompressionTest, streamReaderRejectsTruncatedFrameTrailer) {
 TEST(CompressionTest, streamWriterWriteAfterFinish) {
     DynamicBuf db;
     dynamicBufInit(&db);
-
-    streamWriterConfig cfg = makeWriterConfig(ALGO_LZ4, 0, false);
     streamWriter t;
-    ASSERT_EQ(streamWriterInit(&t, &cfg, emitToDynamicBuf, &db), 0);
+    ASSERT_EQ(streamWriterInit(&t, ALGO_LZ4, emitToDynamicBuf, &db), 0);
 
     ASSERT_EQ(streamWriterWrite(&t, "hello", 5), 0);
     ASSERT_EQ(streamWriterFinish(&t), 0);
@@ -1588,10 +1465,8 @@ TEST(CompressionTest, streamWriterWriteAfterFinish) {
 TEST(CompressionTest, streamWriterRepetitivePayloadRoundTrip) {
     DynamicBuf db;
     dynamicBufInit(&db);
-
-    streamWriterConfig cfg = makeWriterConfig(ALGO_LZ4, 0, false);
     streamWriter t;
-    ASSERT_EQ(streamWriterInit(&t, &cfg, emitToDynamicBuf, &db), 0);
+    ASSERT_EQ(streamWriterInit(&t, ALGO_LZ4, emitToDynamicBuf, &db), 0);
 
     char pattern[4096];
     memset(pattern, 'X', sizeof(pattern));
@@ -1599,9 +1474,6 @@ TEST(CompressionTest, streamWriterRepetitivePayloadRoundTrip) {
         ASSERT_EQ(streamWriterWrite(&t, pattern, sizeof(pattern)), 0);
     }
     ASSERT_EQ(streamWriterFinish(&t), 0);
-    ASSERT_TRUE(lz4FrameUsesLinkedBlocks(db.data + VCS_ENVELOPE_SIZE,
-                                         sdslen((const char *)db.data) - VCS_ENVELOPE_SIZE))
-        << "stream writer should use linked LZ4 blocks";
 
     sds comp = sdsnewlen(db.data, sdslen((const char *)db.data));
     rio buf_rio;

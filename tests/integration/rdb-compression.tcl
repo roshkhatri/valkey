@@ -64,7 +64,7 @@ proc assert_rdb_test_dataset {client prefix} {
 start_server {overrides {save "" enable-debug-command local}} {
     test {RDB save and load round-trip with LZ4 compression} {
         set prefix "lz4-round-trip"
-        r config set rdbcompression lz4-stream
+        r config set rdbcompression lz4
         write_rdb_test_dataset r $prefix
         assert_rdb_test_dataset r $prefix
         set digest [debug_digest]
@@ -77,14 +77,14 @@ start_server {overrides {save "" enable-debug-command local}} {
         r config rewrite
         restart_server 0 true false
 
-        assert_equal "lz4-stream" [lindex [r config get rdbcompression] 1]
+        assert_equal "lz4" [lindex [r config get rdbcompression] 1]
         set newdigest [debug_digest]
         assert {$digest eq $newdigest}
         assert_rdb_test_dataset r $prefix
     }
 
     test {Empty LZ4-compressed RDB saves and loads correctly} {
-        r config set rdbcompression lz4-stream
+        r config set rdbcompression lz4
         r flushall
 
         assert_equal 0 [r dbsize]
@@ -94,7 +94,7 @@ start_server {overrides {save "" enable-debug-command local}} {
 
         restart_server 0 true false
 
-        assert_equal "lz4-stream" [lindex [r config get rdbcompression] 1]
+        assert_equal "lz4" [lindex [r config get rdbcompression] 1]
         assert_equal 0 [r dbsize]
     }
 
@@ -133,7 +133,7 @@ start_server {overrides {save "" enable-debug-command local}} {
     }
 
     test {Changing compression config during active BGSAVE does not affect the in-flight save} {
-        r config set rdbcompression lz4-stream
+        r config set rdbcompression lz4
         r config set rdb-key-save-delay 10000
         r flushall
         for {set i 0} {$i < 128} {incr i} {
@@ -165,12 +165,12 @@ start_server {overrides {save "" enable-debug-command local}} {
         assert_equal "OK" [r save]
         assert_equal "VALKEY" [string range [read_dump_rdb_header_bytes r] 0 5]
 
-        r config set rdbcompression lz4-stream
+        r config set rdbcompression lz4
     }
 
     test {Switching from LZ4 to LZF preserves data} {
         set prefix "lz4-to-lzf"
-        r config set rdbcompression lz4-stream
+        r config set rdbcompression lz4
         write_rdb_test_dataset r $prefix
         assert_rdb_test_dataset r $prefix
         set digest [debug_digest]
@@ -196,11 +196,11 @@ start_server {overrides {save "" enable-debug-command local}} {
 
         # Save with LZF, then restart with LZ4 and load the existing file.
         assert_equal "OK" [r save]
-        r config set rdbcompression lz4-stream
+        r config set rdbcompression lz4
         r config rewrite
         restart_server 0 true false
 
-        assert_equal "lz4-stream" [lindex [r config get rdbcompression] 1]
+        assert_equal "lz4" [lindex [r config get rdbcompression] 1]
         set newdigest [debug_digest]
         assert {$digest eq $newdigest}
         assert_rdb_test_dataset r $prefix
@@ -208,14 +208,14 @@ start_server {overrides {save "" enable-debug-command local}} {
 
     test {Invalid compression config is rejected} {
         set previous [lindex [r config get rdbcompression] 1]
-        assert_error "*argument(s) must be one of the following: no, yes, lz4-stream*" {
+        assert_error "*argument(s) must be one of the following: no, yes, lz4*" {
             r config set rdbcompression snappy
         }
         assert_equal $previous [lindex [r config get rdbcompression] 1]
     }
 
     test {Truncated LZ4 frame is rejected on load} {
-        r config set rdbcompression lz4-stream
+        r config set rdbcompression lz4
         r flushall
         set noisy_payload ""
         for {set j 0} {$j < 32768} {incr j} {
@@ -247,7 +247,7 @@ start_server {overrides {save "" enable-debug-command local}} {
     }
 
     test {LZ4 compressed RDB detects a content checksum mismatch} {
-        r config set rdbcompression lz4-stream
+        r config set rdbcompression lz4
         assert_equal "yes" [lindex [r config get rdbchecksum] 1]
         r flushall
         for {set i 0} {$i < 100} {incr i} {
@@ -276,7 +276,7 @@ start_server {overrides {save "" enable-debug-command local}} {
     }
 
     test {RDB loader rejects incompatible VCS envelope fields without changing data} {
-        r config set rdbcompression lz4-stream
+        r config set rdbcompression lz4
         r flushall
         r set incompatible-envelope:key [string repeat "payload " 100]
 
@@ -307,7 +307,7 @@ start_server {overrides {save "" enable-debug-command local}} {
     }
 
     test {RDB loader rejects trailing data after an LZ4 frame} {
-        r config set rdbcompression lz4-stream
+        r config set rdbcompression lz4
         r flushall
         r set trailing-data:key value
         assert_equal "OK" [r save]
@@ -326,7 +326,7 @@ start_server {overrides {save "" enable-debug-command local}} {
     }
 
     test {LZ4 compressed RDB detects corruption in compressed payload} {
-        r config set rdbcompression lz4-stream
+        r config set rdbcompression lz4
         r flushall
         for {set i 0} {$i < 100} {incr i} {
             r set "corrupt:$i" [string repeat "testdata$i " 100]
@@ -357,15 +357,15 @@ start_server {overrides {save "" enable-debug-command local}} {
 
 }
 
-start_server {config "minimal.conf" args {"--rdbcompression lz4-stream"}} {
+start_server {config "minimal.conf" args {"--rdbcompression lz4"}} {
     test {Startup accepts valid LZ4 compression config} {
-        assert_equal "lz4-stream" [lindex [r config get rdbcompression] 1]
+        assert_equal "lz4" [lindex [r config get rdbcompression] 1]
     }
 }
 
 start_server {overrides {save "" enable-debug-command local rdbchecksum no}} {
-    test {LZ4 compressed RDB with rdbchecksum no omits codec checksums and loads correctly} {
-        r config set rdbcompression lz4-stream
+    test {LZ4 compressed RDB validates codec checksums when rdbchecksum is no} {
+        r config set rdbcompression lz4
         r flushall
         for {set i 0} {$i < 50} {incr i} {
             r set "nocksum:$i" [string repeat "data$i " 100]
@@ -373,12 +373,24 @@ start_server {overrides {save "" enable-debug-command local rdbchecksum no}} {
 
         r save
         assert_lz4_rdb_envelope r
+        set rdbfile [dump_rdb_path r]
+        set original [read_binary_file $rdbfile]
+        set digest [debug_digest]
         set loglines [count_log_lines 0]
         assert_equal "OK" [r debug reload nosave]
         verify_log_message 0 "*Logical RDB CRC64 skipped for streaming-compressed input*" $loglines
-        verify_no_log_message 0 "*integrity is verified by the codec frame checksums*" $loglines
 
-        set digest [debug_digest]
+        set checksum_pos [expr {[string length $original] - 1}]
+        binary scan [string index $original $checksum_pos] cu checksum_byte
+        set corrupted [string replace $original $checksum_pos $checksum_pos \
+                           [binary format c [expr {$checksum_byte ^ 1}]]]
+        write_binary_file $rdbfile $corrupted
+
+        set failed [catch {r debug reload nosave} err]
+        assert_equal 1 $failed
+        assert_match "*Error trying to load the RDB*" $err
+        write_binary_file $rdbfile $original
+
         restart_server 0 true false
         set newdigest [debug_digest]
         assert {$digest eq $newdigest}
@@ -386,7 +398,7 @@ start_server {overrides {save "" enable-debug-command local rdbchecksum no}} {
     }
 }
 
-start_server {overrides {save "" appendonly yes aof-use-rdb-preamble yes rdbcompression lz4-stream}} {
+start_server {overrides {save "" appendonly yes aof-use-rdb-preamble yes rdbcompression lz4}} {
     test {AOF rewrite RDB preamble remains plain with LZ4 stream snapshots} {
         r set aof-lz4:key [string repeat "aof-lz4-value " 100]
         set digest [debug_digest]
@@ -414,8 +426,8 @@ start_server {tags {"rdb-compression repl external:skip"}} {
         set primary_host [srv 0 host]
         set primary_port [srv 0 port]
 
-        test {Disk-based full sync writes plain RDB when rdbcompression is lz4-stream} {
-            $primary config set rdbcompression lz4-stream
+        test {Disk-based full sync writes plain RDB when rdbcompression is lz4} {
+            $primary config set rdbcompression lz4
             $primary config set repl-diskless-sync no
             $primary config set rdb-del-sync-files no
             $primary flushall
@@ -449,7 +461,7 @@ start_server {tags {"rdb-compression repl external:skip"}} {
             }
         }
 
-        test {Diskless full sync remains compatible when rdbcompression is lz4-stream} {
+        test {Diskless full sync remains compatible when rdbcompression is lz4} {
             $replica replicaof no one
             $primary config set repl-diskless-sync yes
             $primary config set repl-diskless-sync-delay 0

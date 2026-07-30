@@ -607,7 +607,7 @@ typedef enum {
 
 typedef enum { RDB_COMPRESSION_NO = 0,
                RDB_COMPRESSION_YES,
-               RDB_COMPRESSION_LZ4_STREAM } rdb_compression_mode;
+               RDB_COMPRESSION_LZ4 } rdb_compression_mode;
 
 /* Structure representing a non-owning view of a buffer.
  * A stringRef struct does not manage the underlying memory, so its destruction

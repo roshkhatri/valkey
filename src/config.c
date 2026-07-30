@@ -178,7 +178,7 @@ configEnum rdb_version_check_enum[] = {{"strict", RDB_VERSION_CHECK_STRICT},
 
 configEnum rdb_compression_enum[] = {{"no", RDB_COMPRESSION_NO},
                                      {"yes", RDB_COMPRESSION_YES},
-                                     {"lz4-stream", RDB_COMPRESSION_LZ4_STREAM},
+                                     {"lz4", RDB_COMPRESSION_LZ4},
                                      {NULL, 0}};
 
 /* Output buffer limits presets. */

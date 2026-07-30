@@ -44,12 +44,6 @@ typedef ssize_t (*streamReaderReadFn)(void *ctx, void *buf, size_t len);
 
 /* ===== Writer ===== */
 
-typedef struct {
-    compressionAlgo algo;
-    int level;
-    bool codec_checksum_enabled;
-} streamWriterConfig;
-
 typedef enum {
     STREAM_WRITER_STATE_INITIAL = 0,
     STREAM_WRITER_STATE_ACTIVE,
@@ -66,10 +60,11 @@ typedef struct streamWriter {
     streamWriterState state;
 } streamWriter;
 
-/* Writer API. Init, Write, Flush, and Finish return 0 on success and -1 on
- * error. The writer pushes compressed bytes to write_cb. Errors are sticky:
+/* Writer API. Init uses the codec's default compression level and enables its
+ * integrity checks. Init, Write, Flush, and Finish return 0 on success and -1
+ * on error. The writer pushes compressed bytes to write_cb. Errors are sticky:
  * later operations fail without emitting bytes. */
-int streamWriterInit(streamWriter *writer, const streamWriterConfig *cfg, streamWriterWriteFn write_cb, void *write_ctx);
+int streamWriterInit(streamWriter *writer, compressionAlgo algo, streamWriterWriteFn write_cb, void *write_ctx);
 int streamWriterWrite(streamWriter *writer, const void *buf, size_t len);
 /* Emits codec-buffered bytes while leaving the frame open. */
 int streamWriterFlush(streamWriter *writer);

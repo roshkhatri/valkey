@@ -66,7 +66,7 @@ tags {"check-rdb network external:skip logreqres:skip"} {
     start_server {} {
         test "valkey-check-rdb validates the contents of an LZ4-compressed RDB" {
             r flushall
-            r config set rdbcompression lz4-stream
+            r config set rdbcompression lz4
             r set lz4:key [string repeat "payload " 200]
             r save
 
@@ -85,7 +85,7 @@ tags {"check-rdb network external:skip logreqres:skip"} {
 
         test "valkey-check-rdb rejects an incompatible VCS envelope" {
             r flushall
-            r config set rdbcompression lz4-stream
+            r config set rdbcompression lz4
             r set lz4:incompatible payload
             r save
 
@@ -109,7 +109,7 @@ tags {"check-rdb network external:skip logreqres:skip"} {
 
         test "valkey-check-rdb rejects a compressed RDB with a truncated frame trailer" {
             r flushall
-            r config set rdbcompression lz4-stream
+            r config set rdbcompression lz4
             r set lz4:truncated [string repeat "payload " 200]
             r save
 
@@ -132,7 +132,7 @@ tags {"check-rdb network external:skip logreqres:skip"} {
 
         test "valkey-check-rdb rejects trailing data after a compressed RDB" {
             r flushall
-            r config set rdbcompression lz4-stream
+            r config set rdbcompression lz4
             r set lz4:trailing payload
             r save
 
@@ -249,9 +249,9 @@ tags {"check-rdb network external:skip logreqres:skip"} {
 
 tags {"check-rdb network external:skip logreqres:skip"} {
     start_server {overrides {save "" rdbchecksum no}} {
-        test "valkey-check-rdb reports checksum-disabled compressed RDBs accurately" {
+        test "valkey-check-rdb accepts compressed RDBs created with rdbchecksum no" {
             r flushall
-            r config set rdbcompression lz4-stream
+            r config set rdbcompression lz4
             r set lz4:no-cksum [string repeat "payload " 200]
             r save
 

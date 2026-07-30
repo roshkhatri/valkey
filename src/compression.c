@@ -6,6 +6,7 @@
 
 #include "compression.h"
 #include "compression_lz4.h"
+#include "server.h"
 #include "serverassert.h"
 #include <string.h>
 
@@ -36,9 +37,9 @@ int streamCompressorInit(streamCompressor *compressor,
     switch (algo) {
     case ALGO_LZ4:
         compressionLz4CompressorInit(compressor);
-        return 0;
+        return C_OK;
     default:
-        return -1;
+        return C_ERR;
     }
 }
 
@@ -87,9 +88,9 @@ int streamDecompressorInit(streamDecompressor *decompressor,
     switch (algo) {
     case ALGO_LZ4:
         compressionLz4DecompressorInit(decompressor);
-        return 0;
+        return C_OK;
     default:
-        return -1;
+        return C_ERR;
     }
 }
 
@@ -113,10 +114,12 @@ ssize_t streamDecompressorFeed(streamDecompressor *decompressor,
 
 void streamDecompressorFree(streamDecompressor *decompressor) {
     switch (decompressor->algo) {
+    case ALGO_NONE:
+        break;
     case ALGO_LZ4:
         compressionLz4DecompressorFree(decompressor);
         break;
     default:
-        break;
+        panic("Unsupported stream decompression algorithm: %d", decompressor->algo);
     }
 }

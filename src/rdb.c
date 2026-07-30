@@ -515,7 +515,8 @@ ssize_t rdbSaveRawString(rio *rdb, unsigned char *s, size_t len) {
     /* Try LZF compression. Values under 20 bytes don't compress, skip those.
      * Skip per-string LZF when the rio has whole-stream compression so we
      * don't compress twice; standalone rios (DUMP, AOF rewrite, diskless)
-     * still hit this path. */
+     * still hit this path. rdb may be NULL when rdbSavedObjectLen() calculates
+     * the encoded length without writing the object. */
     if (server.rdb_compression && len > 20 && !(rdb && rdb->stream_writer)) {
         n = rdbSaveLzfStringObject(rdb, s, len);
         if (n == -1) return -1;
@@ -1563,15 +1564,8 @@ static int rdbCompressionWrite(void *ctx, const uint8_t *data, size_t len) {
 
 static int rdbCompressionInit(rio *rdb,
                               streamWriter *writer,
-                              compressionAlgo algo,
-                              bool codec_checksum_enabled) {
-    streamWriterConfig cfg = {
-        .algo = algo,
-        .level = 0,
-        .codec_checksum_enabled = codec_checksum_enabled,
-    };
-
-    if (streamWriterInit(writer, &cfg, rdbCompressionWrite, rdb) != 0) return -1;
+                              compressionAlgo algo) {
+    if (streamWriterInit(writer, algo, rdbCompressionWrite, rdb) != 0) return -1;
     rioAttachStreamWriter(rdb, writer);
     return 0;
 }
@@ -1587,7 +1581,7 @@ static int rdbSaveInternal(int req, const char *filename, rdbSaveInfo *rsi, int 
     int error = 0;
     int saved_errno;
     char *err_op; /* For a detailed log */
-    compressionAlgo streaming_algo = server.rdb_compression == RDB_COMPRESSION_LZ4_STREAM ? ALGO_LZ4 : ALGO_NONE;
+    compressionAlgo streaming_algo = server.rdb_compression == RDB_COMPRESSION_LZ4 ? ALGO_LZ4 : ALGO_NONE;
     bool use_streaming_compression = streaming_algo != ALGO_NONE;
     /* Replication full sync does not negotiate streaming compression yet. */
     if (rdbflags & RDBFLAGS_REPLICATION) use_streaming_compression = false;
@@ -1624,7 +1618,7 @@ static int rdbSaveInternal(int req, const char *filename, rdbSaveInfo *rsi, int 
      * rioWriteRaw lets streamWriter reach the backend without recursively
      * compressing its own output. */
     if (use_streaming_compression) {
-        if (rdbCompressionInit(&rdb, &compression_writer, streaming_algo, server.rdb_checksum != 0) != 0) {
+        if (rdbCompressionInit(&rdb, &compression_writer, streaming_algo) != 0) {
             errno = EIO; /* Compressor init failure, set errno for werr log */
             err_op = "rdbCompressionInit";
             goto werr;
@@ -3800,7 +3794,7 @@ int rdbLoad(char *filename, rdbSaveInfo *rsi, int rdbflags) {
      * The probe bytes are replayed for plain input, so rdbLoadRio sees the
      * original RDB header. For VCS input it sees the header produced by the
      * decoder. The parser and the concrete backend remain the same rio. */
-    bool skip_codec_checksum_validation = !server.rdb_checksum || server.skip_checksum_validation;
+    bool skip_codec_checksum_validation = server.skip_checksum_validation;
     rdbStreamReaderInitResult init_rc =
         rdbInitStreamReader(&rdb, &stream_reader, skip_codec_checksum_validation, &streaming_algo);
     if (init_rc == RDB_STREAM_READER_INIT_INCOMPATIBLE) {
