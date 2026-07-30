@@ -1527,6 +1527,9 @@ werr:
     return C_ERR;
 }
 
+static int rdbCompressionInit(rio *rdb, streamWriter *writer, compressionAlgo algo, bool codec_checksum_enabled);
+static void rdbCompressionFree(rio *rdb, streamWriter *writer);
+
 /* This helper function is only used for diskless replication.
  * This is just a wrapper to rdbSaveRio() that additionally adds a prefix
  * and a suffix to the generated RDB dump. The prefix is:
@@ -1536,8 +1539,10 @@ werr:
  * While the suffix is the 40 bytes hex string we announced in the prefix.
  * This way processes receiving the payload can understand when it ends
  * without doing any processing of the content. */
-int rdbSaveRioWithEOFMark(int req, int rdbver, rio *rdb, int *error, rdbSaveInfo *rsi) {
+static int rdbSaveRioWithEOFMark(int req, int rdbver, rio *rdb, int *error, rdbSaveInfo *rsi, bool use_streaming_compression) {
     char eofmark[RDB_EOF_MARK_SIZE];
+    streamWriter compression_writer;
+    bool compression_initialized = false;
 
     startSaving(RDBFLAGS_REPLICATION);
     getRandomHexChars(eofmark, RDB_EOF_MARK_SIZE);
@@ -1545,7 +1550,32 @@ int rdbSaveRioWithEOFMark(int req, int rdbver, rio *rdb, int *error, rdbSaveInfo
     if (rioWrite(rdb, "$EOF:", 5) == 0) goto werr;
     if (rioWrite(rdb, eofmark, RDB_EOF_MARK_SIZE) == 0) goto werr;
     if (rioWrite(rdb, "\r\n", 2) == 0) goto werr;
+
+    /* Compress only the RDB body; the $EOF prefix/suffix stay plaintext. The
+     * frame's own checksum replaces the CRC64 whenever the cohort opted into
+     * RDB checksums, matching the non-replication save path. */
+    if (use_streaming_compression) {
+        if (rdbCompressionInit(rdb, &compression_writer, ALGO_LZ4, !(rdb->flags & RIO_FLAG_SKIP_RDB_CHECKSUM)) != 0) {
+            if (error && *error == 0) *error = EIO;
+            goto werr;
+        }
+        compression_initialized = true;
+        rdb->flags |= RIO_FLAG_SKIP_RDB_CHECKSUM;
+        rdb->update_cksum = NULL;
+        rdb->cksum = 0;
+    }
+
     if (rdbSaveRio(req, rdbver, rdb, error, RDBFLAGS_REPLICATION, rsi) == C_ERR) goto werr;
+
+    if (compression_initialized) {
+        if (streamWriterFinish(&compression_writer) != 0) {
+            if (error && *error == 0) *error = EIO;
+            goto werr;
+        }
+        rdbCompressionFree(rdb, &compression_writer);
+        compression_initialized = false;
+    }
+
     if (rioWrite(rdb, eofmark, RDB_EOF_MARK_SIZE) == 0) goto werr;
     stopSaving(1);
     return C_OK;
@@ -1553,6 +1583,7 @@ int rdbSaveRioWithEOFMark(int req, int rdbver, rio *rdb, int *error, rdbSaveInfo
 werr: /* Write error. */
     /* Set 'error' only if not already set by rdbSaveRio() call. */
     if (error && *error == 0) *error = errno;
+    if (compression_initialized) rdbCompressionFree(rdb, &compression_writer);
     stopSaving(0);
     return C_ERR;
 }
@@ -1587,10 +1618,16 @@ static int rdbSaveInternal(int req, const char *filename, rdbSaveInfo *rsi, int 
     int error = 0;
     int saved_errno;
     char *err_op; /* For a detailed log */
-    compressionAlgo streaming_algo = server.rdb_compression == RDB_COMPRESSION_LZ4_STREAM ? ALGO_LZ4 : ALGO_NONE;
+    compressionAlgo streaming_algo = ALGO_NONE;
+    if (rdbflags & RDBFLAGS_REPLICATION) {
+        /* Replication full sync compresses only when the cohort negotiated it
+         * (RDBFLAGS_REPL_COMPRESSED_SYNC) and repl-compression is enabled. */
+        if (rdbflags & RDBFLAGS_REPL_COMPRESSED_SYNC)
+            streaming_algo = server.repl_compression == REPL_COMPRESSION_LZ4_STREAM ? ALGO_LZ4 : ALGO_NONE;
+    } else {
+        streaming_algo = server.rdb_compression == RDB_COMPRESSION_LZ4_STREAM ? ALGO_LZ4 : ALGO_NONE;
+    }
     bool use_streaming_compression = streaming_algo != ALGO_NONE;
-    /* Replication full sync does not negotiate streaming compression yet. */
-    if (rdbflags & RDBFLAGS_REPLICATION) use_streaming_compression = false;
     streamWriter compression_writer;
     bool compression_initialized = false;
 
@@ -3987,6 +4024,7 @@ int rdbSaveToReplicasSockets(int req, int rdbver, rdbSaveInfo *rsi) {
      * Otherwise, use checksum for this RDB transfer.
      */
     int skip_rdb_checksum = 1;
+    bool all_compression_capable = true;
     /* Collect the connections of the replicas we want to transfer
      * the RDB to, which are in WAIT_BGSAVE_START state. */
     int connsnum = 0;
@@ -4007,6 +4045,8 @@ int rdbSaveToReplicasSockets(int req, int rdbver, rdbSaveInfo *rsi) {
             if (replicaRdbVersion(replica) != rdbver) continue;
 
             conns[connsnum++] = replica->conn;
+            /* Cohort-only AND: an unrelated online replica must not disable it. */
+            if (!(replica->repl_data->replica_capa & REPLICA_CAPA_COMPRESSION)) all_compression_capable = false;
             if (dual_channel) {
                 connSendTimeout(replica->conn, server.repl_timeout * 1000);
                 /* This replica uses diskless dual channel sync, hence we need
@@ -4026,6 +4066,13 @@ int rdbSaveToReplicasSockets(int req, int rdbver, rdbSaveInfo *rsi) {
         if (!connIsIntegrityChecked(replica->conn) || !(replica->repl_data->replica_capa & REPLICA_CAPA_SKIP_RDB_CHECKSUM))
             skip_rdb_checksum = 0;
     }
+
+    /* Compress the diskless RDB body only if the whole cohort advertised
+     * compression support and repl-compression is enabled. */
+    bool use_streaming_compression =
+        connsnum > 0 && all_compression_capable && server.repl_compression == REPL_COMPRESSION_LZ4_STREAM;
+    if (use_streaming_compression)
+        serverLog(LL_NOTICE, "Diskless full sync with compression: %s", compressionAlgoName(ALGO_LZ4));
 
     /* Create the child process. */
     if ((childpid = serverFork(CHILD_TYPE_RDB)) == 0) {
@@ -4050,7 +4097,7 @@ int rdbSaveToReplicasSockets(int req, int rdbver, rdbSaveInfo *rsi) {
 
         if (skip_rdb_checksum) rdb.flags |= RIO_FLAG_SKIP_RDB_CHECKSUM;
 
-        retval = rdbSaveRioWithEOFMark(req, rdbver, &rdb, NULL, rsi);
+        retval = rdbSaveRioWithEOFMark(req, rdbver, &rdb, NULL, rsi, use_streaming_compression);
         if (retval == C_OK && rioFlush(&rdb) == 0) retval = C_ERR;
 
         if (retval == C_OK) {

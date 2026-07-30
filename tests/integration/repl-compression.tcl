@@ -998,4 +998,158 @@ start_server {tags {"repl"} overrides {save "" repl-compression lz4-stream}} {
 }
 
 
+# ============================================================
+# Diskless full-sync RDB payload compression
+# ============================================================
+
+# A diskless full sync compresses the RDB payload as an LZ4 VCS frame over the
+# socket when the primary has repl-compression lz4-stream AND the attaching
+# replica advertised the compression capability (its own repl-compression is
+# lz4-stream). The $EOF:<mark> framing stays uncompressed so diskless transfer
+# boundaries are unchanged. We assert the primary's "with compression: lz4"
+# BGSAVE log, the replica's "Loading compressed RDB" log, and a digest match.
+
+# Compressible, multi-type dataset so an LZ4 frame is actually produced.
+proc fsc_populate {client prefix {n 300}} {
+    $client flushall
+    for {set i 0} {$i < $n} {incr i} {
+        $client set "${prefix}:str:$i" [string repeat "${prefix}:payload:$i " 16]
+    }
+    $client rpush "${prefix}:list" a b c d e f g h
+    $client sadd "${prefix}:set" alpha beta gamma delta
+    $client zadd "${prefix}:zset" 1 one 2 two 3 three 4 four
+    $client hset "${prefix}:hash" f1 v1 f2 [string repeat "${prefix}:hashval " 8]
+    $client xadd "${prefix}:stream" * f1 s1 f2 [string repeat "${prefix}:streamval " 4]
+    $client xadd "${prefix}:stream" * f1 s2 f2 tail
+}
+
+# Wait until the replica completes full sync, finishes loading the RDB, and its
+# dataset is byte-for-byte identical to the primary (digest + csvdump).
+proc fsc_assert_synced {primary replica {tag ""}} {
+    wait_for_sync $replica
+    wait_done_loading $replica
+    wait_for_condition 100 100 {
+        [status $replica master_link_status] eq "up" &&
+        [$primary debug digest] eq [$replica debug digest]
+    } else {
+        fail "replica digest mismatch after full sync $tag"
+    }
+    assert_equal [csvdump $primary] [csvdump $replica] "csvdump mismatch after full sync $tag"
+}
+
+start_server {overrides {save "" repl-compression lz4-stream repl-diskless-sync yes repl-diskless-sync-delay 0}} {
+    set primary [srv 0 client]
+    set primary_host [srv 0 host]
+    set primary_port [srv 0 port]
+
+    test {Diskless full sync compresses the RDB payload for a capable replica} {
+        set primary_loglines [count_log_lines 0]
+        fsc_populate $primary diskless-full-sync
+
+        start_server {overrides {save "" repl-compression lz4-stream repl-diskless-load swapdb}} {
+            set replica [srv 0 client]
+            set replica_loglines [count_log_lines 0]
+            $replica replicaof $primary_host $primary_port
+
+            fsc_assert_synced $primary $replica "Replica digest mismatch after compressed diskless full sync"
+
+            wait_for_log_messages -1 {"*target: replicas sockets*"} $primary_loglines 50 100
+            wait_for_log_messages -1 {"*Diskless full sync with compression: lz4*"} $primary_loglines 50 100
+            wait_for_log_messages 0 {"*Loading compressed RDB (algo=lz4) from primary*"} $replica_loglines 50 100
+
+            # The post-sync incremental stream still flows correctly.
+            $primary set diskless-full-sync:post after
+            wait_for_condition 50 100 {
+                [$replica get diskless-full-sync:post] eq "after"
+            } else {
+                fail "Replica did not receive post-sync write"
+            }
+
+            $replica replicaof no one
+        }
+    }
+
+    test {Diskless full sync compression works when the replica loads via disk first} {
+        set primary_loglines [count_log_lines 0]
+        fsc_populate $primary diskless-disk-load
+
+        start_server {overrides {save "" repl-compression lz4-stream repl-diskless-load disabled}} {
+            set replica [srv 0 client]
+            $replica replicaof $primary_host $primary_port
+
+            fsc_assert_synced $primary $replica \
+                "Replica digest mismatch after compressed diskless full sync loaded from disk"
+
+            wait_for_log_messages -1 {"*target: replicas sockets*"} $primary_loglines 50 100
+            wait_for_log_messages -1 {"*Diskless full sync with compression: lz4*"} $primary_loglines 50 100
+
+            $replica replicaof no one
+        }
+    }
+}
+
+# Dual-channel diskless full sync must also compress the RDB payload, which
+# exercises the capa-compression advertising added to the dual-channel
+# handshake.
+start_server {overrides {save "" repl-compression lz4-stream repl-diskless-sync yes repl-diskless-sync-delay 0 dual-channel-replication-enabled yes}} {
+    set primary [srv 0 client]
+    set primary_host [srv 0 host]
+    set primary_port [srv 0 port]
+
+    test {Dual-channel diskless full sync compresses the RDB payload} {
+        set primary_loglines [count_log_lines 0]
+        fsc_populate $primary dual-channel-diskless
+
+        start_server {overrides {save "" repl-compression lz4-stream repl-diskless-load swapdb dual-channel-replication-enabled yes}} {
+            set replica [srv 0 client]
+            set replica_loglines [count_log_lines 0]
+            $replica replicaof $primary_host $primary_port
+
+            fsc_assert_synced $primary $replica "Replica digest mismatch after compressed dual-channel full sync"
+
+            wait_for_log_messages -1 {"*using: dual-channel*"} $primary_loglines 50 100
+            wait_for_log_messages -1 {"*Diskless full sync with compression: lz4*"} $primary_loglines 50 100
+            wait_for_log_messages 0 {"*Loading compressed RDB (algo=lz4) from primary*"} $replica_loglines 50 100
+
+            $replica replicaof no one
+        }
+    }
+}
+
+# A mixed diskless cohort (one capable, one not) must fall back to a plaintext
+# RDB payload for all replicas, since the group-AND of capabilities clears the
+# compression capability.
+start_server {overrides {save "" repl-compression lz4-stream repl-diskless-sync yes repl-diskless-sync-delay 1000 repl-diskless-sync-max-replicas 2}} {
+    set primary [srv 0 client]
+    set primary_host [srv 0 host]
+    set primary_port [srv 0 port]
+
+    test {Mixed diskless cohort falls back to a plaintext RDB payload} {
+        set primary_loglines [count_log_lines 0]
+        fsc_populate $primary mixed-diskless
+
+        start_server {overrides {save "" repl-compression lz4-stream repl-diskless-load swapdb}} {
+            set replica_capable [srv 0 client]
+            set replica_capable_host [srv 0 host]
+
+            start_server {overrides {save "" repl-compression no repl-diskless-load swapdb}} {
+                set replica_plain [srv 0 client]
+
+                $replica_capable replicaof $primary_host $primary_port
+                $replica_plain replicaof $primary_host $primary_port
+
+                fsc_assert_synced $primary $replica_capable \
+                    "Capable replica digest mismatch after mixed diskless full sync"
+                fsc_assert_synced $primary $replica_plain \
+                    "Plain replica digest mismatch after mixed diskless full sync"
+
+                verify_no_log_message -1 "*with compression: lz4*" $primary_loglines
+
+                $replica_plain replicaof no one
+            }
+            $replica_capable replicaof no one
+        }
+    }
+}
+
 }
