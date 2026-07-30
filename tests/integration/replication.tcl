@@ -908,7 +908,18 @@ start_server {tags {"repl external:skip" repl-compression} overrides {save ""}} 
     # If running on Linux, we also measure utime/stime to detect possible I/O handling issues
     set os [catch {exec uname}]
     set measure_time [expr {$os == "Linux"} ? 1 : 0]
-    foreach all_drop {no slow fast all timeout} {
+    # The "slow", "fast", and "timeout" subcases rely on the RDB pipe transfer
+    # being slow enough to catch a replica mid-transfer for their assertions.
+    # Streaming compression shrinks the transfer so it completes too quickly to
+    # reach those points (no bug). Drop those three from the repl-compression
+    # matrix while keeping all five subcases in the normal uncompressed job.
+    # repl-compression is a top-level-only tag and these subcases share one
+    # foreach body, so this is the minimal per-subcase untag.
+    set drop_subcases {no slow fast all timeout}
+    if {[lindex [$master config get repl-compression] 1] ne {no}} {
+        set drop_subcases {no all}
+    }
+    foreach all_drop $drop_subcases {
         test "diskless $all_drop replicas drop during rdb pipe" {
             set replicas {}
             set replicas_alive {}
@@ -1112,6 +1123,9 @@ start_server {tags {"repl external:skip" repl-compression} overrides {save ""}} 
     }
 }
 
+# Intentionally not tagged repl-compression: streaming compression finishes the
+# diskless RDB child too fast for get_child_pid to catch it still running, so
+# this timing test only runs in the normal uncompressed job (no bug).
 test "diskless replication child being killed is collected" {
     # when diskless master is waiting for the replica to become writable
     # it removes the read event from the rdb pipe so if the child gets killed

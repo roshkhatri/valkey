@@ -88,7 +88,10 @@ start_server {tags {"dual-channel-replication external:skip" repl-compression}} 
     }
 }
 
-start_server {tags {"dual-channel-replication external:skip" repl-compression}} {
+# Not tagged repl-compression: this asserts the rdb transfer byte volume
+# (total_net_repl_output_bytes), which compression legitimately changes (fewer
+# wire bytes). Same rationale as the buffer-memory blocks below.
+start_server {tags {"dual-channel-replication external:skip"}} {
     set replica [srv 0 client]
     set replica_host [srv 0 host]
     set replica_port [srv 0 port]
