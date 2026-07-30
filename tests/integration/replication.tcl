@@ -5,7 +5,7 @@ proc log_file_matches {log pattern} {
     string match $pattern $content
 }
 
-start_server {tags {"repl network external:skip"}} {
+start_server {tags {"repl network external:skip" repl-compression}} {
     set slave [srv 0 client]
     set slave_host [srv 0 host]
     set slave_port [srv 0 port]
@@ -59,7 +59,7 @@ start_server {tags {"repl network external:skip"}} {
     }
 }
 
-start_server {tags {"repl external:skip"}} {
+start_server {tags {"repl external:skip" repl-compression}} {
     set A [srv 0 client]
     set A_host [srv 0 host]
     set A_port [srv 0 port]
@@ -226,7 +226,7 @@ start_server {tags {"repl external:skip"}} {
     }
 }
 
-start_server {tags {"repl external:skip"}} {
+start_server {tags {"repl external:skip" repl-compression}} {
     r set mykey foo
 
     start_server {} {
@@ -427,7 +427,7 @@ foreach mdl {no yes} dualchannel {no yes} {
     }
 }
 
-start_server {tags {"repl external:skip"} overrides {save {}}} {
+start_server {tags {"repl external:skip" repl-compression} overrides {save {}}} {
     set master [srv 0 client]
     set master_host [srv 0 host]
     set master_port [srv 0 port]
@@ -890,7 +890,7 @@ proc compute_cpu_usage {start end} {
 
 
 # test diskless rdb pipe with multiple replicas, which may drop half way
-start_server {tags {"repl external:skip"} overrides {save ""}} {
+start_server {tags {"repl external:skip" repl-compression} overrides {save ""}} {
     set master [srv 0 client]
     $master config set repl-diskless-sync yes
     $master config set repl-diskless-sync-delay 5
@@ -1470,7 +1470,7 @@ test {replica can handle EINTR if use diskless load} {
     }
 } {} {external:skip}
 
-start_server {tags {"repl" "external:skip"}} {
+start_server {tags {"repl" "external:skip" repl-compression}} {
     test "replica do not write the reply to the replication link - SYNC (_addReplyToBufferOrList)" {
         set rd [valkey_deferring_client]
         set lines [count_log_lines 0]
@@ -1552,7 +1552,7 @@ start_server {tags {"repl" "external:skip"}} {
     }
 }
 
-start_server {tags {"repl external:skip"}} {
+start_server {tags {"repl external:skip" repl-compression}} {
     set master [srv 0 client]
     set master_host [srv 0 host]
     set master_port [srv 0 port]
@@ -1640,7 +1640,7 @@ foreach dualchannel {yes no} {
     } {} {external:skip}
 }
 
-start_server {tags {"repl external:skip"}} {
+start_server {tags {"repl external:skip" repl-compression}} {
     set replica [srv 0 client]
     $replica set replica_key replica_value
 

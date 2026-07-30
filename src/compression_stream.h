@@ -8,6 +8,7 @@
 #define COMPRESSION_STREAM_H
 
 #include "compression.h"
+#include "sds.h"
 
 /* VCS envelope:
  *   [0..2] magic "VCS"
@@ -37,6 +38,8 @@
 
 /* Identifies an RDB payload in the envelope. */
 #define VCS_STREAM_RDB 0x01
+/* Identifies a replication stream payload in the envelope. */
+#define VCS_STREAM_REPL 0x02
 
 typedef int (*streamWriterWriteFn)(void *ctx, const uint8_t *data, size_t len);
 /* Returns >0 bytes read, 0 on EOF, -1 on error. Partial reads allowed. */
@@ -48,6 +51,7 @@ typedef struct {
     compressionAlgo algo;
     int level;
     bool codec_checksum_enabled;
+    uint8_t stream_kind; /* 0 selects VCS_STREAM_RDB. */
 } streamWriterConfig;
 
 typedef enum {
@@ -63,6 +67,8 @@ typedef struct streamWriter {
     size_t out_buf_size;
     streamWriterWriteFn write_cb;
     void *write_ctx;
+    sds *sink; /* When set, compress directly into *sink instead of out_buf + write_cb. */
+    uint8_t stream_kind;
     streamWriterState state;
 } streamWriter;
 
@@ -70,6 +76,9 @@ typedef struct streamWriter {
  * error. The writer pushes compressed bytes to write_cb. Errors are sticky:
  * later operations fail without emitting bytes. */
 int streamWriterInit(streamWriter *writer, const streamWriterConfig *cfg, streamWriterWriteFn write_cb, void *write_ctx);
+/* Redirect compressed output (envelope + frames) straight into *sink, bypassing
+ * the internal scratch buffer and write callback. */
+void streamWriterSetSink(streamWriter *writer, sds *sink);
 int streamWriterWrite(streamWriter *writer, const void *buf, size_t len);
 /* Emits codec-buffered bytes while leaving the frame open. */
 int streamWriterFlush(streamWriter *writer);
@@ -77,6 +86,10 @@ int streamWriterFlush(streamWriter *writer);
 int streamWriterFinish(streamWriter *writer);
 /* Releases resources without implicitly finalizing the frame. */
 void streamWriterFree(streamWriter *writer);
+
+/* Parse a complete VCS envelope, requiring the given stream kind. Returns 0
+ * and sets *algo on success, -1 on any mismatch. */
+int streamParseVcsEnvelope(const uint8_t *buf, size_t len, uint8_t expected_stream_kind, compressionAlgo *algo);
 
 /* ===== Reader ===== */
 

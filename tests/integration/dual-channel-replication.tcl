@@ -22,7 +22,7 @@ proc wait_and_resume_process idx {
     resume_process $pid
 }
 
-start_server {tags {"dual-channel-replication external:skip"}} {
+start_server {tags {"dual-channel-replication external:skip" repl-compression}} {
     set replica [srv 0 client]
     set replica_host [srv 0 host]
     set replica_port [srv 0 port]
@@ -88,7 +88,7 @@ start_server {tags {"dual-channel-replication external:skip"}} {
     }
 }
 
-start_server {tags {"dual-channel-replication external:skip"}} {
+start_server {tags {"dual-channel-replication external:skip" repl-compression}} {
     set replica [srv 0 client]
     set replica_host [srv 0 host]
     set replica_port [srv 0 port]
@@ -122,7 +122,7 @@ start_server {tags {"dual-channel-replication external:skip"}} {
     }
 }
 
-start_server {tags {"dual-channel-replication external:skip"}} {
+start_server {tags {"dual-channel-replication external:skip" repl-compression}} {
     set replica [srv 0 client]
     set replica_host [srv 0 host]
     set replica_port [srv 0 port]
@@ -210,7 +210,7 @@ start_server {tags {"dual-channel-replication external:skip"}} {
     }
 }
 
-start_server {tags {"dual-channel-replication external:skip"}} {
+start_server {tags {"dual-channel-replication external:skip" repl-compression}} {
     set replica [srv 0 client]
     set replica_host [srv 0 host]
     set replica_port [srv 0 port]
@@ -345,7 +345,7 @@ start_server {tags {"dual-channel-replication external:skip"}} {
     }
 }
 
-start_server {tags {"dual-channel-replication external:skip"}} {
+start_server {tags {"dual-channel-replication external:skip" repl-compression}} {
     set replica1 [srv 0 client]
     set replica1_host [srv 0 host]
     set replica1_port [srv 0 port]
@@ -479,7 +479,7 @@ start_server {tags {"dual-channel-replication external:skip"}} {
     }
 }
 
-start_server {tags {"dual-channel-replication external:skip"}} {
+start_server {tags {"dual-channel-replication external:skip" repl-compression}} {
     set replica [srv 0 client]
     set replica_host [srv 0 host]
     set replica_port [srv 0 port]
@@ -516,7 +516,7 @@ start_server {tags {"dual-channel-replication external:skip"}} {
     }
 }
 
-start_server {tags {"dual-channel-replication external:skip"}} {
+start_server {tags {"dual-channel-replication external:skip" repl-compression}} {
     set replica [srv 0 client]
     set replica_host [srv 0 host]
     set replica_port [srv 0 port]
@@ -581,7 +581,7 @@ start_server {tags {"dual-channel-replication external:skip"}} {
     }
 }
 
-start_server {tags {"dual-channel-replication external:skip"}} {
+start_server {tags {"dual-channel-replication external:skip" repl-compression}} {
     set replica1 [srv 0 client]
     set replica1_host [srv 0 host]
     set replica1_port [srv 0 port]
@@ -655,7 +655,7 @@ start_server {tags {"dual-channel-replication external:skip"}} {
     }
 }
 
-start_server {tags {"dual-channel-replication external:skip"}} {
+start_server {tags {"dual-channel-replication external:skip" repl-compression}} {
     set primary [srv 0 client]
     set primary_host [srv 0 host]
     set primary_port [srv 0 port]
@@ -717,7 +717,7 @@ start_server {tags {"dual-channel-replication external:skip"}} {
     }
 }
 
-start_server {tags {"dual-channel-replication external:skip"}} {
+start_server {tags {"dual-channel-replication external:skip" repl-compression}} {
     set primary [srv 0 client]
     set primary_host [srv 0 host]
     set primary_port [srv 0 port]
@@ -778,7 +778,7 @@ start_server {tags {"dual-channel-replication external:skip"}} {
     }
 }
 
-start_server {tags {"dual-channel-replication external:skip"}} {
+start_server {tags {"dual-channel-replication external:skip" repl-compression}} {
     set primary [srv 0 client]
     set primary_host [srv 0 host]
     set primary_port [srv 0 port]
@@ -858,7 +858,7 @@ start_server {tags {"dual-channel-replication external:skip"}} {
     $primary config set shutdown-timeout 0
 }
 
-start_server {tags {"dual-channel-replication external:skip"}} {
+start_server {tags {"dual-channel-replication external:skip" repl-compression}} {
     set primary [srv 0 client]
     set primary_host [srv 0 host]
     set primary_port [srv 0 port]
@@ -919,7 +919,7 @@ start_server {tags {"dual-channel-replication external:skip"}} {
     }
 }
 
-start_server {tags {"dual-channel-replication external:skip"}} {
+start_server {tags {"dual-channel-replication external:skip" repl-compression}} {
     set primary [srv 0 client]
     set primary_host [srv 0 host]
     set primary_port [srv 0 port]
@@ -1009,7 +1009,7 @@ start_server {tags {"dual-channel-replication external:skip"}} {
 }
 
 
-start_server {tags {"dual-channel-replication external:skip"}} {
+start_server {tags {"dual-channel-replication external:skip" repl-compression}} {
     set primary [srv 0 client]
     set primary_host [srv 0 host]
     set primary_port [srv 0 port]
@@ -1134,7 +1134,7 @@ start_server {tags {"dual-channel-replication external:skip"}} {
     }
 }
 
-start_server {tags {"dual-channel-replication external:skip"}} {
+start_server {tags {"dual-channel-replication external:skip" repl-compression}} {
     set primary [srv 0 client]
     set primary_host [srv 0 host]
     set primary_port [srv 0 port]
@@ -1185,7 +1185,7 @@ start_server {tags {"dual-channel-replication external:skip"}} {
     }
 }
 
-start_server {tags {"dual-channel-replication external:skip"}} {
+start_server {tags {"dual-channel-replication external:skip" repl-compression}} {
     set primary [srv 0 client]
     set primary_host [srv 0 host]
     set primary_port [srv 0 port]
@@ -1249,7 +1249,7 @@ start_server {tags {"dual-channel-replication external:skip"}} {
     }
 }
 
-start_server {tags {"dual-channel-replication external:skip"}} {
+start_server {tags {"dual-channel-replication external:skip" repl-compression}} {
     set primary [srv 0 client]
     set primary_host [srv 0 host]
     set primary_port [srv 0 port]

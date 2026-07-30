@@ -181,6 +181,10 @@ configEnum rdb_compression_enum[] = {{"no", RDB_COMPRESSION_NO},
                                      {"lz4-stream", RDB_COMPRESSION_LZ4_STREAM},
                                      {NULL, 0}};
 
+configEnum repl_compression_enum[] = {{"no", REPL_COMPRESSION_NO},
+                                      {"lz4-stream", REPL_COMPRESSION_LZ4_STREAM},
+                                      {NULL, 0}};
+
 /* Output buffer limits presets. */
 clientBufferLimitsConfig clientBufferLimitsDefaults[CLIENT_TYPE_OBUF_COUNT] = {
     {0, 0, 0},                                 /* normal */
@@ -866,6 +870,10 @@ static dict *matchPatternsToConfigs(robj **patterns, int pattern_count) {
  * CONFIG SET implementation
  *----------------------------------------------------------------------------*/
 
+/* Set by the repl-compression apply callback. Reconnects are irreversible, so
+ * reconciliation is deferred until the whole CONFIG SET commits. */
+static int repl_compression_reconcile_pending = 0;
+
 void configSetCommand(client *c) {
     const char *errstr = NULL;
     const char *invalid_arg_name = NULL;
@@ -983,6 +991,10 @@ void configSetCommand(client *c) {
         }
     }
 
+    /* Reset deferred side-effect state before applies run; apply callbacks set
+     * it, and it is consumed only on a successful commit below. */
+    repl_compression_reconcile_pending = 0;
+
     /* Apply all configs after being set */
     for (i = 0; i < config_count && apply_fns[i] != NULL; i++) {
         if (!apply_fns[i](&errstr)) {
@@ -1005,6 +1017,11 @@ void configSetCommand(client *c) {
     ValkeyModuleConfigChangeV1 cc = {.num_changes = config_count, .config_names = config_names};
     moduleFireServerEvent(VALKEYMODULE_EVENT_CONFIG, VALKEYMODULE_SUBEVENT_CONFIG_CHANGE, &cc);
     addReply(c, shared.ok);
+    /* CONFIG SET committed: now safe to run deferred irreversible side effects. */
+    if (repl_compression_reconcile_pending) {
+        repl_compression_reconcile_pending = 0;
+        reconcileReplicaCompression();
+    }
     goto end;
 
 err:
@@ -2658,6 +2675,14 @@ static int updateJemallocBgThread(const char **err) {
     return 1;
 }
 
+static int updateReplCompression(const char **err) {
+    UNUSED(err);
+    /* Record intent only; configSetCommand reconciles after the command commits,
+     * so a rolled-back CONFIG SET disconnects nothing. */
+    repl_compression_reconcile_pending = 1;
+    return 1;
+}
+
 static int updateReplBacklogSize(const char **err) {
     UNUSED(err);
     resizeReplicationBacklog();
@@ -3341,12 +3366,14 @@ static int isValidDbHashSeed(sds val, const char **err) {
     return 1;
 }
 
+
 standardConfig static_configs[] = {
     /* Bool configs */
     createBoolConfig("rdbchecksum", NULL, IMMUTABLE_CONFIG, server.rdb_checksum, 1, NULL, NULL),
     createBoolConfig("daemonize", NULL, IMMUTABLE_CONFIG, server.daemonize, 0, NULL, NULL),
     createBoolConfig("always-show-logo", NULL, IMMUTABLE_CONFIG, server.always_show_logo, 0, NULL, NULL),
     createBoolConfig("protected-mode", NULL, MODIFIABLE_CONFIG, server.protected_mode, 1, NULL, NULL),
+    createEnumConfig("repl-compression", NULL, MODIFIABLE_CONFIG, repl_compression_enum, server.repl_compression, REPL_COMPRESSION_NO, NULL, updateReplCompression),
     createBoolConfig("rdb-del-sync-files", NULL, MODIFIABLE_CONFIG, server.rdb_del_sync_files, 0, NULL, NULL),
     createBoolConfig("activerehashing", NULL, MODIFIABLE_CONFIG, server.activerehashing, 1, NULL, NULL),
     createBoolConfig("stop-writes-on-bgsave-error", NULL, MODIFIABLE_CONFIG, server.stop_writes_on_bgsave_err, 1, NULL, NULL),

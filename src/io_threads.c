@@ -321,6 +321,9 @@ static void *IOThreadMain(void *myid) {
                 case JOB_REQ_POLL:
                     ioThreadPoll((aeEventLoop *)data);
                     break;
+                case JOB_REQ_WRITE_CLIENT:
+                    ioThreadWriteToClient((client *)data);
+                    break;
                 default:
                     serverPanic("Invalid SPSC job type: %d", type);
                 }
@@ -506,6 +509,9 @@ int trySendReadToIOThreads(client *c) {
     if (c->io_write_state == CLIENT_PENDING_IO) return C_OK;
     /* For simplicity, don't offload replica clients reads as read traffic from replica is negligible */
     if (getClientType(c) == CLIENT_TYPE_REPLICA) return C_ERR;
+    /* A live replication decoder must run on the main thread; the IO-thread
+     * read path does not decode. Destroyed once the probe resolves to plaintext. */
+    if (c->flag.primary && server.repl_decompressor) return C_ERR;
     /* With Lua debug client we may call connWrite directly in the main thread */
     if (c->flag.lua_debug) return C_ERR;
     /* For simplicity let the main-thread handle the blocked clients */

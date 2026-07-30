@@ -2,7 +2,7 @@ set ::global_overrides {}
 set ::tags {}
 set ::valgrind_errors {}
 # Tags that are only allowed at the top level (not in nested blocks)
-set ::toplevel_only_tags {large-memory needs:other-server compatible-redis network}
+set ::toplevel_only_tags {large-memory needs:other-server compatible-redis network repl-compression}
 
 proc start_server_error {executable config_file error} {
     set err {}

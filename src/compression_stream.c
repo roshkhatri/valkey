@@ -5,6 +5,7 @@
  */
 
 #include "compression_stream.h"
+#include "serverassert.h"
 #include "zmalloc.h"
 #include <limits.h>
 #include <string.h>
@@ -24,9 +25,8 @@ static bool vcsHasMagicPrefix(const uint8_t *buf, size_t len) {
     return memcmp(buf, VCS_MAGIC, n) == 0;
 }
 
-static int writeVcsEnvelope(streamWriterWriteFn write_cb,
-                            void *ctx,
-                            compressionAlgo algo) {
+/* Fill the 7-byte VCS envelope. Returns -1 if algo has no wire codec id. */
+static int buildVcsEnvelope(uint8_t *out, compressionAlgo algo, uint8_t stream_kind) {
     uint8_t codec;
     switch (algo) {
     case ALGO_LZ4:
@@ -43,14 +43,24 @@ static int writeVcsEnvelope(streamWriterWriteFn write_cb,
         [VCS_OFFSET_VERSION] = VCS_VERSION,
         [VCS_OFFSET_CODEC] = codec,
         [VCS_OFFSET_RESERVED] = 0,
-        [VCS_OFFSET_STREAM_KIND] = VCS_STREAM_RDB,
+        [VCS_OFFSET_STREAM_KIND] = stream_kind,
     };
+    memcpy(out, envelope, VCS_ENVELOPE_SIZE);
+    return 0;
+}
+
+static int writeVcsEnvelope(streamWriterWriteFn write_cb,
+                            void *ctx,
+                            compressionAlgo algo,
+                            uint8_t stream_kind) {
+    uint8_t envelope[VCS_ENVELOPE_SIZE];
+    if (buildVcsEnvelope(envelope, algo, stream_kind) != 0) return -1;
     return write_cb(ctx, envelope, VCS_ENVELOPE_SIZE) == 0 ? 0 : -1;
 }
 
 /* Reject a nonzero reserved byte so a future envelope extension fails loudly
  * rather than being silently misinterpreted. */
-static int readVcsEnvelope(const uint8_t *buf, compressionAlgo *algo) {
+static int readVcsEnvelope(const uint8_t *buf, uint8_t expected_stream_kind, compressionAlgo *algo) {
     if (buf[VCS_OFFSET_VERSION] != VCS_VERSION) return -1;
 
     switch (buf[VCS_OFFSET_CODEC]) {
@@ -61,8 +71,13 @@ static int readVcsEnvelope(const uint8_t *buf, compressionAlgo *algo) {
         return -1;
     }
     if (buf[VCS_OFFSET_RESERVED] != 0) return -1;
-    if (buf[VCS_OFFSET_STREAM_KIND] != VCS_STREAM_RDB) return -1;
+    if (buf[VCS_OFFSET_STREAM_KIND] != expected_stream_kind) return -1;
     return 0;
+}
+
+int streamParseVcsEnvelope(const uint8_t *buf, size_t len, uint8_t expected_stream_kind, compressionAlgo *algo) {
+    if (len < VCS_ENVELOPE_SIZE || !vcsHasMagicPrefix(buf, VCS_MAGIC_SIZE)) return -1;
+    return readVcsEnvelope(buf, expected_stream_kind, algo);
 }
 
 /* ===== Streaming Writer ===== */
@@ -73,6 +88,7 @@ int streamWriterInit(streamWriter *writer, const streamWriterConfig *cfg, stream
     memset(writer, 0, sizeof(*writer));
     writer->write_cb = write_cb;
     writer->write_ctx = write_ctx;
+    writer->stream_kind = cfg->stream_kind == 0 ? VCS_STREAM_RDB : cfg->stream_kind;
 
     if (streamCompressorInit(&writer->compressor, cfg->algo, cfg->level,
                              cfg->codec_checksum_enabled) != 0) {
@@ -82,12 +98,27 @@ int streamWriterInit(streamWriter *writer, const streamWriterConfig *cfg, stream
     return 0;
 }
 
+void streamWriterSetSink(streamWriter *writer, sds *sink) {
+    /* Sink must be installed before the frame starts, so all output lands in
+     * one destination. */
+    assert(writer->state == STREAM_WRITER_STATE_INITIAL);
+    writer->sink = sink;
+}
+
 /* Envelope is emitted lazily so a writer that's created but never written
  * doesn't leave a stub envelope on the sink. */
 static int streamWriterEnsureEnvelope(streamWriter *writer) {
     if (writer->state == STREAM_WRITER_STATE_ACTIVE) return 0;
     if (writer->state != STREAM_WRITER_STATE_INITIAL) return -1;
-    if (writeVcsEnvelope(writer->write_cb, writer->write_ctx, writer->compressor.algo) != 0) {
+    if (writer->sink) {
+        uint8_t envelope[VCS_ENVELOPE_SIZE];
+        if (buildVcsEnvelope(envelope, writer->compressor.algo, writer->stream_kind) != 0) {
+            writer->state = STREAM_WRITER_STATE_ERROR;
+            return -1;
+        }
+        *writer->sink = sdscatlen(*writer->sink, (char *)envelope, VCS_ENVELOPE_SIZE);
+    } else if (writeVcsEnvelope(writer->write_cb, writer->write_ctx, writer->compressor.algo,
+                                writer->stream_kind) != 0) {
         writer->state = STREAM_WRITER_STATE_ERROR;
         return -1;
     }
@@ -95,10 +126,34 @@ static int streamWriterEnsureEnvelope(streamWriter *writer) {
     return 0;
 }
 
+/* Sink path: compress directly into the caller's sds tail. */
+static int streamWriterFeedToSink(streamWriter *writer,
+                                  const uint8_t *input,
+                                  size_t input_len,
+                                  compressFlushMode flush_mode) {
+    const size_t bound = streamCompressorOutputBound(&writer->compressor, input_len);
+    if (bound == 0) {
+        writer->state = STREAM_WRITER_STATE_ERROR;
+        return -1;
+    }
+    *writer->sink = sdsMakeRoomFor(*writer->sink, bound);
+    const ssize_t compressed = streamCompressorFeed(&writer->compressor,
+                                                    (uint8_t *)(*writer->sink) + sdslen(*writer->sink),
+                                                    sdsavail(*writer->sink), input, input_len, flush_mode);
+    if (compressed < 0) {
+        writer->state = STREAM_WRITER_STATE_ERROR;
+        return -1;
+    }
+    sdsIncrLen(*writer->sink, (size_t)compressed);
+    return 0;
+}
+
 static int streamWriterFeedAndWrite(streamWriter *writer,
                                     const uint8_t *input,
                                     size_t input_len,
                                     compressFlushMode flush_mode) {
+    if (writer->sink) return streamWriterFeedToSink(writer, input, input_len, flush_mode);
+
     const size_t needed = streamCompressorOutputBound(&writer->compressor, input_len);
     if (needed > writer->out_buf_size) {
         writer->out_buf = zrealloc(writer->out_buf, needed);
@@ -204,7 +259,7 @@ int streamReaderInit(streamReader *reader, const streamReaderConfig *cfg, stream
         }
 
         if (reader->probe.header_len == VCS_ENVELOPE_SIZE) {
-            if (readVcsEnvelope(reader->probe.header, &algo) != 0) {
+            if (readVcsEnvelope(reader->probe.header, VCS_STREAM_RDB, &algo) != 0) {
                 streamReaderSetError(reader, STREAM_READER_ERROR_INCOMPATIBLE);
                 return -1;
             }
