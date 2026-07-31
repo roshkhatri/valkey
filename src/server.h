@@ -3329,7 +3329,6 @@ int rewriteAppendOnlyFileBackground(void);
 int loadAppendOnlyFiles(aofManifest *am);
 void stopAppendOnly(void);
 int startAppendOnly(void);
-bool aofCanReuseRdbAsBase(rdbLoadFormat loaded_format);
 int restartAOFWithSyncRdb(rdbLoadFormat loaded_format);
 void backgroundRewriteDoneHandler(int exitcode, int bysignal);
 void killAppendOnlyChild(void);

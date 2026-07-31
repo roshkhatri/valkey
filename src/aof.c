@@ -1004,10 +1004,6 @@ int startAppendOnly(void) {
     return C_OK;
 }
 
-bool aofCanReuseRdbAsBase(rdbLoadFormat loaded_format) {
-    return loaded_format == RDB_LOAD_FORMAT_PLAIN;
-}
-
 /* Try to restart AOF after replica full sync by adopting `server.rdb_filename`
  * as the new BASE file (RDB preamble mode), avoiding a redundant AOFRW.
  * Returns C_OK on success; on C_ERR caller should fallback to
@@ -1023,7 +1019,7 @@ int restartAOFWithSyncRdb(rdbLoadFormat loaded_format) {
     sds new_incr_filepath = NULL;
     aofManifest *temp_am = NULL;
 
-    if (!aofCanReuseRdbAsBase(loaded_format)) {
+    if (loaded_format != RDB_LOAD_FORMAT_PLAIN) {
         serverLog(LL_NOTICE,
                   "Sync RDB file %s has %s physical format, falling back to BGREWRITEAOF instead of reusing it as an AOF base",
                   server.rdb_filename,

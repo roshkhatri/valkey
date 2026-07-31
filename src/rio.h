@@ -78,9 +78,9 @@ struct _rio {
     /* number of bytes read or written */
     size_t processed_bytes;
 
-    /* Number of bytes read or written by the concrete backend. This differs
-     * from processed_bytes when a stream writer or reader transforms data. */
-    size_t backend_processed_bytes;
+    /* Number of bytes read or written on the stream's concrete I/O path. This
+     * differs from processed_bytes when a stream transforms data. */
+    size_t stream_processed_bytes;
 
     /* Maximum size of one backend operation, not a total byte limit. Zero
      * means unlimited. rioRead/rioWrite split larger requests into chunks. */
@@ -161,7 +161,7 @@ static inline size_t rioWriteRaw(rio *r, const void *buf, size_t len) {
         }
         buf = (const char *)buf + bytes_to_write;
         len -= bytes_to_write;
-        r->backend_processed_bytes += bytes_to_write;
+        r->stream_processed_bytes += bytes_to_write;
     }
     return 1;
 }
@@ -196,7 +196,7 @@ static inline size_t rioRead(rio *r, void *buf, size_t len) {
                 r->flags |= RIO_FLAG_READ_ERROR;
                 return 0;
             }
-            r->backend_processed_bytes += bytes_to_read;
+            r->stream_processed_bytes += bytes_to_read;
         }
         if (r->update_cksum) r->update_cksum(r, buf, bytes_to_read);
         buf = (char *)buf + bytes_to_read;
@@ -211,7 +211,7 @@ static inline off_t rioTell(rio *r) {
      * save progress. Readers report physical bytes consumed from the backend,
      * which drives file-loading progress for decoded streams. */
     if (r->stream_writer) return (off_t)r->processed_bytes;
-    if (r->stream_reader) return (off_t)r->backend_processed_bytes;
+    if (r->stream_reader) return (off_t)r->stream_processed_bytes;
     return r->tell(r);
 }
 

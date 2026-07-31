@@ -75,18 +75,6 @@ static size_t rioBufferRead(rio *r, void *buf, size_t len) {
     return 1;
 }
 
-/* Partial-read variant: returns bytes read (may be less than len), 0 on EOF. */
-static ssize_t rioBufferReadSome(rio *r, void *buf, size_t len) {
-    size_t buflen = sdslen(r->io.buffer.ptr);
-    if (r->io.buffer.pos < 0 || (size_t)r->io.buffer.pos >= buflen) return 0;
-
-    size_t avail = buflen - (size_t)r->io.buffer.pos;
-    size_t got = avail < len ? avail : len;
-    memcpy(buf, r->io.buffer.ptr + r->io.buffer.pos, got);
-    r->io.buffer.pos += got;
-    return (ssize_t)got;
-}
-
 /* Returns read/write position in buffer. */
 static off_t rioBufferTell(rio *r) {
     return r->io.buffer.pos;
@@ -104,7 +92,7 @@ static const rio rioBufferIO = {
     .write = rioBufferWrite,
     .tell = rioBufferTell,
     .flush = rioBufferFlush,
-    .read_some = rioBufferReadSome,
+    .read_some = NULL,
     .update_cksum = NULL,
     .cksum = 0,
     .flags = 0,
@@ -141,7 +129,7 @@ static size_t rioFileWrite(rio *r, const void *buf, size_t len) {
         if (r->io.file.buffered >= r->io.file.autosync) {
             fflush(r->io.file.fp);
 
-            size_t processed = r->backend_processed_bytes + nwritten;
+            size_t processed = r->stream_processed_bytes + nwritten;
             serverAssert(processed % r->io.file.autosync == 0);
             serverAssert(r->io.file.buffered == r->io.file.autosync);
 
@@ -237,88 +225,55 @@ static size_t rioConnWrite(rio *r, const void *buf, size_t len) {
     return 0; /* Error, this target does not yet support writing. */
 }
 
-/* Fill the conn read buffer until at least min_read bytes are available.
- * When strict_limit is set, returns -1 if the request exceeds read_limit.
- * Returns 1 on success, 0 on EOF, -1 on error. */
-static int rioConnFillBuffer(rio *r, size_t min_read, bool strict_limit) {
+/* Returns 1 or 0 for success/failure. */
+static size_t rioConnRead(rio *r, void *buf, size_t len) {
     size_t avail = sdslen(r->io.conn.buf) - r->io.conn.pos;
 
-    if (strict_limit && r->io.conn.read_limit != 0 &&
-        r->io.conn.read_limit < r->io.conn.read_so_far + min_read) {
-        errno = EOVERFLOW;
-        return -1;
-    }
-
     /* If the buffer is too small for the entire request: realloc. */
-    if (sdslen(r->io.conn.buf) + sdsavail(r->io.conn.buf) < min_read)
-        r->io.conn.buf = sdsMakeRoomFor(r->io.conn.buf, min_read - sdslen(r->io.conn.buf));
+    if (sdslen(r->io.conn.buf) + sdsavail(r->io.conn.buf) < len)
+        r->io.conn.buf = sdsMakeRoomFor(r->io.conn.buf, len - sdslen(r->io.conn.buf));
 
     /* If the remaining unused buffer is not large enough: memmove so that we
      * can read the rest. */
-    if (min_read > avail && sdsavail(r->io.conn.buf) < min_read - avail) {
+    if (len > avail && sdsavail(r->io.conn.buf) < len - avail) {
         sdsrange(r->io.conn.buf, r->io.conn.pos, -1);
         r->io.conn.pos = 0;
     }
 
-    while (avail < min_read) {
-        size_t needs = min_read - avail;
+    /* Make sure the caller didn't request to read past the limit.
+     * If they didn't we'll buffer till the limit, if they did, we'll
+     * return an error. */
+    if (r->io.conn.read_limit != 0 && r->io.conn.read_limit < r->io.conn.read_so_far + len) {
+        errno = EOVERFLOW;
+        return 0;
+    }
+
+    /* If we don't already have all the data in the sds, read more */
+    while (len > sdslen(r->io.conn.buf) - r->io.conn.pos) {
+        size_t buffered = sdslen(r->io.conn.buf) - r->io.conn.pos;
+        size_t needs = len - buffered;
         /* Read either what's missing, or PROTO_IOBUF_LEN, the bigger of
          * the two. */
         size_t toread = needs < PROTO_IOBUF_LEN ? PROTO_IOBUF_LEN : needs;
         if (toread > sdsavail(r->io.conn.buf)) toread = sdsavail(r->io.conn.buf);
-        if (r->io.conn.read_limit != 0 &&
-            r->io.conn.read_so_far + avail + toread > r->io.conn.read_limit) {
-            toread = r->io.conn.read_limit - r->io.conn.read_so_far - avail;
+        if (r->io.conn.read_limit != 0 && r->io.conn.read_so_far + buffered + toread > r->io.conn.read_limit) {
+            toread = r->io.conn.read_limit - r->io.conn.read_so_far - buffered;
         }
-        if (toread == 0) return 0;
-
         int retval = connRead(r->io.conn.conn, (char *)r->io.conn.buf + sdslen(r->io.conn.buf), toread);
         if (retval == 0) {
             return 0;
         } else if (retval < 0) {
             if (connLastErrorRetryable(r->io.conn.conn)) continue;
             if (errno == EWOULDBLOCK) errno = ETIMEDOUT;
-            return -1;
+            return 0;
         }
         sdsIncrLen(r->io.conn.buf, retval);
-        avail = sdslen(r->io.conn.buf) - r->io.conn.pos;
     }
-
-    return 1;
-}
-
-/* Partial-read variant: returns bytes read, 0 on EOF, -1 on error. */
-static ssize_t rioConnReadSome(rio *r, void *buf, size_t len) {
-    size_t avail = sdslen(r->io.conn.buf) - r->io.conn.pos;
-
-    if (r->io.conn.read_limit != 0 && r->io.conn.read_so_far >= r->io.conn.read_limit) {
-        return 0;
-    }
-    if (avail == 0) {
-        int fill_rc = rioConnFillBuffer(r, 1, false);
-        if (fill_rc <= 0) return fill_rc;
-        avail = sdslen(r->io.conn.buf) - r->io.conn.pos;
-    }
-    if (r->io.conn.read_limit != 0) {
-        size_t remaining = r->io.conn.read_limit - r->io.conn.read_so_far;
-        if (len > remaining) len = remaining;
-    }
-
-    size_t got = avail < len ? avail : len;
-    memcpy(buf, (char *)r->io.conn.buf + r->io.conn.pos, got);
-    r->io.conn.read_so_far += got;
-    r->io.conn.pos += got;
-    return (ssize_t)got;
-}
-
-/* Returns 1 or 0 for success/failure. */
-static size_t rioConnRead(rio *r, void *buf, size_t len) {
-    if (rioConnFillBuffer(r, len, true) != 1) return 0;
 
     memcpy(buf, (char *)r->io.conn.buf + r->io.conn.pos, len);
     r->io.conn.read_so_far += len;
     r->io.conn.pos += len;
-    return 1;
+    return len;
 }
 
 /* Returns read/write position in file. */
@@ -339,7 +294,7 @@ static const rio rioConnIO = {
     .write = rioConnWrite,
     .tell = rioConnTell,
     .flush = rioConnFlush,
-    .read_some = rioConnReadSome,
+    .read_some = NULL,
     .update_cksum = NULL,
     .cksum = 0,
     .flags = 0,
@@ -566,7 +521,7 @@ ssize_t rioReadRawPartial(rio *r, void *buf, size_t len) {
         return -1;
     }
     if (got > 0) {
-        r->backend_processed_bytes += (size_t)got;
+        r->stream_processed_bytes += (size_t)got;
     }
     return got;
 }

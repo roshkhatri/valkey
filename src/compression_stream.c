@@ -272,6 +272,7 @@ static int streamReaderFillDecompressedBuf(streamReader *reader) {
     reader->decompressed_buf_len = 0;
 
     while (written < reader->buffer_size) {
+        /* First consume compressed bytes already buffered from the source. */
         while (reader->compressed_buf_len > 0 && written < reader->buffer_size) {
             size_t consumed = 0;
             size_t feed_len = reader->compressed_buf_len;
@@ -299,6 +300,8 @@ static int streamReaderFillDecompressedBuf(streamReader *reader) {
         if (written >= reader->buffer_size || reader->decompressor.frame_done)
             break;
 
+        /* Move any unconsumed suffix to the start of the input buffer before
+         * asking the source for more bytes. */
         size_t read_size = reader->buffer_size - reader->compressed_buf_pos - reader->compressed_buf_len;
         if (read_size == 0 && reader->compressed_buf_pos > 0) {
             memmove(reader->compressed_buf, reader->compressed_buf + reader->compressed_buf_pos,
@@ -313,10 +316,13 @@ static int streamReaderFillDecompressedBuf(streamReader *reader) {
             goto done;
         }
 
+        /* Limit the source read to the codec's preferred input size so it does
+         * not read past the current frame into trailing data. */
         size_t input_hint = reader->decompressor.input_hint;
         if (input_hint > 0 && read_size > input_hint) read_size = input_hint;
         if (read_size > (size_t)SSIZE_MAX) read_size = (size_t)SSIZE_MAX;
 
+        /* Refill the compressed-input buffer, then retry decoding. */
         ssize_t got = reader->read_cb(
             reader->read_ctx,
             reader->compressed_buf + reader->compressed_buf_pos + reader->compressed_buf_len,
