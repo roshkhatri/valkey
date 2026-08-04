@@ -94,6 +94,7 @@ typedef enum {
     STREAM_READER_ERROR_INCOMPATIBLE = 2,
     STREAM_READER_ERROR_CORRUPT = 3,
     STREAM_READER_ERROR_INTERNAL = 4,
+    STREAM_READER_ERROR_TRUNCATED = 5, /* Clean EOF before frame end: recoverable short read, not corruption. */
 } streamReaderErrorKind;
 
 typedef enum {

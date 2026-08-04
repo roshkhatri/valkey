@@ -1280,10 +1280,63 @@ TEST(CompressionTest, streamReaderRejectsTruncatedFrameTrailer) {
 
     uint8_t out[payload_len];
     ASSERT_EQ(streamReaderRead(&r, out, payload_len), (ssize_t)payload_len);
-    EXPECT_EQ(memcmp(out, payload, payload_len), 0);
-    ASSERT_LT(streamReaderRead(&r, out, 1), 0) << "EOF before frame end should be treated as corruption";
+    ASSERT_EQ(memcmp(out, payload, payload_len), 0);
+    ASSERT_LT(streamReaderRead(&r, out, 1), 0) << "EOF before frame end must still fail the read";
+    ASSERT_EQ(r.error_kind, STREAM_READER_ERROR_TRUNCATED)
+        << "EOF before frame end is a recoverable truncation (e.g. a dropped connection), not codec corruption";
+
+    streamReaderFree(&r);
+    dynamicBufFree(&db);
+}
+
+TEST(CompressionTest, streamReaderRejectsCorruptedFrameBody) {
+    const size_t payload_len = 256;
+    uint8_t payload[payload_len];
+    for (size_t i = 0; i < payload_len; i++) {
+        payload[i] = (uint8_t)(i & 0xFF);
+    }
+
+    DynamicBuf db;
+    dynamicBufInit(&db);
+
+    /* The stream writer always enables the LZ4 block checksum, so the frame
+     * carries a per-block checksum that makes in-frame corruption
+     * deterministically detectable. */
+    streamWriter w;
+    ASSERT_EQ(streamWriterInit(&w, ALGO_LZ4, true, emitToDynamicBuf, &db), C_OK);
+    ASSERT_EQ(streamWriterWrite(&w, payload, payload_len), C_OK);
+    ASSERT_EQ(streamWriterFinish(&w), C_OK);
+    streamWriterFree(&w);
+
+    size_t frame_len = sdslen((const char *)db.data);
+    ASSERT_GT(frame_len, (size_t)VCS_ENVELOPE_SIZE + 16);
+
+    /* Flip a byte in the middle of the buffer: past the VCS envelope and the LZ4
+     * frame header (so it lands in checksum-covered compressed block data), and
+     * before the trailing block checksum / end mark. */
+    size_t flip_off = (VCS_ENVELOPE_SIZE + frame_len) / 2;
+    ASSERT_GT(flip_off, (size_t)VCS_ENVELOPE_SIZE);
+    ASSERT_LT(flip_off, frame_len);
+    db.data[flip_off] ^= 0xFF;
+
+    MemReader mr = {};
+    mr.data = db.data;
+    mr.len = frame_len;
+    mr.max_chunk = 7;
+    streamReaderConfig rcfg = makeReaderConfig(false, STREAM_READER_BUFFER_SIZE_MIN, false);
+    streamReader r;
+    ASSERT_EQ(streamReaderInit(&r, &rcfg, memReaderRead, &mr, NULL), C_OK);
+
+    /* Drain until the codec latches the failure. The error may surface on the
+     * first read or a follow-up read depending on how much the codec buffers
+     * before validating the block checksum; either way the read must fail. */
+    uint8_t out[payload_len];
+    ssize_t n = streamReaderRead(&r, out, payload_len);
+    while (n > 0) n = streamReaderRead(&r, out, payload_len);
+    ASSERT_LT(n, 0) << "in-frame corruption must fail the read";
     ASSERT_EQ(r.error_kind, STREAM_READER_ERROR_CORRUPT)
-        << "truncated compressed frame should latch corruption, not I/O";
+        << "a mutated frame body is genuine codec corruption (replica aborts the load), "
+           "distinct from a recoverable truncation that triggers a resync";
 
     streamReaderFree(&r);
     dynamicBufFree(&db);
