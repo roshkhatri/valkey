@@ -1559,15 +1559,16 @@ werr: /* Write error. */
 }
 
 static int rdbCompressionWrite(void *ctx, const uint8_t *data, size_t len) {
-    return rioWriteRaw((rio *)ctx, data, len) ? 0 : -1;
+    return rioWriteRaw((rio *)ctx, data, len) ? C_OK : C_ERR;
 }
 
 static int rdbCompressionInit(rio *rdb,
                               streamWriter *writer,
-                              compressionAlgo algo) {
-    if (streamWriterInit(writer, algo, rdbCompressionWrite, rdb) != 0) return -1;
+                              compressionAlgo algo,
+                              bool codec_checksum) {
+    if (streamWriterInit(writer, algo, codec_checksum, rdbCompressionWrite, rdb) == C_ERR) return C_ERR;
     rioAttachStreamWriter(rdb, writer);
-    return 0;
+    return C_OK;
 }
 
 static void rdbCompressionFree(rio *rdb, streamWriter *writer) {
@@ -1618,7 +1619,7 @@ static int rdbSaveInternal(int req, const char *filename, rdbSaveInfo *rsi, int 
      * rioWriteRaw lets streamWriter reach the backend without recursively
      * compressing its own output. */
     if (use_streaming_compression) {
-        if (rdbCompressionInit(&rdb, &compression_writer, streaming_algo) != 0) {
+        if (rdbCompressionInit(&rdb, &compression_writer, streaming_algo, server.rdb_checksum) == C_ERR) {
             errno = EIO; /* Compressor init failure, set errno for werr log */
             err_op = "rdbCompressionInit";
             goto werr;
@@ -1641,7 +1642,7 @@ static int rdbSaveInternal(int req, const char *filename, rdbSaveInfo *rsi, int 
 
     /* Finalize the compression frame before flushing to disk. */
     if (compression_initialized) {
-        if (streamWriterFinish(&compression_writer) != 0) {
+        if (streamWriterFinish(&compression_writer) == C_ERR) {
             rdb.flags |= RIO_FLAG_WRITE_ERROR;
             errno = EIO; /* Compression finalization failure */
             err_op = "streamWriterFinish";
@@ -3190,7 +3191,7 @@ rdbStreamReaderInitResult rdbInitStreamReader(rio *rdb,
     compressionAlgo detected_algo = ALGO_NONE;
 
     if (algo) *algo = ALGO_NONE;
-    if (streamReaderInit(reader, &cfg, rdbStreamReadRaw, rdb, &detected_algo) != 0) {
+    if (streamReaderInit(reader, &cfg, rdbStreamReadRaw, rdb, &detected_algo) == C_ERR) {
         streamReaderErrorKind error_kind = reader->error_kind;
         streamReaderFree(reader);
         return error_kind == STREAM_READER_ERROR_INCOMPATIBLE
@@ -3198,7 +3199,24 @@ rdbStreamReaderInitResult rdbInitStreamReader(rio *rdb,
                    : RDB_STREAM_READER_INIT_ERROR;
     }
 
-    rioAttachStreamReader(rdb, reader);
+    if (detected_algo == ALGO_NONE && rioCheckType(rdb) == RIO_TYPE_FILE) {
+        size_t probe_len = reader->probe.header_len;
+        off_t rewind_len = (off_t)probe_len;
+
+        /* File-backed RDB loads can replay the probe through the native rio
+         * path. This keeps plain RDBs out of the stream-reader passthrough
+         * path while retaining it for sources that cannot be rewound. */
+        if ((size_t)rewind_len == probe_len &&
+            probe_len <= rdb->stream_processed_bytes &&
+            fseeko(rdb->io.file.fp, -rewind_len, SEEK_CUR) == 0) {
+            rdb->stream_processed_bytes -= probe_len;
+        } else {
+            rioAttachStreamReader(rdb, reader);
+        }
+    } else {
+        rioAttachStreamReader(rdb, reader);
+    }
+
     if (detected_algo != ALGO_NONE) {
         rdb->flags |= RIO_FLAG_STREAMING_COMPRESSION | RIO_FLAG_SKIP_RDB_CHECKSUM;
         if (algo) *algo = detected_algo;
@@ -3786,15 +3804,14 @@ int rdbLoad(char *filename, rdbSaveInfo *rsi, int rdbflags) {
     startLoadingFile(sb.st_size, filename, rdbflags);
     rioInitWithFile(&rdb, fp);
 
-    /* Always attach the probing reader to an on-disk RDB:
+    /* Probe every on-disk RDB:
      *
-     *   plain file: rdbLoadRio -> streamReader pass through -> rdb(file backend)
+     *   plain file: rewind probe, then rdbLoadRio -> rdb(file backend)
      *   VCS file:   rdbLoadRio -> streamReader LZ4 decode  -> rdb(file backend)
      *
-     * The probe bytes are replayed for plain input, so rdbLoadRio sees the
-     * original RDB header. For VCS input it sees the header produced by the
-     * decoder. The parser and the concrete backend remain the same rio. */
-    bool skip_codec_checksum_validation = server.skip_checksum_validation;
+     * Non-rewindable plain sources retain the streamReader passthrough path.
+     * For VCS input the parser sees the header produced by the decoder. */
+    bool skip_codec_checksum_validation = !server.rdb_checksum || server.skip_checksum_validation;
     rdbStreamReaderInitResult init_rc =
         rdbInitStreamReader(&rdb, &stream_reader, skip_codec_checksum_validation, &streaming_algo);
     if (init_rc == RDB_STREAM_READER_INIT_INCOMPATIBLE) {
@@ -3811,9 +3828,6 @@ int rdbLoad(char *filename, rdbSaveInfo *rsi, int rdbflags) {
         goto done;
     }
     stream_reader_initialized = true;
-    if (rsi) {
-        rsi->loaded_format = streaming_algo != ALGO_NONE ? RDB_LOAD_FORMAT_VCS : RDB_LOAD_FORMAT_PLAIN;
-    }
 
     if (rdb.flags & RIO_FLAG_STREAMING_COMPRESSION) {
         serverLog(LL_NOTICE, "Loading compressed RDB (algo=%s) from %s",
@@ -3821,20 +3835,9 @@ int rdbLoad(char *filename, rdbSaveInfo *rsi, int rdbflags) {
     }
 
     retval = rdbLoadRio(&rdb, rdbflags, rsi);
-    if (retval == RDB_OK && streamReaderFinish(&stream_reader) != 0) {
+    if (retval == RDB_OK && streamReaderFinish(&stream_reader) == C_ERR) {
         serverLog(LL_WARNING, "Compressed RDB stream in %s did not end cleanly", filename);
         retval = RDB_FAILED;
-    }
-    if (retval == RDB_OK && (rdb.flags & RIO_FLAG_STREAMING_COMPRESSION)) {
-        uint8_t trailing_byte;
-        ssize_t trailing_len = rioReadRawPartial(&rdb, &trailing_byte, 1);
-        if (trailing_len < 0) {
-            serverLog(LL_WARNING, "I/O error while checking the end of compressed RDB stream in %s", filename);
-            retval = RDB_FAILED;
-        } else if (trailing_len > 0) {
-            serverLog(LL_WARNING, "Compressed RDB stream in %s has trailing data", filename);
-            retval = RDB_FAILED;
-        }
     }
 
 done:

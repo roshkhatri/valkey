@@ -465,7 +465,7 @@ void rioDetachStreamReader(rio *r) {
 
 size_t rioWriteStream(rio *r, const void *buf, size_t len) {
     serverAssert(r->stream_writer != NULL);
-    if (streamWriterWrite(r->stream_writer, buf, len) == 0) return 1;
+    if (streamWriterWrite(r->stream_writer, buf, len) == C_OK) return 1;
     r->flags |= RIO_FLAG_WRITE_ERROR;
     return 0;
 }
@@ -490,7 +490,7 @@ size_t rioReadStream(rio *r, void *buf, size_t len) {
 int rioFlushStream(rio *r) {
     serverAssert(r->stream_writer != NULL);
     if (r->flags & (RIO_FLAG_WRITE_ERROR | RIO_FLAG_CLOSE_ASAP)) return 0;
-    if (streamWriterFlush(r->stream_writer) != 0 || rioFlushRaw(r) == 0) {
+    if (streamWriterFlush(r->stream_writer) == C_ERR || rioFlushRaw(r) == 0) {
         r->flags |= RIO_FLAG_WRITE_ERROR;
         return 0;
     }

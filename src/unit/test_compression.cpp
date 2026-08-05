@@ -128,7 +128,7 @@ static void initFailingFlushRio(rio *r) {
 
 TEST(CompressionTest, streamCompressorInitFree) {
     streamCompressor sc;
-    ASSERT_EQ(streamCompressorInit(&sc, ALGO_LZ4, 0, false), 0);
+    ASSERT_EQ(streamCompressorInit(&sc, ALGO_LZ4, 0, false), C_OK);
     EXPECT_EQ(sc.stream_started, false) << "stream_started should be false";
     EXPECT_TRUE(sc.ctx != NULL) << "ctx should be non-NULL";
     streamCompressorFree(&sc);
@@ -137,7 +137,7 @@ TEST(CompressionTest, streamCompressorInitFree) {
 
 TEST(CompressionTest, streamDecompressorInitFree) {
     streamDecompressor sd;
-    ASSERT_EQ(streamDecompressorInit(&sd, ALGO_LZ4, false), 0);
+    ASSERT_EQ(streamDecompressorInit(&sd, ALGO_LZ4, false), C_OK);
     EXPECT_TRUE(sd.ctx != NULL) << "ctx should be non-NULL";
     streamDecompressorFree(&sd);
     EXPECT_TRUE(sd.ctx == NULL) << "ctx should be NULL after free";
@@ -148,7 +148,7 @@ TEST(CompressionTest, streamCompressorDecompressorRoundTrip) {
     size_t input_len = strlen(input);
 
     streamCompressor sc;
-    ASSERT_EQ(streamCompressorInit(&sc, ALGO_LZ4, 0, false), 0);
+    ASSERT_EQ(streamCompressorInit(&sc, ALGO_LZ4, 0, false), C_OK);
 
     size_t bound = streamCompressorOutputBound(&sc, input_len);
     ASSERT_GT(bound, 0u) << "bound should be > 0";
@@ -162,7 +162,7 @@ TEST(CompressionTest, streamCompressorDecompressorRoundTrip) {
     streamCompressorFree(&sc);
 
     streamDecompressor sd;
-    ASSERT_EQ(streamDecompressorInit(&sd, ALGO_LZ4, false), 0);
+    ASSERT_EQ(streamDecompressorInit(&sd, ALGO_LZ4, false), C_OK);
 
     uint8_t decompressed[256];
     size_t input_consumed = 0;
@@ -252,7 +252,7 @@ TEST(CompressionTest, streamReaderClassifiesProbeInputs) {
         streamReader t;
         compressionAlgo algo = ALGO_NONE;
         if (cases[i].expect_probe_ok) {
-            ASSERT_EQ(streamReaderInit(&t, &cfg, memReaderRead, &mr, &algo), 0) << cases[i].name;
+            ASSERT_EQ(streamReaderInit(&t, &cfg, memReaderRead, &mr, &algo), C_OK) << cases[i].name;
             ASSERT_EQ(algo, ALGO_NONE) << cases[i].name;
 
             uint8_t out[16] = {0};
@@ -260,10 +260,10 @@ TEST(CompressionTest, streamReaderClassifiesProbeInputs) {
                 << cases[i].name;
             EXPECT_EQ(memcmp(out, cases[i].input, cases[i].expected_read_len), 0) << cases[i].name;
             ASSERT_EQ(streamReaderRead(&t, out, sizeof(out)), 0) << cases[i].name;
-            ASSERT_EQ(streamReaderFinish(&t), 0) << cases[i].name;
+            ASSERT_EQ(streamReaderFinish(&t), C_OK) << cases[i].name;
             ASSERT_EQ(t.state, STREAM_READER_STATE_FINISHED) << cases[i].name;
         } else {
-            ASSERT_EQ(streamReaderInit(&t, &cfg, memReaderRead, &mr, &algo), -1) << cases[i].name;
+            ASSERT_EQ(streamReaderInit(&t, &cfg, memReaderRead, &mr, &algo), C_ERR) << cases[i].name;
             ASSERT_EQ(t.error_kind, cases[i].expected_error) << cases[i].name;
 
             uint8_t out[8] = {0};
@@ -293,7 +293,7 @@ TEST(CompressionTest, streamReaderRejectsEveryTruncatedVcsEnvelope) {
         streamReaderConfig cfg = makeReaderConfig(true, STREAM_READER_BUFFER_SIZE_DEFAULT, false);
         streamReader reader;
         compressionAlgo algo = ALGO_NONE;
-        ASSERT_EQ(streamReaderInit(&reader, &cfg, memReaderRead, &mr, &algo), -1)
+        ASSERT_EQ(streamReaderInit(&reader, &cfg, memReaderRead, &mr, &algo), C_ERR)
             << "accepted VCS prefix length " << prefix_len;
         ASSERT_EQ(reader.error_kind, STREAM_READER_ERROR_INCOMPATIBLE)
             << "VCS prefix length " << prefix_len;
@@ -304,7 +304,7 @@ TEST(CompressionTest, streamReaderRejectsEveryTruncatedVcsEnvelope) {
     streamReaderConfig cfg = makeReaderConfig(true, STREAM_READER_BUFFER_SIZE_DEFAULT, false);
     streamReader reader;
     compressionAlgo algo = ALGO_LZ4;
-    ASSERT_EQ(streamReaderInit(&reader, &cfg, memReaderRead, &empty, &algo), 0);
+    ASSERT_EQ(streamReaderInit(&reader, &cfg, memReaderRead, &empty, &algo), C_OK);
     ASSERT_EQ(algo, ALGO_NONE);
     uint8_t out = 0;
     ASSERT_EQ(streamReaderRead(&reader, &out, 1), 0);
@@ -318,9 +318,9 @@ TEST(CompressionTest, streamReaderClampsSmallBuffer) {
     source.len = sizeof(input);
     streamReaderConfig cfg = makeReaderConfig(true, 1, false);
     streamReader reader;
-    ASSERT_EQ(streamReaderInit(&reader, &cfg, memReaderRead, &source, NULL), 0);
+    ASSERT_EQ(streamReaderInit(&reader, &cfg, memReaderRead, &source, NULL), C_OK);
     ASSERT_EQ(reader.buffer_size, (size_t)STREAM_READER_BUFFER_SIZE_MIN);
-    ASSERT_EQ(streamReaderFinish(&reader), 0);
+    ASSERT_EQ(streamReaderFinish(&reader), C_OK);
     streamReaderFree(&reader);
 }
 
@@ -344,7 +344,7 @@ static void dynamicBufFree(DynamicBuf *db) {
 static int emitToDynamicBuf(void *ctx, const uint8_t *data, size_t len) {
     DynamicBuf *db = (DynamicBuf *)ctx;
     db->data = (uint8_t *)sdscatlen((sds)db->data, data, len);
-    return db->data != NULL ? 0 : -1;
+    return db->data != NULL ? C_OK : C_ERR;
 }
 
 static int failSelectedEmit(void *ctx, const uint8_t *data, size_t len) {
@@ -352,7 +352,7 @@ static int failSelectedEmit(void *ctx, const uint8_t *data, size_t len) {
     (void)len;
     FailingEmitter *emitter = (FailingEmitter *)ctx;
     emitter->calls++;
-    return emitter->calls == emitter->fail_on_call ? -1 : 0;
+    return emitter->calls == emitter->fail_on_call ? C_ERR : C_OK;
 }
 
 static ssize_t testRioBufferReadSome(rio *r, void *buf, size_t len) {
@@ -372,7 +372,7 @@ static void enableTestRioBufferPartialReads(rio *r) {
 
 static int initVcsRdbStreamReader(streamReader *reader, rio *r) {
     enableTestRioBufferPartialReads(r);
-    return rdbInitStreamReader(r, reader, false, NULL) == RDB_STREAM_READER_INIT_OK ? 0 : -1;
+    return rdbInitStreamReader(r, reader, false, NULL) == RDB_STREAM_READER_INIT_OK ? C_OK : C_ERR;
 }
 
 static size_t rio_update_calls = 0;
@@ -385,23 +385,23 @@ static void countRioUpdateCalls(rio *r, const void *buf, size_t len) {
 }
 
 static int emitToRioBackend(void *ctx, const uint8_t *data, size_t len) {
-    return rioWriteRaw((rio *)ctx, data, len) ? 0 : -1;
+    return rioWriteRaw((rio *)ctx, data, len) ? C_OK : C_ERR;
 }
 
 static int attachCompressionWriter(rio *r, streamWriter *writer) {
-    if (streamWriterInit(writer, ALGO_LZ4, emitToRioBackend, r) != 0) return -1;
+    if (streamWriterInit(writer, ALGO_LZ4, true, emitToRioBackend, r) == C_ERR) return C_ERR;
     rioAttachStreamWriter(r, writer);
-    return 0;
+    return C_OK;
 }
 
 static int finishCompressionWriter(rio *r, streamWriter *writer) {
-    if (streamWriterFinish(writer) != 0) {
+    if (streamWriterFinish(writer) == C_ERR) {
         r->flags |= RIO_FLAG_WRITE_ERROR;
-        return -1;
+        return C_ERR;
     }
-    if (rioFlushRaw(r)) return 0;
+    if (rioFlushRaw(r)) return C_OK;
     r->flags |= RIO_FLAG_WRITE_ERROR;
-    return -1;
+    return C_ERR;
 }
 
 static void freeCompressionWriter(rio *r, streamWriter *writer) {
@@ -415,16 +415,16 @@ TEST(CompressionTest, streamReaderClassifiesSourceCallbackFailuresAsIoErrors) {
     failed_source.fail_after_success_reads = 0;
     streamReaderConfig failed_cfg = makeReaderConfig(true, STREAM_READER_BUFFER_SIZE_DEFAULT, false);
     streamReader failed_reader;
-    ASSERT_EQ(streamReaderInit(&failed_reader, &failed_cfg, memReaderRead, &failed_source, NULL), -1);
+    ASSERT_EQ(streamReaderInit(&failed_reader, &failed_cfg, memReaderRead, &failed_source, NULL), C_ERR);
     ASSERT_EQ(failed_reader.error_kind, STREAM_READER_ERROR_IO);
     streamReaderFree(&failed_reader);
 
     DynamicBuf db;
     dynamicBufInit(&db);
     streamWriter writer;
-    ASSERT_EQ(streamWriterInit(&writer, ALGO_LZ4, emitToDynamicBuf, &db), 0);
-    ASSERT_EQ(streamWriterWrite(&writer, "source callback contract", 24), 0);
-    ASSERT_EQ(streamWriterFinish(&writer), 0);
+    ASSERT_EQ(streamWriterInit(&writer, ALGO_LZ4, true, emitToDynamicBuf, &db), C_OK);
+    ASSERT_EQ(streamWriterWrite(&writer, "source callback contract", 24), C_OK);
+    ASSERT_EQ(streamWriterFinish(&writer), C_OK);
     streamWriterFree(&writer);
 
     const int overread_calls[] = {1, 2, 3};
@@ -438,13 +438,13 @@ TEST(CompressionTest, streamReaderClassifiesSourceCallbackFailuresAsIoErrors) {
         streamReader reader;
         int init_result = streamReaderInit(&reader, &rcfg, memReaderRead, &source, NULL);
         if (overread_on_call <= 2) {
-            ASSERT_EQ(init_result, -1) << "callback call " << overread_on_call;
+            ASSERT_EQ(init_result, C_ERR) << "callback call " << overread_on_call;
             ASSERT_EQ(reader.error_kind, STREAM_READER_ERROR_IO)
                 << "callback call " << overread_on_call;
             streamReaderFree(&reader);
             continue;
         }
-        ASSERT_EQ(init_result, 0);
+        ASSERT_EQ(init_result, C_OK);
 
         uint8_t out[24];
         ASSERT_EQ(streamReaderRead(&reader, out, sizeof(out)), -1) << "callback call " << overread_on_call;
@@ -488,7 +488,7 @@ TEST(CompressionTest, streamReaderRejectsInvalidEnvelopeFields) {
         source.len = sizeof(mutated);
         streamReaderConfig cfg = makeReaderConfig(false, STREAM_READER_BUFFER_SIZE_DEFAULT, false);
         streamReader reader;
-        ASSERT_EQ(streamReaderInit(&reader, &cfg, memReaderRead, &source, NULL), -1) << cases[i].name;
+        ASSERT_EQ(streamReaderInit(&reader, &cfg, memReaderRead, &source, NULL), C_ERR) << cases[i].name;
         ASSERT_EQ(reader.error_kind, STREAM_READER_ERROR_INCOMPATIBLE) << cases[i].name;
         streamReaderFree(&reader);
     }
@@ -510,13 +510,13 @@ TEST(CompressionTest, streamReaderPartialThenErrorSetsErrored) {
     DynamicBuf db;
     dynamicBufInit(&db);
     streamWriter w;
-    ASSERT_EQ(streamWriterInit(&w, ALGO_LZ4, emitToDynamicBuf, &db), 0);
+    ASSERT_EQ(streamWriterInit(&w, ALGO_LZ4, true, emitToDynamicBuf, &db), C_OK);
     const size_t first_chunk_len = 4 * 1024;
-    ASSERT_EQ(streamWriterWrite(&w, payload, first_chunk_len), 0);
-    ASSERT_EQ(streamWriterFlush(&w), 0);
+    ASSERT_EQ(streamWriterWrite(&w, payload, first_chunk_len), C_OK);
+    ASSERT_EQ(streamWriterFlush(&w), C_OK);
     size_t fail_after_pos = sdslen((const char *)db.data);
-    ASSERT_EQ(streamWriterWrite(&w, payload + first_chunk_len, payload_len - first_chunk_len), 0);
-    ASSERT_EQ(streamWriterFinish(&w), 0);
+    ASSERT_EQ(streamWriterWrite(&w, payload + first_chunk_len, payload_len - first_chunk_len), C_OK);
+    ASSERT_EQ(streamWriterFinish(&w), C_OK);
     streamWriterFree(&w);
 
     MemReader fr = {};
@@ -526,7 +526,7 @@ TEST(CompressionTest, streamReaderPartialThenErrorSetsErrored) {
     fr.fail_after_pos = fail_after_pos;
     streamReaderConfig rcfg = makeReaderConfig(false, STREAM_READER_BUFFER_SIZE_MIN, false);
     streamReader r;
-    ASSERT_EQ(streamReaderInit(&r, &rcfg, memReaderRead, &fr, NULL), 0);
+    ASSERT_EQ(streamReaderInit(&r, &rcfg, memReaderRead, &fr, NULL), C_OK);
 
     const size_t out_len = 16 * 1024;
     uint8_t *out = (uint8_t *)zmalloc(out_len);
@@ -551,7 +551,7 @@ TEST(CompressionTest, streamReaderPartialThenErrorSetsErrored) {
     fr_passthrough.fail_after_success_reads = 1; /* probe succeeds, next read fails */
     streamReaderConfig pass_cfg = makeReaderConfig(true, STREAM_READER_BUFFER_SIZE_DEFAULT, false);
     streamReader rp;
-    ASSERT_EQ(streamReaderInit(&rp, &pass_cfg, memReaderRead, &fr_passthrough, NULL), 0);
+    ASSERT_EQ(streamReaderInit(&rp, &pass_cfg, memReaderRead, &fr_passthrough, NULL), C_OK);
 
     uint8_t pass_out[64];
     ssize_t p1 = streamReaderRead(&rp, pass_out, sizeof(pass_out));
@@ -571,7 +571,7 @@ TEST(CompressionTest, streamWriterInitFree) {
     DynamicBuf db;
     dynamicBufInit(&db);
     streamWriter t;
-    ASSERT_EQ(streamWriterInit(&t, ALGO_LZ4, emitToDynamicBuf, &db), 0);
+    ASSERT_EQ(streamWriterInit(&t, ALGO_LZ4, true, emitToDynamicBuf, &db), C_OK);
     ASSERT_EQ(t.state, STREAM_WRITER_STATE_INITIAL);
 
     streamWriterFree(&t);
@@ -585,7 +585,7 @@ TEST(CompressionTest, streamWriterRejectsUnsupportedAlgorithms) {
 
     for (size_t i = 0; i < sizeof(algorithms) / sizeof(algorithms[0]); i++) {
         streamWriter writer;
-        EXPECT_EQ(streamWriterInit(&writer, algorithms[i], emitToDynamicBuf, &db), -1)
+        EXPECT_EQ(streamWriterInit(&writer, algorithms[i], true, emitToDynamicBuf, &db), C_ERR)
             << compressionAlgoName(algorithms[i]);
         streamWriterFree(&writer);
     }
@@ -597,12 +597,12 @@ TEST(CompressionTest, streamWriterFinishProducesAValidEmptyStream) {
     DynamicBuf db;
     dynamicBufInit(&db);
     streamWriter writer;
-    ASSERT_EQ(streamWriterInit(&writer, ALGO_LZ4, emitToDynamicBuf, &db), 0);
+    ASSERT_EQ(streamWriterInit(&writer, ALGO_LZ4, true, emitToDynamicBuf, &db), C_OK);
 
-    ASSERT_EQ(streamWriterWrite(&writer, NULL, 0), 0);
-    ASSERT_EQ(streamWriterFlush(&writer), 0);
+    ASSERT_EQ(streamWriterWrite(&writer, NULL, 0), C_OK);
+    ASSERT_EQ(streamWriterFlush(&writer), C_OK);
     ASSERT_EQ(sdslen((const char *)db.data), 0u) << "empty writes and flushes must stay lazy";
-    ASSERT_EQ(streamWriterFinish(&writer), 0);
+    ASSERT_EQ(streamWriterFinish(&writer), C_OK);
     ASSERT_GT(sdslen((const char *)db.data), (size_t)VCS_ENVELOPE_SIZE);
     streamWriterFree(&writer);
 
@@ -612,10 +612,10 @@ TEST(CompressionTest, streamWriterFinishProducesAValidEmptyStream) {
     source.max_chunk = 1;
     streamReaderConfig rcfg = makeReaderConfig(false, STREAM_READER_BUFFER_SIZE_DEFAULT, false);
     streamReader reader;
-    ASSERT_EQ(streamReaderInit(&reader, &rcfg, memReaderRead, &source, NULL), 0);
+    ASSERT_EQ(streamReaderInit(&reader, &rcfg, memReaderRead, &source, NULL), C_OK);
     uint8_t out = 0;
     ASSERT_EQ(streamReaderRead(&reader, &out, 1), 0);
-    ASSERT_EQ(streamReaderFinish(&reader), 0);
+    ASSERT_EQ(streamReaderFinish(&reader), C_OK);
     streamReaderFree(&reader);
     dynamicBufFree(&db);
 }
@@ -626,26 +626,26 @@ TEST(CompressionTest, streamWriterSinkFailuresAreSticky) {
         int fail_on_call = failing_calls[i];
         FailingEmitter emitter = {0, fail_on_call};
         streamWriter writer;
-        ASSERT_EQ(streamWriterInit(&writer, ALGO_LZ4, failSelectedEmit, &emitter), 0);
+        ASSERT_EQ(streamWriterInit(&writer, ALGO_LZ4, true, failSelectedEmit, &emitter), C_OK);
 
-        ASSERT_EQ(streamWriterWrite(&writer, "payload", 7), -1) << "sink call " << fail_on_call;
+        ASSERT_EQ(streamWriterWrite(&writer, "payload", 7), C_ERR) << "sink call " << fail_on_call;
         ASSERT_EQ(writer.state, STREAM_WRITER_STATE_ERROR);
-        ASSERT_EQ(streamWriterWrite(&writer, "retry", 5), -1);
-        ASSERT_EQ(streamWriterFlush(&writer), -1);
-        ASSERT_EQ(streamWriterFinish(&writer), -1);
+        ASSERT_EQ(streamWriterWrite(&writer, "retry", 5), C_ERR);
+        ASSERT_EQ(streamWriterFlush(&writer), C_ERR);
+        ASSERT_EQ(streamWriterFinish(&writer), C_ERR);
         ASSERT_EQ(emitter.calls, fail_on_call) << "an errored writer must not emit more bytes";
         streamWriterFree(&writer);
     }
 
     FailingEmitter emitter = {0, 0};
     streamWriter writer;
-    ASSERT_EQ(streamWriterInit(&writer, ALGO_LZ4, failSelectedEmit, &emitter), 0);
-    ASSERT_EQ(streamWriterWrite(&writer, "payload", 7), 0);
+    ASSERT_EQ(streamWriterInit(&writer, ALGO_LZ4, true, failSelectedEmit, &emitter), C_OK);
+    ASSERT_EQ(streamWriterWrite(&writer, "payload", 7), C_OK);
     emitter.fail_on_call = emitter.calls + 1;
-    ASSERT_EQ(streamWriterFinish(&writer), -1);
+    ASSERT_EQ(streamWriterFinish(&writer), C_ERR);
     int calls_after_failure = emitter.calls;
-    ASSERT_EQ(streamWriterFinish(&writer), -1);
-    ASSERT_EQ(streamWriterWrite(&writer, "retry", 5), -1);
+    ASSERT_EQ(streamWriterFinish(&writer), C_ERR);
+    ASSERT_EQ(streamWriterWrite(&writer, "retry", 5), C_ERR);
     ASSERT_EQ(emitter.calls, calls_after_failure) << "a failed finish must remain failed";
     streamWriterFree(&writer);
 }
@@ -654,15 +654,15 @@ TEST(CompressionTest, streamWriterRoundTrip) {
     DynamicBuf db;
     dynamicBufInit(&db);
     streamWriter t;
-    ASSERT_EQ(streamWriterInit(&t, ALGO_LZ4, emitToDynamicBuf, &db), 0);
+    ASSERT_EQ(streamWriterInit(&t, ALGO_LZ4, true, emitToDynamicBuf, &db), C_OK);
 
     const char *test_data = "Hello, compression world! This is a test of the stream writer API.";
     size_t data_len = strlen(test_data);
-    ASSERT_EQ(streamWriterWrite(&t, test_data, data_len), 0);
+    ASSERT_EQ(streamWriterWrite(&t, test_data, data_len), C_OK);
     EXPECT_EQ(t.state, STREAM_WRITER_STATE_ACTIVE);
     ASSERT_GE(sdslen((const char *)db.data), (size_t)VCS_ENVELOPE_SIZE) << "write should emit envelope";
 
-    ASSERT_EQ(streamWriterFinish(&t), 0);
+    ASSERT_EQ(streamWriterFinish(&t), C_OK);
     EXPECT_EQ(t.state, STREAM_WRITER_STATE_FINISHED);
 
     ASSERT_GE(sdslen((const char *)db.data), (size_t)VCS_ENVELOPE_SIZE)
@@ -676,7 +676,7 @@ TEST(CompressionTest, streamWriterRoundTrip) {
     EXPECT_EQ(db.data[6], VCS_STREAM_RDB) << "stream_kind RDB";
 
     streamDecompressor sd;
-    ASSERT_EQ(streamDecompressorInit(&sd, ALGO_LZ4, false), 0);
+    ASSERT_EQ(streamDecompressorInit(&sd, ALGO_LZ4, false), C_OK);
 
     uint8_t decompressed[256];
     uint8_t *compressed_data = db.data + VCS_ENVELOPE_SIZE;
@@ -705,9 +705,9 @@ TEST(CompressionTest, streamWriterLargeSingleWrite) {
     DynamicBuf db;
     dynamicBufInit(&db);
     streamWriter t;
-    ASSERT_EQ(streamWriterInit(&t, ALGO_LZ4, emitToDynamicBuf, &db), 0);
-    ASSERT_EQ(streamWriterWrite(&t, payload, payload_len), 0);
-    ASSERT_EQ(streamWriterFinish(&t), 0);
+    ASSERT_EQ(streamWriterInit(&t, ALGO_LZ4, true, emitToDynamicBuf, &db), C_OK);
+    ASSERT_EQ(streamWriterWrite(&t, payload, payload_len), C_OK);
+    ASSERT_EQ(streamWriterFinish(&t), C_OK);
     streamWriterFree(&t);
 
     MemReader mr = {};
@@ -716,7 +716,7 @@ TEST(CompressionTest, streamWriterLargeSingleWrite) {
     mr.max_chunk = 0;
     streamReaderConfig rcfg = makeReaderConfig(false, STREAM_READER_BUFFER_SIZE_MIN, false);
     streamReader r;
-    ASSERT_EQ(streamReaderInit(&r, &rcfg, memReaderRead, &mr, NULL), 0);
+    ASSERT_EQ(streamReaderInit(&r, &rcfg, memReaderRead, &mr, NULL), C_OK);
 
     uint8_t *out = (uint8_t *)zmalloc(payload_len);
     size_t total = 0;
@@ -751,9 +751,9 @@ TEST(CompressionTest, streamReaderSmallReadsRoundTrip) {
     DynamicBuf db;
     dynamicBufInit(&db);
     streamWriter w;
-    ASSERT_EQ(streamWriterInit(&w, ALGO_LZ4, emitToDynamicBuf, &db), 0);
-    ASSERT_EQ(streamWriterWrite(&w, payload, payload_len), 0);
-    ASSERT_EQ(streamWriterFinish(&w), 0);
+    ASSERT_EQ(streamWriterInit(&w, ALGO_LZ4, true, emitToDynamicBuf, &db), C_OK);
+    ASSERT_EQ(streamWriterWrite(&w, payload, payload_len), C_OK);
+    ASSERT_EQ(streamWriterFinish(&w), C_OK);
     streamWriterFree(&w);
 
     MemReader mr = {};
@@ -762,7 +762,7 @@ TEST(CompressionTest, streamReaderSmallReadsRoundTrip) {
     mr.max_chunk = 4096;
     streamReaderConfig rcfg = makeReaderConfig(false, STREAM_READER_BUFFER_SIZE_MIN, false);
     streamReader r;
-    ASSERT_EQ(streamReaderInit(&r, &rcfg, memReaderRead, &mr, NULL), 0);
+    ASSERT_EQ(streamReaderInit(&r, &rcfg, memReaderRead, &mr, NULL), C_OK);
 
     uint8_t *out = (uint8_t *)zmalloc(payload_len);
     size_t total = 0;
@@ -793,19 +793,19 @@ TEST(CompressionTest, streamWriterFlushBehavior) {
     DynamicBuf db;
     dynamicBufInit(&db);
     streamWriter t;
-    ASSERT_EQ(streamWriterInit(&t, ALGO_LZ4, emitToDynamicBuf, &db), 0);
+    ASSERT_EQ(streamWriterInit(&t, ALGO_LZ4, true, emitToDynamicBuf, &db), C_OK);
 
-    ASSERT_EQ(streamWriterFlush(&t), 0) << "flush before write should be no-op success";
+    ASSERT_EQ(streamWriterFlush(&t), C_OK) << "flush before write should be no-op success";
     ASSERT_EQ(sdslen((const char *)db.data), 0u) << "flush before write should not emit bytes";
 
-    ASSERT_EQ(streamWriterWrite(&t, "first chunk", 11), 0);
-    ASSERT_EQ(streamWriterFlush(&t), 0);
-    ASSERT_EQ(streamWriterWrite(&t, "second chunk", 12), 0);
-    ASSERT_EQ(streamWriterFinish(&t), 0);
+    ASSERT_EQ(streamWriterWrite(&t, "first chunk", 11), C_OK);
+    ASSERT_EQ(streamWriterFlush(&t), C_OK);
+    ASSERT_EQ(streamWriterWrite(&t, "second chunk", 12), C_OK);
+    ASSERT_EQ(streamWriterFinish(&t), C_OK);
 
     ASSERT_GT(sdslen((const char *)db.data), (size_t)VCS_ENVELOPE_SIZE);
     streamDecompressor sd;
-    ASSERT_EQ(streamDecompressorInit(&sd, ALGO_LZ4, false), 0);
+    ASSERT_EQ(streamDecompressorInit(&sd, ALGO_LZ4, false), C_OK);
 
     uint8_t decompressed[256];
     uint8_t *comp_data = db.data + VCS_ENVELOPE_SIZE;
@@ -827,9 +827,9 @@ TEST(CompressionTest, checksumBypassSkipsOnlyCodecVerification) {
     DynamicBuf db;
     dynamicBufInit(&db);
     streamWriter writer;
-    ASSERT_EQ(streamWriterInit(&writer, ALGO_LZ4, emitToDynamicBuf, &db), 0);
-    ASSERT_EQ(streamWriterWrite(&writer, payload, strlen(payload)), 0);
-    ASSERT_EQ(streamWriterFinish(&writer), 0);
+    ASSERT_EQ(streamWriterInit(&writer, ALGO_LZ4, true, emitToDynamicBuf, &db), C_OK);
+    ASSERT_EQ(streamWriterWrite(&writer, payload, strlen(payload)), C_OK);
+    ASSERT_EQ(streamWriterFinish(&writer), C_OK);
     streamWriterFree(&writer);
 
     ASSERT_GT(sdslen((const char *)db.data), (size_t)VCS_ENVELOPE_SIZE + 4);
@@ -844,12 +844,12 @@ TEST(CompressionTest, checksumBypassSkipsOnlyCodecVerification) {
         streamReaderConfig rcfg = makeReaderConfig(false, STREAM_READER_BUFFER_SIZE_DEFAULT,
                                                    skip_codec_checksum_validation);
         streamReader reader;
-        ASSERT_EQ(streamReaderInit(&reader, &rcfg, memReaderRead, &source, NULL), 0);
+        ASSERT_EQ(streamReaderInit(&reader, &rcfg, memReaderRead, &source, NULL), C_OK);
 
         char out[64] = {0};
         ASSERT_EQ(streamReaderRead(&reader, out, strlen(payload)), (ssize_t)strlen(payload));
         EXPECT_EQ(memcmp(out, payload, strlen(payload)), 0);
-        ASSERT_EQ(streamReaderFinish(&reader), skip_codec_checksum_validation ? 0 : -1);
+        ASSERT_EQ(streamReaderFinish(&reader), skip_codec_checksum_validation ? C_OK : C_ERR);
         streamReaderFree(&reader);
     }
 
@@ -858,10 +858,10 @@ TEST(CompressionTest, checksumBypassSkipsOnlyCodecVerification) {
     truncated.len = sdslen((const char *)db.data) - 5;
     streamReaderConfig bypass = makeReaderConfig(false, STREAM_READER_BUFFER_SIZE_DEFAULT, true);
     streamReader reader;
-    ASSERT_EQ(streamReaderInit(&reader, &bypass, memReaderRead, &truncated, NULL), 0);
+    ASSERT_EQ(streamReaderInit(&reader, &bypass, memReaderRead, &truncated, NULL), C_OK);
     char out[64] = {0};
     ASSERT_EQ(streamReaderRead(&reader, out, strlen(payload)), (ssize_t)strlen(payload));
-    ASSERT_EQ(streamReaderFinish(&reader), -1)
+    ASSERT_EQ(streamReaderFinish(&reader), C_ERR)
         << "checksum bypass must not bypass exact frame-end validation";
     streamReaderFree(&reader);
 
@@ -873,9 +873,9 @@ TEST(CompressionTest, streamReaderFinishAcceptsClosedFrame) {
     DynamicBuf db;
     dynamicBufInit(&db);
     streamWriter w;
-    ASSERT_EQ(streamWriterInit(&w, ALGO_LZ4, emitToDynamicBuf, &db), 0);
-    ASSERT_EQ(streamWriterWrite(&w, payload, strlen(payload)), 0);
-    ASSERT_EQ(streamWriterFinish(&w), 0);
+    ASSERT_EQ(streamWriterInit(&w, ALGO_LZ4, true, emitToDynamicBuf, &db), C_OK);
+    ASSERT_EQ(streamWriterWrite(&w, payload, strlen(payload)), C_OK);
+    ASSERT_EQ(streamWriterFinish(&w), C_OK);
 
     MemReader reader_ctx = {};
     reader_ctx.data = db.data;
@@ -883,16 +883,16 @@ TEST(CompressionTest, streamReaderFinishAcceptsClosedFrame) {
     reader_ctx.max_chunk = 7;
     streamReaderConfig rcfg = makeReaderConfig(false, STREAM_READER_BUFFER_SIZE_DEFAULT, false);
     streamReader reader;
-    ASSERT_EQ(streamReaderInit(&reader, &rcfg, memReaderRead, &reader_ctx, NULL), 0);
+    ASSERT_EQ(streamReaderInit(&reader, &rcfg, memReaderRead, &reader_ctx, NULL), C_OK);
     ASSERT_EQ(reader.state, STREAM_READER_STATE_COMPRESSED);
 
     char out[64];
     ASSERT_EQ(streamReaderRead(&reader, out, strlen(payload)), (ssize_t)strlen(payload));
     ASSERT_EQ(reader.state, STREAM_READER_STATE_COMPRESSED);
     EXPECT_EQ(memcmp(out, payload, strlen(payload)), 0);
-    ASSERT_EQ(streamReaderFinish(&reader), 0);
+    ASSERT_EQ(streamReaderFinish(&reader), C_OK);
     ASSERT_EQ(reader.state, STREAM_READER_STATE_FINISHED);
-    ASSERT_EQ(streamReaderFinish(&reader), 0);
+    ASSERT_EQ(streamReaderFinish(&reader), C_OK);
     ASSERT_EQ(streamReaderRead(&reader, out, sizeof(out)), 0);
 
     streamReaderFree(&reader);
@@ -906,21 +906,21 @@ TEST(CompressionTest, streamReaderFinishRejectsUnreadDecodedBytes) {
     DynamicBuf db;
     dynamicBufInit(&db);
     streamWriter w;
-    ASSERT_EQ(streamWriterInit(&w, ALGO_LZ4, emitToDynamicBuf, &db), 0);
-    ASSERT_EQ(streamWriterWrite(&w, payload, payload_len), 0);
-    ASSERT_EQ(streamWriterFinish(&w), 0);
+    ASSERT_EQ(streamWriterInit(&w, ALGO_LZ4, true, emitToDynamicBuf, &db), C_OK);
+    ASSERT_EQ(streamWriterWrite(&w, payload, payload_len), C_OK);
+    ASSERT_EQ(streamWriterFinish(&w), C_OK);
 
     MemReader reader_ctx = {};
     reader_ctx.data = db.data;
     reader_ctx.len = sdslen((const char *)db.data);
     streamReaderConfig rcfg = makeReaderConfig(false, STREAM_READER_BUFFER_SIZE_DEFAULT, false);
     streamReader reader;
-    ASSERT_EQ(streamReaderInit(&reader, &rcfg, memReaderRead, &reader_ctx, NULL), 0);
+    ASSERT_EQ(streamReaderInit(&reader, &rcfg, memReaderRead, &reader_ctx, NULL), C_OK);
 
     char out[8];
     ASSERT_EQ(streamReaderRead(&reader, out, sizeof(out)), (ssize_t)sizeof(out));
     EXPECT_EQ(memcmp(out, payload, sizeof(out)), 0);
-    ASSERT_EQ(streamReaderFinish(&reader), -1);
+    ASSERT_EQ(streamReaderFinish(&reader), C_ERR);
     ASSERT_EQ(reader.error_kind, STREAM_READER_ERROR_CORRUPT);
 
     streamReaderFree(&reader);
@@ -950,7 +950,7 @@ TEST(CompressionTest, rioCompressionWriterRoundTrip) {
     ASSERT_GT(compressed_len, (size_t)VCS_ENVELOPE_SIZE) << "compressed output should exist";
 
     streamDecompressor sd;
-    ASSERT_EQ(streamDecompressorInit(&sd, ALGO_LZ4, false), 0);
+    ASSERT_EQ(streamDecompressorInit(&sd, ALGO_LZ4, false), C_OK);
 
     uint8_t decompressed[512];
     uint8_t *comp_data = (uint8_t *)compressed + VCS_ENVELOPE_SIZE;
@@ -1013,13 +1013,13 @@ TEST(CompressionTest, rioStreamReaderRoundTrip) {
     DynamicBuf db;
     dynamicBufInit(&db);
     streamWriter t;
-    ASSERT_EQ(streamWriterInit(&t, ALGO_LZ4, emitToDynamicBuf, &db), 0);
+    ASSERT_EQ(streamWriterInit(&t, ALGO_LZ4, true, emitToDynamicBuf, &db), C_OK);
 
     const char *test_data = "Decompression rio test data. "
                             "This should round-trip through compress then decompress.";
     size_t data_len = strlen(test_data);
-    ASSERT_EQ(streamWriterWrite(&t, test_data, data_len), 0);
-    ASSERT_EQ(streamWriterFinish(&t), 0);
+    ASSERT_EQ(streamWriterWrite(&t, test_data, data_len), C_OK);
+    ASSERT_EQ(streamWriterFinish(&t), C_OK);
     streamWriterFree(&t);
 
     sds comp_sds = sdsnewlen(db.data, sdslen((const char *)db.data));
@@ -1046,9 +1046,9 @@ TEST(CompressionTest, rioStreamReaderTellTracksSourceProgress) {
     char payload[4096];
     memset(payload, 'A', sizeof(payload));
     streamWriter t;
-    ASSERT_EQ(streamWriterInit(&t, ALGO_LZ4, emitToDynamicBuf, &db), 0);
-    ASSERT_EQ(streamWriterWrite(&t, payload, sizeof(payload)), 0);
-    ASSERT_EQ(streamWriterFinish(&t), 0);
+    ASSERT_EQ(streamWriterInit(&t, ALGO_LZ4, true, emitToDynamicBuf, &db), C_OK);
+    ASSERT_EQ(streamWriterWrite(&t, payload, sizeof(payload)), C_OK);
+    ASSERT_EQ(streamWriterFinish(&t), C_OK);
     streamWriterFree(&t);
 
     sds comp_sds = sdsnewlen(db.data, sdslen((const char *)db.data));
@@ -1080,9 +1080,9 @@ TEST(CompressionTest, rioStreamReaderHonorsMaxProcessingChunk) {
     DynamicBuf db;
     dynamicBufInit(&db);
     streamWriter writer;
-    ASSERT_EQ(streamWriterInit(&writer, ALGO_LZ4, emitToDynamicBuf, &db), 0);
-    ASSERT_EQ(streamWriterWrite(&writer, payload, payload_len), 0);
-    ASSERT_EQ(streamWriterFinish(&writer), 0);
+    ASSERT_EQ(streamWriterInit(&writer, ALGO_LZ4, true, emitToDynamicBuf, &db), C_OK);
+    ASSERT_EQ(streamWriterWrite(&writer, payload, payload_len), C_OK);
+    ASSERT_EQ(streamWriterFinish(&writer), C_OK);
     streamWriterFree(&writer);
 
     sds compressed = sdsnewlen(db.data, sdslen((const char *)db.data));
@@ -1109,6 +1109,34 @@ TEST(CompressionTest, rioStreamReaderClassifiesInput) {
     {
         const char *payload = "REDIS001remaining data after prefix";
         size_t payload_len = strlen(payload);
+        FILE *fp = tmpfile();
+        ASSERT_NE(fp, (FILE *)NULL);
+        ASSERT_EQ(fwrite(payload, 1, payload_len, fp), payload_len);
+        rewind(fp);
+
+        rio file_rio;
+        rioInitWithFile(&file_rio, fp);
+        streamReader reader;
+        compressionAlgo algo = ALGO_NONE;
+        ASSERT_EQ(rdbInitStreamReader(&file_rio, &reader, false, &algo), RDB_STREAM_READER_INIT_OK);
+        ASSERT_EQ(algo, ALGO_NONE);
+        ASSERT_EQ(file_rio.stream_reader, (streamReader *)NULL)
+            << "plain files should return to the native rio path after probing";
+        ASSERT_EQ(file_rio.stream_processed_bytes, 0u);
+        ASSERT_EQ(ftello(fp), 0);
+
+        char result[64];
+        memset(result, 0, sizeof(result));
+        ASSERT_NE(rioRead(&file_rio, result, payload_len), 0u);
+        EXPECT_EQ(memcmp(result, payload, payload_len), 0);
+
+        rdbFreeStreamReader(&file_rio, &reader);
+        fclose(fp);
+    }
+
+    {
+        const char *payload = "REDIS001remaining data after prefix";
+        size_t payload_len = strlen(payload);
         sds buf = sdsnewlen(payload, payload_len);
         rio buffer_rio;
         rioInitWithBuffer(&buffer_rio, buf);
@@ -1118,6 +1146,8 @@ TEST(CompressionTest, rioStreamReaderClassifiesInput) {
         compressionAlgo algo = ALGO_NONE;
         ASSERT_EQ(rdbInitStreamReader(&buffer_rio, &reader, false, &algo), RDB_STREAM_READER_INIT_OK);
         ASSERT_EQ(algo, ALGO_NONE) << "passthrough stream should not be compressed";
+        ASSERT_EQ(buffer_rio.stream_reader, &reader)
+            << "non-file sources should retain the passthrough fallback";
 
         char result[64];
         memset(result, 0, sizeof(result));
@@ -1185,7 +1215,7 @@ TEST(CompressionTest, rioCompressionWriterFlushMidStream) {
     ASSERT_GT(compressed_len, (size_t)VCS_ENVELOPE_SIZE);
 
     streamDecompressor sd;
-    ASSERT_EQ(streamDecompressorInit(&sd, ALGO_LZ4, false), 0);
+    ASSERT_EQ(streamDecompressorInit(&sd, ALGO_LZ4, false), C_OK);
 
     uint8_t decompressed[256];
     uint8_t *comp_data = (uint8_t *)compressed + VCS_ENVELOPE_SIZE;
@@ -1215,10 +1245,10 @@ TEST(CompressionTest, rioStreamReaderLargePayload) {
     DynamicBuf db;
     dynamicBufInit(&db);
     streamWriter t;
-    ASSERT_EQ(streamWriterInit(&t, ALGO_LZ4, emitToDynamicBuf, &db), 0);
+    ASSERT_EQ(streamWriterInit(&t, ALGO_LZ4, true, emitToDynamicBuf, &db), C_OK);
 
-    ASSERT_EQ(streamWriterWrite(&t, payload, payload_len), 0);
-    ASSERT_EQ(streamWriterFinish(&t), 0);
+    ASSERT_EQ(streamWriterWrite(&t, payload, payload_len), C_OK);
+    ASSERT_EQ(streamWriterFinish(&t), C_OK);
     streamWriterFree(&t);
 
     sds comp_sds = sdsnewlen(db.data, sdslen((const char *)db.data));
@@ -1258,9 +1288,9 @@ TEST(CompressionTest, streamReaderFinishStopsAtFrameEndBeforeTrailingBytes) {
     DynamicBuf db;
     dynamicBufInit(&db);
     streamWriter w;
-    ASSERT_EQ(streamWriterInit(&w, ALGO_LZ4, emitToDynamicBuf, &db), 0);
-    ASSERT_EQ(streamWriterWrite(&w, payload, payload_len), 0);
-    ASSERT_EQ(streamWriterFinish(&w), 0);
+    ASSERT_EQ(streamWriterInit(&w, ALGO_LZ4, true, emitToDynamicBuf, &db), C_OK);
+    ASSERT_EQ(streamWriterWrite(&w, payload, payload_len), C_OK);
+    ASSERT_EQ(streamWriterFinish(&w), C_OK);
     streamWriterFree(&w);
     size_t frame_len = sdslen((const char *)db.data);
 
@@ -1270,17 +1300,17 @@ TEST(CompressionTest, streamReaderFinishStopsAtFrameEndBeforeTrailingBytes) {
     MemReader mr = {};
     mr.data = (const uint8_t *)input;
     mr.len = sdslen(input);
-    mr.max_chunk = 3;
+    mr.max_chunk = 0;
     streamReaderConfig rcfg = makeReaderConfig(false, STREAM_READER_BUFFER_SIZE_MIN, false);
     streamReader r;
-    ASSERT_EQ(streamReaderInit(&r, &rcfg, memReaderRead, &mr, NULL), 0);
+    ASSERT_EQ(streamReaderInit(&r, &rcfg, memReaderRead, &mr, NULL), C_OK);
 
     char out[128];
     memset(out, 0, sizeof(out));
     ASSERT_EQ(streamReaderRead(&r, out, payload_len), (ssize_t)payload_len);
     EXPECT_EQ(memcmp(out, payload, payload_len), 0);
 
-    ASSERT_EQ(streamReaderFinish(&r), 0);
+    ASSERT_EQ(streamReaderFinish(&r), C_OK);
     ASSERT_EQ(r.error_kind, STREAM_READER_ERROR_NONE);
     ASSERT_EQ(mr.pos, frame_len) << "streamReader must not consume bytes after the LZ4 frame";
 
@@ -1299,9 +1329,9 @@ TEST(CompressionTest, streamReaderRejectsTruncatedFrameTrailer) {
     DynamicBuf db;
     dynamicBufInit(&db);
     streamWriter w;
-    ASSERT_EQ(streamWriterInit(&w, ALGO_LZ4, emitToDynamicBuf, &db), 0);
-    ASSERT_EQ(streamWriterWrite(&w, payload, payload_len), 0);
-    ASSERT_EQ(streamWriterFinish(&w), 0);
+    ASSERT_EQ(streamWriterInit(&w, ALGO_LZ4, true, emitToDynamicBuf, &db), C_OK);
+    ASSERT_EQ(streamWriterWrite(&w, payload, payload_len), C_OK);
+    ASSERT_EQ(streamWriterFinish(&w), C_OK);
     streamWriterFree(&w);
 
     ASSERT_GT(sdslen((const char *)db.data), (size_t)VCS_ENVELOPE_SIZE + 1);
@@ -1311,7 +1341,7 @@ TEST(CompressionTest, streamReaderRejectsTruncatedFrameTrailer) {
     mr.max_chunk = 7;
     streamReaderConfig rcfg = makeReaderConfig(false, STREAM_READER_BUFFER_SIZE_MIN, false);
     streamReader r;
-    ASSERT_EQ(streamReaderInit(&r, &rcfg, memReaderRead, &mr, NULL), 0);
+    ASSERT_EQ(streamReaderInit(&r, &rcfg, memReaderRead, &mr, NULL), C_OK);
 
     uint8_t out[payload_len];
     ASSERT_EQ(streamReaderRead(&r, out, payload_len), (ssize_t)payload_len);
@@ -1328,24 +1358,24 @@ TEST(CompressionTest, streamWriterWriteAfterFinish) {
     DynamicBuf db;
     dynamicBufInit(&db);
     streamWriter t;
-    ASSERT_EQ(streamWriterInit(&t, ALGO_LZ4, emitToDynamicBuf, &db), 0);
+    ASSERT_EQ(streamWriterInit(&t, ALGO_LZ4, true, emitToDynamicBuf, &db), C_OK);
 
-    ASSERT_EQ(streamWriterWrite(&t, "hello", 5), 0);
-    ASSERT_EQ(streamWriterFinish(&t), 0);
+    ASSERT_EQ(streamWriterWrite(&t, "hello", 5), C_OK);
+    ASSERT_EQ(streamWriterFinish(&t), C_OK);
     size_t len_after_finish = sdslen((const char *)db.data);
 
-    ASSERT_EQ(streamWriterFlush(&t), 0) << "flush after finish should be a no-op success";
+    ASSERT_EQ(streamWriterFlush(&t), C_OK) << "flush after finish should be a no-op success";
     ASSERT_EQ(sdslen((const char *)db.data), len_after_finish) << "flush after finish should not emit bytes";
 
-    ASSERT_LT(streamWriterWrite(&t, "world", 5), 0);
+    ASSERT_EQ(streamWriterWrite(&t, "world", 5), C_ERR);
     ASSERT_EQ(sdslen((const char *)db.data), len_after_finish) << "write after finish should not produce output";
 
-    ASSERT_EQ(streamWriterFinish(&t), 0);
+    ASSERT_EQ(streamWriterFinish(&t), C_OK);
     ASSERT_EQ(sdslen((const char *)db.data), len_after_finish) << "second finish should not produce output";
 
     ASSERT_GT(sdslen((const char *)db.data), (size_t)VCS_ENVELOPE_SIZE);
     streamDecompressor sd;
-    ASSERT_EQ(streamDecompressorInit(&sd, ALGO_LZ4, false), 0);
+    ASSERT_EQ(streamDecompressorInit(&sd, ALGO_LZ4, false), C_OK);
 
     uint8_t decompressed[64];
     uint8_t *cdata = db.data + VCS_ENVELOPE_SIZE;

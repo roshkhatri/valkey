@@ -2451,7 +2451,7 @@ void replicaAfterLoadPrimaryRDB(connection *conn, rdbSaveInfo *rsi, int disk_bas
      * sync or rdb-preamble disabled), fall back to bgrewriteaof. */
     if (server.aof_enabled) {
         if (disk_based_sync && server.aof_use_rdb_preamble) {
-            if (restartAOFWithSyncRdb(rsi->loaded_format) == C_ERR) {
+            if (restartAOFWithSyncRdb() == C_ERR) {
                 restartAOFAfterSYNC();
             }
         } else {

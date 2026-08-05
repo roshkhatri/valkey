@@ -78,7 +78,7 @@ tags {"check-rdb network external:skip logreqres:skip"} {
 
             assert_equal 0 $failed
             assert_match {*RDB looks OK!*} $result
-            assert_match {*Logical RDB CRC64 skipped for streaming-compressed input*} $result
+            assert_match {*\[logical offset *, physical offset *\] Logical RDB CRC64 skipped for streaming-compressed input*} $result
             assert_match {*type.string.keys.total:1*} $result
             assert_no_match {*Checksum OK*} $result
         }
@@ -126,11 +126,11 @@ tags {"check-rdb network external:skip logreqres:skip"} {
             r config set rdbcompression yes
 
             assert_equal 1 $failed
-            assert_match {*Compressed RDB stream did not end cleanly*} $result
+            assert_match {*\[logical offset *, physical offset *\] Compressed RDB stream did not end cleanly*} $result
             assert_no_match {*RDB looks OK*} $result
         }
 
-        test "valkey-check-rdb rejects trailing data after a compressed RDB" {
+        test "valkey-check-rdb ignores trailing data after a compressed RDB" {
             r flushall
             r config set rdbcompression lz4
             r set lz4:trailing payload
@@ -148,9 +148,8 @@ tags {"check-rdb network external:skip logreqres:skip"} {
             file delete -force $trailing_rdb
             r config set rdbcompression yes
 
-            assert_equal 1 $failed
-            assert_match {*Compressed RDB stream has trailing data*} $result
-            assert_no_match {*RDB looks OK*} $result
+            assert_equal 0 $failed
+            assert_match {*RDB looks OK*} $result
         }
 
         test "test valkey-check-rdb stats with empty RDB" {

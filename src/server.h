@@ -605,9 +605,11 @@ typedef enum {
     RDB_VERSION_CHECK_RELAXED
 } rdb_version_check_type;
 
-typedef enum { RDB_COMPRESSION_NO = 0,
-               RDB_COMPRESSION_YES,
-               RDB_COMPRESSION_LZ4 } rdb_compression_mode;
+typedef enum {
+    RDB_COMPRESSION_NO = 0,
+    RDB_COMPRESSION_YES,
+    RDB_COMPRESSION_LZ4
+} rdb_compression_mode;
 
 /* Structure representing a non-owning view of a buffer.
  * A stringRef struct does not manage the underlying memory, so its destruction
@@ -1622,12 +1624,6 @@ typedef enum {
     PROPAGATION_ERR_BEHAVIOR_PANIC_ON_REPLICAS
 } replicationErrorBehavior;
 
-typedef enum {
-    RDB_LOAD_FORMAT_UNKNOWN = 0,
-    RDB_LOAD_FORMAT_PLAIN,
-    RDB_LOAD_FORMAT_VCS,
-} rdbLoadFormat;
-
 /* This structure can be optionally passed to RDB save/load functions in
  * order to implement additional functionalities, by storing and loading
  * metadata to the RDB file.
@@ -1644,10 +1640,9 @@ typedef struct rdbSaveInfo {
     int repl_id_is_set;                   /* True if repl_id field is set. */
     char repl_id[CONFIG_RUN_ID_SIZE + 1]; /* Replication ID. */
     long long repl_offset;                /* Replication offset. */
-    rdbLoadFormat loaded_format;          /* Physical format classified by rdbLoad(). */
 } rdbSaveInfo;
 
-#define RDB_SAVE_INFO_INIT {-1, 0, "0000000000000000000000000000000000000000", -1, RDB_LOAD_FORMAT_UNKNOWN}
+#define RDB_SAVE_INFO_INIT {-1, 0, "0000000000000000000000000000000000000000", -1}
 
 struct malloc_stats {
     size_t zmalloc_used;
@@ -3329,7 +3324,7 @@ int rewriteAppendOnlyFileBackground(void);
 int loadAppendOnlyFiles(aofManifest *am);
 void stopAppendOnly(void);
 int startAppendOnly(void);
-int restartAOFWithSyncRdb(rdbLoadFormat loaded_format);
+int restartAOFWithSyncRdb(void);
 void backgroundRewriteDoneHandler(int exitcode, int bysignal);
 void killAppendOnlyChild(void);
 void restartAOFAfterSYNC(void);

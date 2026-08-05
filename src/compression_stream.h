@@ -60,11 +60,11 @@ typedef struct streamWriter {
     streamWriterState state;
 } streamWriter;
 
-/* Writer API. Init uses the codec's default compression level and enables its
- * integrity checks. Init, Write, Flush, and Finish return 0 on success and -1
- * on error. The writer pushes compressed bytes to write_cb. Errors are sticky:
- * later operations fail without emitting bytes. */
-int streamWriterInit(streamWriter *writer, compressionAlgo algo, streamWriterWriteFn write_cb, void *write_ctx);
+/* Writer API. Init uses the codec's default compression level and configures
+ * its integrity checks according to codec_checksum. Init, Write, Flush, Finish,
+ * and write_cb use C_OK/C_ERR. The writer pushes compressed bytes to write_cb.
+ * Errors are sticky: later operations fail without emitting bytes. */
+int streamWriterInit(streamWriter *writer, compressionAlgo algo, bool codec_checksum, streamWriterWriteFn write_cb, void *write_ctx);
 int streamWriterWrite(streamWriter *writer, const void *buf, size_t len);
 /* Emits codec-buffered bytes while leaving the frame open. */
 int streamWriterFlush(streamWriter *writer);
@@ -125,17 +125,18 @@ typedef struct streamReader {
     size_t decompressed_buf_len;
 } streamReader;
 
-/* Reader API. Initialization probes the source and may call read_cb. On
- * success, detected_algo receives ALGO_NONE for passthrough input or the
- * detected codec; the output pointer is optional. On failure, error_kind
- * classifies the error and the reader remains safe to free. */
+/* Reader API. Initialization returns C_OK/C_ERR, probes the source, and may
+ * call read_cb. On success, detected_algo receives ALGO_NONE for passthrough
+ * input or the detected codec; the output pointer is optional. On failure,
+ * error_kind classifies the error and the reader remains safe to free. */
 int streamReaderInit(streamReader *reader, const streamReaderConfig *cfg, streamReaderReadFn read_cb, void *read_ctx, compressionAlgo *detected_algo);
 /* Returns up to len bytes, 0 on EOF, or -1 on error. An error after partial
  * output is reported on the next call. */
 ssize_t streamReaderRead(streamReader *reader, void *buf, size_t len);
 /* Completes and validates a compressed frame after the logical parser has
- * consumed its payload. It stops at the frame boundary; the caller owns any
- * following transport framing or physical EOF validation. */
+ * consumed its payload. It stops at the frame boundary without requiring
+ * physical EOF, matching the plain RDB loader's treatment of trailing bytes.
+ * Returns C_OK/C_ERR. */
 int streamReaderFinish(streamReader *reader);
 void streamReaderFree(streamReader *reader);
 

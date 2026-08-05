@@ -38,6 +38,16 @@ proc assert_lz4_rdb_envelope {client} {
     assert_equal [list 86 67 83 1 1 0 1] $bytes
 }
 
+proc assert_lz4_rdb_checksum_flags {client expected} {
+    set frame_flg_offset [expr {7 + 4}]
+    binary scan [read_binary_file_prefix [dump_rdb_path $client] [expr {$frame_flg_offset + 1}]] cu* bytes
+    set frame_flg [lindex $bytes $frame_flg_offset]
+    set has_block_checksum [expr {($frame_flg & 0x10) != 0}]
+    set has_content_checksum [expr {($frame_flg & 0x04) != 0}]
+    assert_equal $expected $has_block_checksum
+    assert_equal $expected $has_content_checksum
+}
+
 proc write_rdb_test_dataset {client prefix} {
     $client flushall
     for {set i 0} {$i < 12} {incr i} {
@@ -71,6 +81,7 @@ start_server {overrides {save "" enable-debug-command local}} {
 
         assert_equal "OK" [r save]
         assert_lz4_rdb_envelope r
+        assert_lz4_rdb_checksum_flags r 1
         set loglines [count_log_lines 0]
         assert_equal "OK" [r debug reload nosave]
         verify_log_message 0 "*Logical RDB CRC64 skipped for streaming-compressed input*" $loglines
@@ -306,7 +317,7 @@ start_server {overrides {save "" enable-debug-command local}} {
         write_binary_file $rdbfile $original
     }
 
-    test {RDB loader rejects trailing data after an LZ4 frame} {
+    test {RDB loader ignores trailing data after an LZ4 frame like a plain RDB} {
         r config set rdbcompression lz4
         r flushall
         r set trailing-data:key value
@@ -318,11 +329,8 @@ start_server {overrides {save "" enable-debug-command local}} {
         puts -nonewline $fd "trailing-data"
         close $fd
 
-        set loglines [count_log_lines 0]
-        set failed [catch {r debug reload nosave} err]
-        assert_equal 1 $failed
-        assert_match "*Error trying to load the RDB*" $err
-        verify_log_message 0 "*Compressed RDB stream*has trailing data*" $loglines
+        assert_equal "OK" [r debug reload nosave]
+        assert_equal value [r get trailing-data:key]
     }
 
     test {LZ4 compressed RDB detects corruption in compressed payload} {
@@ -364,7 +372,7 @@ start_server {config "minimal.conf" args {"--rdbcompression lz4"}} {
 }
 
 start_server {overrides {save "" enable-debug-command local rdbchecksum no}} {
-    test {LZ4 compressed RDB validates codec checksums when rdbchecksum is no} {
+    test {rdbchecksum controls LZ4 frame checksums} {
         r config set rdbcompression lz4
         r flushall
         for {set i 0} {$i < 50} {incr i} {
@@ -373,23 +381,12 @@ start_server {overrides {save "" enable-debug-command local rdbchecksum no}} {
 
         r save
         assert_lz4_rdb_envelope r
+        assert_lz4_rdb_checksum_flags r 0
         set rdbfile [dump_rdb_path r]
-        set original [read_binary_file $rdbfile]
         set digest [debug_digest]
         set loglines [count_log_lines 0]
         assert_equal "OK" [r debug reload nosave]
         verify_log_message 0 "*Logical RDB CRC64 skipped for streaming-compressed input*" $loglines
-
-        set checksum_pos [expr {[string length $original] - 1}]
-        binary scan [string index $original $checksum_pos] cu checksum_byte
-        set corrupted [string replace $original $checksum_pos $checksum_pos \
-                           [binary format c [expr {$checksum_byte ^ 1}]]]
-        write_binary_file $rdbfile $corrupted
-
-        set failed [catch {r debug reload nosave} err]
-        assert_equal 1 $failed
-        assert_match "*Error trying to load the RDB*" $err
-        write_binary_file $rdbfile $original
 
         restart_server 0 true false
         set newdigest [debug_digest]

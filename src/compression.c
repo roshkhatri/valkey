@@ -36,8 +36,7 @@ int streamCompressorInit(streamCompressor *compressor,
 
     switch (algo) {
     case ALGO_LZ4:
-        compressionLz4CompressorInit(compressor);
-        return C_OK;
+        return compressionLz4CompressorInit(compressor);
     default:
         return C_ERR;
     }
@@ -87,8 +86,7 @@ int streamDecompressorInit(streamDecompressor *decompressor,
 
     switch (algo) {
     case ALGO_LZ4:
-        compressionLz4DecompressorInit(decompressor);
-        return C_OK;
+        return compressionLz4DecompressorInit(decompressor);
     default:
         return C_ERR;
     }

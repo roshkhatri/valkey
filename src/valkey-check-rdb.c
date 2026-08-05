@@ -100,6 +100,16 @@ static unsigned long long rdbCheckOffset(void) {
     return (unsigned long long)rdbstate.rio->processed_bytes;
 }
 
+static void rdbCheckPrintOffset(const char *msg) {
+    if (rdbstate.rio && (rdbstate.rio->flags & RIO_FLAG_STREAMING_COMPRESSION)) {
+        printf("[logical offset %llu, physical offset %llu] %s\n",
+               (unsigned long long)rdbstate.rio->processed_bytes,
+               (unsigned long long)rdbstate.rio->stream_processed_bytes, msg);
+    } else {
+        printf("[offset %llu] %s\n", rdbCheckOffset(), msg);
+    }
+}
+
 /* At every loading step try to remember what we were about to do, so that
  * we can log this information when an error is encountered. */
 #define RDB_CHECK_DOING_START 0
@@ -528,7 +538,7 @@ void rdbCheckError(const char *fmt, ...) {
     va_end(ap);
 
     printf("--- RDB ERROR DETECTED ---\n");
-    printf("[offset %llu] %s\n", rdbCheckOffset(), msg);
+    rdbCheckPrintOffset(msg);
     printf("[additional info] While doing: %s\n", rdb_check_doing_string[rdbstate.doing]);
     if (rdbstate.key) printf("[additional info] Reading key '%s'\n", (char *)objectGetVal(rdbstate.key));
     if (rdbstate.key_type != -1)
@@ -557,7 +567,7 @@ void rdbCheckInfo(const char *fmt, ...) {
         va_end(ap);
     }
 
-    printf("[offset %llu] %s\n", rdbCheckOffset(), msgbuf);
+    rdbCheckPrintOffset(msgbuf);
 
     if (msgbuf != msg) sdsfree(msgbuf);
 }
@@ -836,45 +846,36 @@ int redis_check_rdb(char *rdbfilename, FILE *fp) {
         rdbstate.key_type = -1;
         expiretime = -1;
     }
-    /* Verify the checksum if RDB version is >= 5 */
-    if (rdbver >= 5 && server.rdb_checksum) {
+    /* Consume the checksum trailer for every RDB version that has one. Whether
+     * it is validated is controlled separately by the checksum policy. */
+    if (rdbver >= 5) {
         uint64_t cksum, expected = rdb->cksum;
 
         rdbstate.doing = RDB_CHECK_DOING_CHECK_SUM;
         if (rioRead(rdb, &cksum, 8) == 0) goto eoferr;
-        memrev64ifbe(&cksum);
         if ((rdb->flags & RIO_FLAG_STREAMING_COMPRESSION) && (rdb->flags & RIO_FLAG_SKIP_RDB_CHECKSUM)) {
             rdbCheckInfo("Logical RDB CRC64 skipped for streaming-compressed input.");
-        } else if (rdb->flags & RIO_FLAG_SKIP_RDB_CHECKSUM) {
-            rdbCheckInfo("RDB file was saved with checksum disabled: skipped checksum for this transfer.");
-        } else if (cksum == 0) {
-            rdbCheckInfo("RDB file was saved with checksum disabled: no check performed.");
-        } else if (cksum != expected) {
-            rdbCheckError("RDB CRC error");
-            goto err;
-        } else {
-            rdbCheckInfo("Checksum OK");
+        } else if (server.rdb_checksum) {
+            memrev64ifbe(&cksum);
+            if (rdb->flags & RIO_FLAG_SKIP_RDB_CHECKSUM) {
+                rdbCheckInfo("RDB file was saved with checksum disabled: skipped checksum for this transfer.");
+            } else if (cksum == 0) {
+                rdbCheckInfo("RDB file was saved with checksum disabled: no check performed.");
+            } else if (cksum != expected) {
+                rdbCheckError("RDB CRC error");
+                goto err;
+            } else {
+                rdbCheckInfo("Checksum OK");
+            }
         }
     }
 
-    if (streamReaderFinish(&stream_reader) != 0) {
+    if (stream_reader_initialized && streamReaderFinish(&stream_reader) == C_ERR) {
         rdbCheckError("Compressed RDB stream did not end cleanly");
         goto err;
     }
-    if (rdb->flags & RIO_FLAG_STREAMING_COMPRESSION) {
-        uint8_t trailing_byte;
-        ssize_t trailing_len = rioReadRawPartial(rdb, &trailing_byte, 1);
-        if (trailing_len < 0) {
-            rdbCheckError("I/O error while checking the end of compressed RDB stream");
-            goto err;
-        } else if (trailing_len > 0) {
-            rdbCheckError("Compressed RDB stream has trailing data");
-            goto err;
-        }
-    }
 
     if (stream_reader_initialized) rdbFreeStreamReader(&file_rdb, &stream_reader);
-    rdbstate.rio = &file_rdb;
     if (closefile) fclose(fp);
     stopLoading(1);
     return 0;
@@ -889,7 +890,6 @@ eoferr: /* unexpected end of file is handled here with a fatal exit */
     }
 err:
     if (stream_reader_initialized) rdbFreeStreamReader(&file_rdb, &stream_reader);
-    rdbstate.rio = &file_rdb;
     if (closefile) fclose(fp);
     stopLoading(0);
     return 1;

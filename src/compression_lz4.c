@@ -5,6 +5,7 @@
  */
 
 #include "compression_lz4.h"
+#include "server.h"
 #include "serverassert.h"
 #include "zmalloc.h"
 #include <limits.h>
@@ -48,9 +49,9 @@ static const LZ4F_preferences_t lz4f_prefs = {
 
 /* ===== Compressor ===== */
 
-void compressionLz4CompressorInit(streamCompressor *compressor) {
+int compressionLz4CompressorInit(streamCompressor *compressor) {
     compressor->ctx = LZ4F_createCompressionContext_advanced(lz4f_mem, LZ4F_VERSION);
-    assert(compressor->ctx != NULL);
+    return compressor->ctx != NULL ? C_OK : C_ERR;
 }
 
 size_t compressionLz4OutputBound(size_t input_len) {
@@ -125,10 +126,11 @@ void compressionLz4CompressorFree(streamCompressor *compressor) {
 
 /* ===== Decompressor ===== */
 
-void compressionLz4DecompressorInit(streamDecompressor *decompressor) {
+int compressionLz4DecompressorInit(streamDecompressor *decompressor) {
     decompressor->ctx = LZ4F_createDecompressionContext_advanced(lz4f_mem, LZ4F_VERSION);
-    assert(decompressor->ctx != NULL);
+    if (decompressor->ctx == NULL) return C_ERR;
     decompressor->input_hint = LZ4F_HEADER_SIZE_MIN;
+    return C_OK;
 }
 
 ssize_t compressionLz4DecompressFeed(streamDecompressor *decompressor,
