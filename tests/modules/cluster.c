@@ -111,6 +111,16 @@ int test_send_msg_type3(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int arg
     return ValkeyModule_ReplyWithSimpleString(ctx, "OK");
 }
 
+int test_send_too_large(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
+    UNUSED(argv);
+    if (argc != 1) return ValkeyModule_WrongArity(ctx);
+
+    if (ValkeyModule_SendClusterMessage(ctx, NULL, MSGTYPE_TEST_UAF, "", UINT32_MAX) != VALKEYMODULE_ERR) {
+        return ValkeyModule_ReplyWithError(ctx, "ERR oversized cluster message was accepted");
+    }
+    return ValkeyModule_ReplyWithSimpleString(ctx, "OK");
+}
+
 int ValkeyModule_OnLoad(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     VALKEYMODULE_NOT_USED(argv);
     VALKEYMODULE_NOT_USED(argc);
@@ -136,6 +146,8 @@ int ValkeyModule_OnLoad(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int arg
     if (ValkeyModule_CreateCommand(ctx, "test.unregister_receiver", test_unregister_receiver, "", 0, 0, 0) == VALKEYMODULE_ERR)
         return VALKEYMODULE_ERR;
     if (ValkeyModule_CreateCommand(ctx, "test.send_msg_type3", test_send_msg_type3, "", 0, 0, 0) == VALKEYMODULE_ERR)
+        return VALKEYMODULE_ERR;
+    if (ValkeyModule_CreateCommand(ctx, "test.send_too_large", test_send_too_large, "", 0, 0, 0) == VALKEYMODULE_ERR)
         return VALKEYMODULE_ERR;
 
     /* Register our handlers for different message types. */
