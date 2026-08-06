@@ -1768,7 +1768,8 @@ void clusterReset(int hard) {
  * CLUSTER communication link
  * -------------------------------------------------------------------------- */
 clusterMsgSendBlock *createClusterMsgSendBlock(int type, uint32_t msglen) {
-    uint32_t blocklen = msglen + offsetof(clusterMsgSendBlock, data);
+    serverAssert(msglen <= CLUSTERMSG_MAX_LEN);
+    size_t blocklen = (size_t)msglen + offsetof(clusterMsgSendBlock, data);
     clusterMsgSendBlock *msgblock = zcalloc(blocklen);
     msgblock->refcount = 1;
     msgblock->totlen = blocklen;
@@ -3424,20 +3425,55 @@ static clusterMsgPingExt *getNextPingExt(clusterMsgPingExt *ext) {
 }
 
 /* All PING extensions must be 8-byte aligned */
-static uint32_t getAlignedPingExtSize(uint32_t dataSize) {
-    return sizeof(clusterMsgPingExt) + EIGHT_BYTE_ALIGN(dataSize);
+static size_t getAlignedPingExtSize(size_t dataSize) {
+    if (dataSize > SIZE_MAX - 7) return SIZE_MAX;
+    size_t alignedSize = EIGHT_BYTE_ALIGN(dataSize);
+    if (alignedSize > SIZE_MAX - sizeof(clusterMsgPingExt)) return SIZE_MAX;
+    return sizeof(clusterMsgPingExt) + alignedSize;
 }
 
-static uint32_t getShardIdPingExtSize(void) {
+static size_t getShardIdPingExtSize(void) {
     return getAlignedPingExtSize(sizeof(clusterMsgPingExtShardId));
 }
 
-static uint32_t getForgottenNodeExtSize(void) {
+static size_t getForgottenNodeExtSize(void) {
     return getAlignedPingExtSize(sizeof(clusterMsgPingExtForgottenNode));
 }
 
 static uint32_t getReplicaPriorityExtSize(void) {
     return getAlignedPingExtSize(sizeof(clusterMsgPingExtReplicaPriority));
+}
+
+static int isPingExtContentValid(clusterMsgPingExt *ext, uint32_t extlen) {
+    size_t minlen;
+
+    switch (ntohs(ext->type)) {
+    case CLUSTERMSG_EXT_TYPE_HOSTNAME:
+    case CLUSTERMSG_EXT_TYPE_HUMAN_NODENAME:
+    case CLUSTERMSG_EXT_TYPE_CLIENT_IPV4:
+    case CLUSTERMSG_EXT_TYPE_CLIENT_IPV6:
+    case CLUSTERMSG_EXT_TYPE_AVAILABILITY_ZONE:
+        return extlen > sizeof(*ext) && memchr(&ext->ext[0], '\0', extlen - sizeof(*ext)) != NULL;
+    case CLUSTERMSG_EXT_TYPE_FORGOTTEN_NODE:
+        minlen = getForgottenNodeExtSize();
+        break;
+    case CLUSTERMSG_EXT_TYPE_SHARDID:
+        minlen = getShardIdPingExtSize();
+        break;
+    case CLUSTERMSG_EXT_TYPE_CLIENT_PORT:
+        minlen = getAlignedPingExtSize(sizeof(clusterMsgPingExtClientPort));
+        break;
+    case CLUSTERMSG_EXT_TYPE_CLIENT_TLS_PORT:
+        minlen = getAlignedPingExtSize(sizeof(clusterMsgPingExtClientTlsPort));
+        break;
+    case CLUSTERMSG_EXT_TYPE_REPLICA_PRIORITY:
+        minlen = getReplicaPriorityExtSize();
+        break;
+    default:
+        return 1;
+    }
+
+    return extlen >= minlen;
 }
 
 static void *preparePingExt(clusterMsgPingExt *ext, uint16_t type, uint32_t length) {
@@ -3446,127 +3482,149 @@ static void *preparePingExt(clusterMsgPingExt *ext, uint16_t type, uint32_t leng
     return &ext->ext[0];
 }
 
-/* If given value is non-empty:
- * - with non-NULL cursor, function writes a ping extension at the cursor, advances
- *   the cursor and increments totlen.
- * - with NULL cursor, function just computes the size and increments totlen.
- * If given value is empty, function does no computation.
- * Returns 1 (added a new extension) or 0 (no extension added).
- */
-static uint32_t
-writeSdsPingExtIfNonempty(uint32_t *totlen_ptr, clusterMsgPingExt **cursor_ptr, clusterMsgPingtypes type, sds value) {
+typedef struct {
+    clusterMsgPingExt *cursor;
+    size_t maxlen;
+    size_t totlen;
+    uint16_t extensions;
+    uint16_t extension_limit;
+    int omitted;
+} clusterPingExtensionWriter;
+
+static int canWritePingExt(clusterPingExtensionWriter *writer, size_t size) {
+    if (size == SIZE_MAX || writer->extensions == writer->extension_limit || size > writer->maxlen - writer->totlen) {
+        writer->omitted = 1;
+        return 0;
+    }
+    return 1;
+}
+
+static int writePingExt(clusterPingExtensionWriter *writer,
+                        clusterMsgPingtypes type,
+                        const void *data,
+                        size_t data_size,
+                        size_t copy_size) {
+    size_t size = getAlignedPingExtSize(data_size);
+    if (!canWritePingExt(writer, size)) return 0;
+
+    if (writer->cursor != NULL) {
+        void *ext = preparePingExt(writer->cursor, type, (uint32_t)size);
+        memcpy(ext, data, copy_size);
+        writer->cursor = getNextPingExt(writer->cursor);
+    }
+    writer->totlen += size;
+    writer->extensions++;
+    return 1;
+}
+
+static void writeSdsPingExtIfNonempty(clusterPingExtensionWriter *writer, clusterMsgPingtypes type, sds value) {
     size_t len = sdslen(value);
-    if (len == 0) return 0;
-    size_t size = getAlignedPingExtSize(len + 1);
-    if (*cursor_ptr != NULL) {
-        void *ext = preparePingExt(*cursor_ptr, type, size);
-        memcpy(ext, value, len);
-        *cursor_ptr = getNextPingExt(*cursor_ptr);
+    if (len == 0) return;
+    if (len == SIZE_MAX) {
+        writer->omitted = 1;
+        return;
     }
-    *totlen_ptr += size;
-    return 1;
+    writePingExt(writer, type, value, len + 1, len);
 }
 
-static uint32_t
-writePortPingExtIfNonzero(uint32_t *totlen_ptr, clusterMsgPingExt **cursor_ptr, clusterMsgPingtypes type, uint16_t value) {
-    if (value == 0) return 0;
-    size_t size = getAlignedPingExtSize(sizeof(clusterMsgPingExtClientPort));
-    if (*cursor_ptr != NULL) {
-        void *ext = preparePingExt(*cursor_ptr, type, size);
-        value = htons(value);
-        memcpy(ext, &value, sizeof(value));
-        *cursor_ptr = getNextPingExt(*cursor_ptr);
-    }
-    *totlen_ptr += size;
-    return 1;
+static void writePortPingExtIfNonzero(clusterPingExtensionWriter *writer,
+                                      clusterMsgPingtypes type,
+                                      uint16_t value) {
+    if (value == 0) return;
+    value = htons(value);
+    writePingExt(writer, type, &value, sizeof(value), sizeof(value));
 }
 
-/* 1. If a NULL hdr is provided, compute the extension size;
- * 2. If a non-NULL hdr is provided, write the ping
- *    extensions at the start of the cursor. This function
- *    will update the cursor to point to the end of the
- *    written extension and will return the amount of bytes
- *    written. */
-static uint32_t writePingExtensions(clusterMsg *hdr, int gossipcount) {
-    uint16_t extensions = 0;
-    uint32_t totlen = 0;
-    clusterMsgPingExt *cursor = NULL;
-    /* Set the initial extension position */
-    if (hdr != NULL) {
-        cursor = getInitialPingExt(hdr, gossipcount);
-    }
+static void writeEndpointPingExtensions(clusterPingExtensionWriter *writer) {
+    writeSdsPingExtIfNonempty(writer, CLUSTERMSG_EXT_TYPE_CLIENT_IPV4, myself->announce_client_ipv4);
+    writeSdsPingExtIfNonempty(writer, CLUSTERMSG_EXT_TYPE_CLIENT_IPV6, myself->announce_client_ipv6);
+    writePortPingExtIfNonzero(writer, CLUSTERMSG_EXT_TYPE_CLIENT_PORT, myself->announce_client_tcp_port);
+    writePortPingExtIfNonzero(writer, CLUSTERMSG_EXT_TYPE_CLIENT_TLS_PORT, myself->announce_client_tls_port);
+}
 
-    /* Write simple optional SDS ping extensions. */
-    extensions += writeSdsPingExtIfNonempty(&totlen, &cursor, CLUSTERMSG_EXT_TYPE_HOSTNAME, myself->hostname);
-    extensions +=
-        writeSdsPingExtIfNonempty(&totlen, &cursor, CLUSTERMSG_EXT_TYPE_HUMAN_NODENAME, myself->human_nodename);
-    extensions +=
-        writeSdsPingExtIfNonempty(&totlen, &cursor, CLUSTERMSG_EXT_TYPE_CLIENT_IPV4, myself->announce_client_ipv4);
-    extensions +=
-        writeSdsPingExtIfNonempty(&totlen, &cursor, CLUSTERMSG_EXT_TYPE_CLIENT_IPV6, myself->announce_client_ipv6);
-    extensions +=
-        writePortPingExtIfNonzero(&totlen, &cursor, CLUSTERMSG_EXT_TYPE_CLIENT_PORT, myself->announce_client_tcp_port);
-    extensions +=
-        writePortPingExtIfNonzero(&totlen, &cursor, CLUSTERMSG_EXT_TYPE_CLIENT_TLS_PORT, myself->announce_client_tls_port);
-    extensions +=
-        writeSdsPingExtIfNonempty(&totlen, &cursor, CLUSTERMSG_EXT_TYPE_AVAILABILITY_ZONE, myself->availability_zone);
+static void writeForgottenNodePingExtensions(clusterPingExtensionWriter *writer) {
+    if (dictSize(server.cluster->nodes_black_list) == 0) return;
 
+    dictIterator *di = dictGetIterator(server.cluster->nodes_black_list);
+    dictEntry *de;
+    while ((de = dictNext(di)) != NULL) {
+        uint64_t expire = dictGetUnsignedIntegerVal(de);
+        if ((time_t)expire < server.unixtime) continue; /* already expired */
 
-    /* Gossip forgotten nodes */
-    if (dictSize(server.cluster->nodes_black_list) > 0) {
-        dictIterator *di = dictGetIterator(server.cluster->nodes_black_list);
-        dictEntry *de;
-        while ((de = dictNext(di)) != NULL) {
-            if (cursor != NULL) {
-                uint64_t expire = dictGetUnsignedIntegerVal(de);
-                if ((time_t)expire < server.unixtime) continue; /* already expired */
-                uint64_t ttl = expire - server.unixtime;
-                clusterMsgPingExtForgottenNode *ext =
-                    preparePingExt(cursor, CLUSTERMSG_EXT_TYPE_FORGOTTEN_NODE, getForgottenNodeExtSize());
-                memcpy(ext->name, dictGetKey(de), CLUSTER_NAMELEN);
-                ext->ttl = htonu64(ttl);
-
-                /* Move the write cursor */
-                cursor = getNextPingExt(cursor);
-            }
-            totlen += getForgottenNodeExtSize();
-            extensions++;
+        clusterMsgPingExtForgottenNode forgotten_node;
+        memcpy(forgotten_node.name, dictGetKey(de), CLUSTER_NAMELEN);
+        forgotten_node.ttl = htonu64(expire - server.unixtime);
+        if (!writePingExt(writer,
+                          CLUSTERMSG_EXT_TYPE_FORGOTTEN_NODE,
+                          &forgotten_node,
+                          sizeof(forgotten_node),
+                          sizeof(forgotten_node))) {
+            break;
         }
-        dictReleaseIterator(di);
     }
+    dictReleaseIterator(di);
+}
 
-    /* Populate shard_id */
-    if (cursor != NULL) {
-        clusterMsgPingExtShardId *ext = preparePingExt(cursor, CLUSTERMSG_EXT_TYPE_SHARDID, getShardIdPingExtSize());
-        memcpy(ext->shard_id, myself->shard_id, CLUSTER_NAMELEN);
+/* Select and optionally write PING extensions up to maxlen. Shard identity is
+ * always selected first. Space and extension slots for endpoint metadata are
+ * reserved while forgotten-node state consumes the remaining high-priority
+ * budget. Large descriptive strings are selected last. */
+static clusterPingExtensionWriter writePingExtensions(clusterMsg *hdr, int gossipcount, size_t maxlen) {
+    clusterPingExtensionWriter writer = {
+        .cursor = hdr != NULL ? getInitialPingExt(hdr, gossipcount) : NULL,
+        .maxlen = maxlen,
+        .extension_limit = UINT16_MAX,
+    };
 
-        /* Move the write cursor */
-        cursor = getNextPingExt(cursor);
-    }
-    totlen += getShardIdPingExtSize();
-    extensions++;
+    writePingExt(&writer,
+                 CLUSTERMSG_EXT_TYPE_SHARDID,
+                 myself->shard_id,
+                 sizeof(myself->shard_id),
+                 sizeof(myself->shard_id));
 
     /* Only advertise when non-zero: 0 is the default priority and its absence
      * is treated as 0 by receivers, which avoids extra gossip for the common
-     * case and stays compatible with older nodes that never send this field. */
+     * case and stays compatible with older nodes that never send this field.
+     * Selected right after shard identity so forgotten-node state and the
+     * descriptive strings cannot push a four byte field that affects failover
+     * ranking out of the packet. */
     if (myself->replica_priority != 0) {
-        if (cursor != NULL) {
-            clusterMsgPingExtReplicaPriority *ext = preparePingExt(cursor, CLUSTERMSG_EXT_TYPE_REPLICA_PRIORITY, getReplicaPriorityExtSize());
-            ext->replica_priority = htonl(myself->replica_priority);
-
-            /* Move the write cursor */
-            cursor = getNextPingExt(cursor);
-        }
-        totlen += getReplicaPriorityExtSize();
-        extensions++;
+        clusterMsgPingExtReplicaPriority priority_ext;
+        priority_ext.replica_priority = htonl(myself->replica_priority);
+        writePingExt(&writer, CLUSTERMSG_EXT_TYPE_REPLICA_PRIORITY, &priority_ext, sizeof(priority_ext),
+                     sizeof(priority_ext));
     }
+
+    clusterPingExtensionWriter endpoint_reserve = {
+        .maxlen = SIZE_MAX,
+        .extension_limit = UINT16_MAX,
+    };
+    writeEndpointPingExtensions(&endpoint_reserve);
+
+    size_t full_maxlen = writer.maxlen;
+    uint16_t full_extension_limit = writer.extension_limit;
+    if (endpoint_reserve.totlen <= writer.maxlen - writer.totlen) {
+        writer.maxlen -= endpoint_reserve.totlen;
+    } else {
+        writer.maxlen = writer.totlen;
+    }
+    writer.extension_limit -= endpoint_reserve.extensions;
+    writeForgottenNodePingExtensions(&writer);
+    writer.maxlen = full_maxlen;
+    writer.extension_limit = full_extension_limit;
+
+    writeEndpointPingExtensions(&writer);
+    writeSdsPingExtIfNonempty(&writer, CLUSTERMSG_EXT_TYPE_HOSTNAME, myself->hostname);
+    writeSdsPingExtIfNonempty(&writer, CLUSTERMSG_EXT_TYPE_HUMAN_NODENAME, myself->human_nodename);
+    writeSdsPingExtIfNonempty(&writer, CLUSTERMSG_EXT_TYPE_AVAILABILITY_ZONE, myself->availability_zone);
 
     if (hdr != NULL) {
         hdr->mflags[0] |= CLUSTERMSG_FLAG0_EXT_DATA;
-        hdr->extensions = htons(extensions);
+        if (writer.omitted) hdr->mflags[0] |= CLUSTERMSG_FLAG0_EXT_PARTIAL;
+        hdr->extensions = htons(writer.extensions);
     }
 
-    return totlen;
+    return writer;
 }
 
 /* We previously validated the extensions, so this function just needs to
@@ -3574,6 +3632,9 @@ static uint32_t writePingExtensions(clusterMsg *hdr, int gossipcount) {
  * processing, or 0 if the link was freed due to invalid data. */
 int clusterProcessPingExtensions(clusterMsg *hdr, clusterLink *link) {
     clusterNode *sender = link->node ? link->node : clusterLookupNode(hdr->sender, CLUSTER_NAMELEN);
+    uint16_t extensions = ntohs(hdr->extensions);
+    int preserve_missing = extensions == 0 || (hdr->mflags[0] & CLUSTERMSG_FLAG0_EXT_PARTIAL);
+
     char *ext_hostname = NULL;
     char *ext_humannodename = NULL;
     char *ext_availability_zone = NULL;
@@ -3583,7 +3644,14 @@ int clusterProcessPingExtensions(clusterMsg *hdr, clusterLink *link) {
     int ext_clienttlsport = 0;
     char *ext_shardid = NULL;
     unsigned int ext_replica_priority = 0;
-    uint16_t extensions = ntohs(hdr->extensions);
+    int has_hostname = 0;
+    int has_humannodename = 0;
+    int has_availability_zone = 0;
+    int has_clientipv4 = 0;
+    int has_clientipv6 = 0;
+    int has_clientport = 0;
+    int has_clienttlsport = 0;
+    int has_replica_priority = 0;
     /* Loop through all the extensions and process them */
     clusterMsgPingExt *ext = getInitialPingExt(hdr, ntohs(hdr->count));
     while (extensions--) {
@@ -3591,26 +3659,32 @@ int clusterProcessPingExtensions(clusterMsg *hdr, clusterLink *link) {
         if (type == CLUSTERMSG_EXT_TYPE_HOSTNAME) {
             clusterMsgPingExtHostname *hostname_ext = (clusterMsgPingExtHostname *)&(ext->ext[0].hostname);
             ext_hostname = hostname_ext->hostname;
+            has_hostname = 1;
         } else if (type == CLUSTERMSG_EXT_TYPE_HUMAN_NODENAME) {
             clusterMsgPingExtHumanNodename *humannodename_ext =
                 (clusterMsgPingExtHumanNodename *)&(ext->ext[0].human_nodename);
             ext_humannodename = humannodename_ext->human_nodename;
+            has_humannodename = 1;
         } else if (type == CLUSTERMSG_EXT_TYPE_CLIENT_IPV4) {
             clusterMsgPingExtClientIpV4 *clientipv4_ext =
                 (clusterMsgPingExtClientIpV4 *)&(ext->ext[0].announce_client_ipv4);
             ext_clientipv4 = clientipv4_ext->announce_client_ipv4;
+            has_clientipv4 = 1;
         } else if (type == CLUSTERMSG_EXT_TYPE_CLIENT_IPV6) {
             clusterMsgPingExtClientIpV6 *clientipv6_ext =
                 (clusterMsgPingExtClientIpV6 *)&(ext->ext[0].announce_client_ipv6);
             ext_clientipv6 = clientipv6_ext->announce_client_ipv6;
+            has_clientipv6 = 1;
         } else if (type == CLUSTERMSG_EXT_TYPE_CLIENT_PORT) {
             clusterMsgPingExtClientPort *clientport_ext =
                 (clusterMsgPingExtClientPort *)&(ext->ext[0].announce_client_port);
             ext_clientport = ntohs(clientport_ext->announce_client_port);
+            has_clientport = 1;
         } else if (type == CLUSTERMSG_EXT_TYPE_CLIENT_TLS_PORT) {
             clusterMsgPingExtClientTlsPort *clienttlsport_ext =
                 (clusterMsgPingExtClientTlsPort *)&(ext->ext[0].announce_client_tls_port);
             ext_clienttlsport = ntohs(clienttlsport_ext->announce_client_tls_port);
+            has_clienttlsport = 1;
         } else if (type == CLUSTERMSG_EXT_TYPE_FORGOTTEN_NODE) {
             clusterMsgPingExtForgottenNode *forgotten_node_ext = &(ext->ext[0].forgotten_node);
             clusterNode *n = clusterLookupNode(forgotten_node_ext->name, CLUSTER_NAMELEN);
@@ -3633,9 +3707,11 @@ int clusterProcessPingExtensions(clusterMsg *hdr, clusterLink *link) {
             clusterMsgPingExtAvailabilityZone *availability_zone_ext =
                 (clusterMsgPingExtAvailabilityZone *)&(ext->ext[0].availability_zone);
             ext_availability_zone = availability_zone_ext->availability_zone;
+            has_availability_zone = 1;
         } else if (type == CLUSTERMSG_EXT_TYPE_REPLICA_PRIORITY) {
             clusterMsgPingExtReplicaPriority *priority_ext = (clusterMsgPingExtReplicaPriority *)&(ext->ext[0].replica_priority);
             ext_replica_priority = ntohl(priority_ext->replica_priority);
+            has_replica_priority = 1;
         } else {
             /* Unknown type, we will ignore it but log what happened. */
             serverLog(LL_WARNING, "Received unknown extension type %d", type);
@@ -3645,20 +3721,22 @@ int clusterProcessPingExtensions(clusterMsg *hdr, clusterLink *link) {
         ext = getNextPingExt(ext);
     }
 
-    /* If the node did not send us a hostname extension, assume
-     * they don't have an announced hostname. Otherwise, we'll
-     * set it now. */
-    updateAnnouncedHostname(sender, ext_hostname);
-    updateAnnouncedHumanNodename(sender, ext_humannodename);
-    updateAnnouncedClientIpV4(sender, ext_clientipv4);
-    updateAnnouncedClientIpV6(sender, ext_clientipv6);
-    updateAnnouncedClientPort(sender, ext_clientport);
-    updateAnnouncedClientTlsPort(sender, ext_clienttlsport);
-    updateAvailabilityZone(sender, ext_availability_zone);
+    /* Complete extension sets use absence to clear metadata. Zero-extension
+     * packets from old peers and explicitly partial sets preserve fields that
+     * were not transmitted. */
+    if (!preserve_missing || has_hostname) updateAnnouncedHostname(sender, ext_hostname);
+    if (!preserve_missing || has_humannodename) updateAnnouncedHumanNodename(sender, ext_humannodename);
+    if (!preserve_missing || has_clientipv4) updateAnnouncedClientIpV4(sender, ext_clientipv4);
+    if (!preserve_missing || has_clientipv6) updateAnnouncedClientIpV6(sender, ext_clientipv6);
+    if (!preserve_missing || has_clientport) updateAnnouncedClientPort(sender, ext_clientport);
+    if (!preserve_missing || has_clienttlsport) updateAnnouncedClientTlsPort(sender, ext_clienttlsport);
+    if (!preserve_missing || has_availability_zone) updateAvailabilityZone(sender, ext_availability_zone);
     /* Apply the sender's replica priority. ext_replica_priority defaults to 0,
-     * so a node that doesn't advertise the extension (old version, reverted to
-     * the default, or simply set to 0) is consistently treated as priority 0. */
-    updateReplicaPriority(sender, ext_replica_priority);
+     * so a complete extension set that omits the field means the sender is at
+     * the default, reverted to it, or predates the field. A partial set carries
+     * no such meaning, so the last known priority is kept to avoid changing
+     * failover ranking on a packet that was truncated for budget reasons. */
+    if (!preserve_missing || has_replica_priority) updateReplicaPriority(sender, ext_replica_priority);
     /* If the node did not send us a shard-id extension, it means the sender
      * does not support it (old version), node->shard_id is randomly generated.
      * A cluster-wide consensus for the node's shard_id is not necessary.
@@ -3794,7 +3872,8 @@ int clusterIsValidPacket(clusterLink *link) {
               (unsigned long)totlen);
 
     /* Perform sanity checks */
-    if (totlen < 16) return 0; /* At least signature, version, totlen, count. */
+    uint32_t minlen = is_light ? CLUSTERMSG_LIGHT_MIN_LEN : CLUSTERMSG_MIN_LEN;
+    if (totlen < minlen) return 0;
     if (totlen > link->rcvbuf_len) return 0;
 
     if (ntohs(hdr->ver) != CLUSTER_PROTO_VER) {
@@ -3828,9 +3907,9 @@ int clusterIsValidPacket(clusterLink *link) {
             return 0;
         }
 
-        /* If there is extension data, which doesn't have a fixed length,
-         * loop through them and validate the length of it now. */
-        if (msg->mflags[0] & CLUSTERMSG_FLAG0_EXT_DATA) {
+        /* Extension count is consumed by clusterProcessPingExtensions regardless of
+         * the capability flag, so validate every declared extension here. */
+        if (extensions) {
             clusterMsgPingExt *ext = getInitialPingExt(msg, count);
             while (extensions--) {
                 /* Make sure there is at least enough memory for the extension information so
@@ -3843,8 +3922,8 @@ int clusterIsValidPacket(clusterLink *link) {
                     return 0;
                 }
                 uint32_t extlen = getPingExtLength(ext);
-                if (extlen % 8 != 0) {
-                    serverLog(LL_WARNING, "Received a %s packet without proper padding (%d bytes)",
+                if (extlen < sizeof(clusterMsgPingExt) || extlen % 8 != 0) {
+                    serverLog(LL_WARNING, "Received a %s packet with invalid extension length (%d bytes)",
                               clusterGetMessageTypeString(type), (int)extlen);
                     return 0;
                 }
@@ -3855,6 +3934,11 @@ int clusterIsValidPacket(clusterLink *link) {
                               "Received invalid %s packet with extension data that exceeds "
                               "total packet length (%lld)",
                               clusterGetMessageTypeString(type), (unsigned long long)totlen);
+                    return 0;
+                }
+                if (!isPingExtContentValid(ext, extlen)) {
+                    serverLog(LL_WARNING, "Received a %s packet with invalid extension data",
+                              clusterGetMessageTypeString(type));
                     return 0;
                 }
                 explen += extlen;
@@ -4729,7 +4813,7 @@ static inline int isClusterMsgSignatureAndLengthValid(clusterMsgHeader *hdr) {
     uint16_t type = ntohs(hdr->type);
     uint32_t totlen = ntohl(hdr->totlen);
     uint32_t minlen = IS_LIGHT_MESSAGE(type) ? CLUSTERMSG_LIGHT_MIN_LEN : CLUSTERMSG_MIN_LEN;
-    if (totlen < minlen) return 0;
+    if (totlen < minlen || totlen > CLUSTERMSG_MAX_LEN) return 0;
     return 1;
 }
 
@@ -4961,6 +5045,8 @@ void clusterSetGossipEntry(clusterMsg *hdr, int i, clusterNode *n) {
     gossip->notused1 = 0;
 }
 
+#define CLUSTERMSG_EXTENSIONS_LOG_WARNING_RATE 30 /* Seconds between warnings. */
+
 /* Send a PING or PONG packet to the specified node, making sure to add enough
  * gossip information. */
 void clusterSendPing(clusterLink *link, int type) {
@@ -4974,7 +5060,6 @@ void clusterSendPing(clusterLink *link, int type) {
     cluster_pings_sent++;
     int gossipcount = 0; /* Number of gossip sections added so far. */
     int wanted;          /* Number of gossip sections we want to append if possible. */
-    int estlen;          /* Upper bound on estimated packet length */
     /* freshnodes is the max number of nodes we can hope to append at all:
      * nodes available minus two (ourself and the node we are sending the
      * message to). However practically there may be less valid nodes since
@@ -5016,20 +5101,48 @@ void clusterSendPing(clusterLink *link, int type) {
      * faster to propagate to go from PFAIL to FAIL state. */
     int pfail_wanted = server.cluster->stats_pfail_nodes;
 
-    /* Compute the maximum estlen to allocate our buffer. We'll fix the estlen
-     * later according to the number of gossip sections we really were able
-     * to put inside the packet. */
-    estlen = sizeof(clusterMsg) - sizeof(union clusterMsgData);
-    estlen += (sizeof(clusterMsgDataGossip) * (wanted + pfail_wanted));
-    /* If the link or the node indicates that it supports extensions, then we
-     * pass the extensions. */
-    if (linkSupportsExtension(link) || (link->node && nodeSupportsExtensions(link->node))) {
-        estlen += writePingExtensions(NULL, 0);
+    /* The protocol count is 16 bits. Reserve capacity for PFAIL nodes first
+     * since they are the most important gossip entries, then use any remaining
+     * capacity for ordinary gossip. */
+    if (pfail_wanted > UINT16_MAX) pfail_wanted = UINT16_MAX;
+    if (wanted > UINT16_MAX - pfail_wanted) wanted = UINT16_MAX - pfail_wanted;
+
+    /* Compute the maximum length needed for the selected gossip entries. The
+     * actual packet length is fixed later according to the entries added. */
+    size_t max_gossip_count = (wanted > 0 ? (size_t)wanted : 0) + (size_t)pfail_wanted;
+    serverAssert(max_gossip_count <= UINT16_MAX);
+    size_t max_packet_len = CLUSTERMSG_MIN_LEN + sizeof(clusterMsgDataGossip) * max_gossip_count;
+    serverAssert(max_packet_len <= CLUSTERMSG_MAX_LEN);
+
+    /* If the link or the node indicates that it supports extensions, select a
+     * prioritized subset that fits after the conservatively reserved gossip. */
+    int supports_extensions = linkSupportsExtension(link) || (link->node && nodeSupportsExtensions(link->node));
+    int send_extensions = 0;
+    size_t extensions_budget = CLUSTERMSG_MAX_LEN - max_packet_len;
+    clusterPingExtensionWriter selected_extensions = {0};
+    if (supports_extensions) {
+        selected_extensions = writePingExtensions(NULL, 0, extensions_budget);
+        max_packet_len += selected_extensions.totlen;
+        send_extensions = 1;
+
+        if (selected_extensions.omitted) {
+            static time_t last_ping_extensions_warning = 0;
+            if ((server.unixtime - last_ping_extensions_warning) > CLUSTERMSG_EXTENSIONS_LOG_WARNING_RATE) {
+                serverLog(LL_WARNING,
+                          "Omitting lower-priority extensions from %s packet to node %.40s (%s): selected %zu "
+                          "bytes within the remaining packet budget of %zu bytes",
+                          clusterGetMessageTypeString(type), clusterLinkGetNodeName(link),
+                          clusterLinkGetHumanNodeName(link), selected_extensions.totlen, extensions_budget);
+                last_ping_extensions_warning = server.unixtime;
+            }
+        }
     }
+
     /* Note: clusterBuildMessageHdr() expects the buffer to be always at least
      * sizeof(clusterMsg) or more. */
-    if (estlen < (int)sizeof(clusterMsg)) estlen = sizeof(clusterMsg);
-    clusterMsgSendBlock *msgblock = createClusterMsgSendBlock(type, estlen);
+    size_t estlen = max_packet_len;
+    if (estlen < sizeof(clusterMsg)) estlen = sizeof(clusterMsg);
+    clusterMsgSendBlock *msgblock = createClusterMsgSendBlock(type, (uint32_t)estlen);
     clusterMsg *hdr = getMessageFromSendBlock(msgblock);
 
     if (!link->inbound) {
@@ -5106,19 +5219,24 @@ void clusterSendPing(clusterLink *link, int type) {
     }
 
     /* Compute the actual total length and send! */
-    uint32_t totlen = 0;
+    size_t totlen = CLUSTERMSG_MIN_LEN + sizeof(clusterMsgDataGossip) * (size_t)gossipcount;
 
-    if (linkSupportsExtension(link) || (link->node && nodeSupportsExtensions(link->node))) {
-        totlen += writePingExtensions(hdr, gossipcount);
+    if (send_extensions) {
+        clusterPingExtensionWriter written_extensions = writePingExtensions(hdr, gossipcount, extensions_budget);
+        serverAssert(written_extensions.totlen == selected_extensions.totlen);
+        serverAssert(written_extensions.extensions == selected_extensions.extensions);
+        serverAssert(written_extensions.omitted == selected_extensions.omitted);
+        totlen += written_extensions.totlen;
     } else {
-        serverLog(LL_DEBUG, "Unable to send extensions data, however setting ext data flag to true");
+        if (!supports_extensions) {
+            serverLog(LL_DEBUG, "Unable to send extensions data, however setting ext data flag to true");
+        }
         hdr->mflags[0] |= CLUSTERMSG_FLAG0_EXT_DATA;
     }
-    totlen += sizeof(clusterMsg) - sizeof(union clusterMsgData);
-    totlen += (sizeof(clusterMsgDataGossip) * gossipcount);
-    serverAssert(gossipcount < USHRT_MAX);
-    hdr->count = htons(gossipcount);
-    hdr->totlen = htonl(totlen);
+    serverAssert(totlen <= CLUSTERMSG_MAX_LEN);
+    serverAssert(gossipcount <= UINT16_MAX);
+    hdr->count = htons((uint16_t)gossipcount);
+    hdr->totlen = htonl((uint32_t)totlen);
 
     clusterSendMessage(link, msgblock);
     clusterMsgSendBlockDecrRefCount(msgblock);
@@ -5160,6 +5278,17 @@ void clusterBroadcastPong(int target) {
     dictReleaseIterator(di);
 }
 
+/* Return whether the normal-header representation fits the 16 MiB total
+ * cluster-bus packet limit. This also guarantees that the smaller light-header
+ * representation fits. */
+int clusterCanPropagatePublish(robj *channel, robj *message) {
+    size_t fixed_len = CLUSTERMSG_MIN_LEN + sizeof(clusterMsgDataPublish) - 8;
+    size_t channel_len = stringObjectLen(channel);
+
+    if (channel_len > CLUSTERMSG_MAX_LEN - fixed_len) return 0;
+    return stringObjectLen(message) <= CLUSTERMSG_MAX_LEN - fixed_len - channel_len;
+}
+
 /* Create a PUBLISH message block.
  *
  * Sanitizer suppression: In clusterMsgDataPublish, sizeof(bulk_data) is 8.
@@ -5171,6 +5300,7 @@ clusterMsgSendBlock *clusterCreatePublishMsgBlock(robj *channel, robj *message, 
     uint32_t channel_len, message_len;
     uint16_t type = is_sharded ? CLUSTERMSG_TYPE_PUBLISHSHARD : CLUSTERMSG_TYPE_PUBLISH;
 
+    serverAssert(clusterCanPropagatePublish(channel, message));
     channel = getDecodedObject(channel);
     message = getDecodedObject(message);
     channel_len = sdslen(objectGetVal(channel));
@@ -5257,6 +5387,14 @@ static inline bool nodeSupportsLightMsgHdrForModule(clusterNode *n) {
            (n->flags & CLUSTER_NODE_LIGHT_HDR_MODULE_SUPPORTED);
 }
 
+/* Return whether the normal-header representation fits the 16 MiB total
+ * cluster-bus packet limit. This also guarantees that the smaller light-header
+ * representation fits. */
+static int clusterCanSendModuleMessage(uint32_t len) {
+    size_t fixed_len = CLUSTERMSG_MIN_LEN + sizeof(clusterMsgModule) - 3;
+    return len <= CLUSTERMSG_MAX_LEN - fixed_len;
+}
+
 /* Create a MODULE message block.
  *
  * If is_light is 1, then build a message block with `clusterMsgLight` struct else `clusterMsg`. */
@@ -5266,6 +5404,7 @@ static clusterMsgSendBlock *createModuleMsgBlock(int64_t module_id, uint8_t type
     clusterMsgSendBlock *msgblock;
     clusterMsgModule *module_data;
 
+    serverAssert(clusterCanSendModuleMessage(len));
     if (is_light) {
         msglen = sizeof(clusterMsgLight) - sizeof(union clusterMsgData);
         msgtype = CLUSTERMSG_TYPE_MODULE | CLUSTERMSG_LIGHT;
@@ -5326,8 +5465,9 @@ void clusterSendModule(clusterLink *link, uint64_t module_id, uint8_t type, cons
  * addresses are represented in the modules side, resolves the node, and sends
  * the message. If the target is NULL the message is broadcasted.
  *
- * The function returns C_OK if the target is valid, otherwise C_ERR is
- * returned. */
+ * The function returns C_OK on success. It returns C_ERR if the target is
+ * invalid or disconnected, or if the payload does not fit within the
+ * cluster-bus packet limit. */
 int clusterSendModuleMessageToTarget(const char *target,
                                      uint64_t module_id,
                                      uint8_t type,
@@ -5335,6 +5475,7 @@ int clusterSendModuleMessageToTarget(const char *target,
                                      uint32_t len) {
     clusterNode *node = NULL;
 
+    if (!clusterCanSendModuleMessage(len)) return C_ERR;
     if (target != NULL) {
         node = clusterLookupNode(target, strlen(target));
         if (node == NULL || node->link == NULL) return C_ERR;
