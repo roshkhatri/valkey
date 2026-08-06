@@ -52,6 +52,12 @@ start_cluster 3 0 [list config_lines $modules] {
             fail "node 1 didn't log DONG message twice"
         }
     }
+
+    test "Cluster module send message API rejects oversized payload" {
+        set sent_before [CI 0 cluster_stats_messages_module_sent]
+        assert_equal OK [$node1 test.send_too_large]
+        assert_equal $sent_before [CI 0 cluster_stats_messages_module_sent]
+    }
 }
 
 set testmodule_nokey [file normalize tests/modules/blockonbackground.so]

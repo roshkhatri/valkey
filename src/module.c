@@ -4027,16 +4027,29 @@ int VM_SetClientNameById(uint64_t id, ValkeyModuleString *name) {
     return VALKEYMODULE_OK;
 }
 
-/* Publish a message to subscribers (see PUBLISH command). */
+/* Publish a message to subscribers (see PUBLISH command).
+ *
+ * The return value is the number of clients that received the message. In
+ * cluster mode, the combined channel and message payload is limited to
+ * 16,774,952 bytes so the normal-header representation fits the 16 MiB
+ * cluster-bus packet limit. If it does not fit, no local or remote delivery is
+ * performed, -1 is returned, and errno is set to EMSGSIZE. */
 int VM_PublishMessage(ValkeyModuleCtx *ctx, ValkeyModuleString *channel, ValkeyModuleString *message) {
     UNUSED(ctx);
-    return pubsubPublishMessageAndPropagateToCluster(channel, message, 0);
+    int receivers = pubsubPublishMessageAndPropagateToCluster(channel, message, 0);
+    if (receivers == C_ERR) errno = EMSGSIZE;
+    return receivers;
 }
 
-/* Publish a message to shard-subscribers (see SPUBLISH command). */
+/* Publish a message to shard-subscribers (see SPUBLISH command).
+ *
+ * The return value and cluster-mode size failure semantics are the same as for
+ * ValkeyModule_PublishMessage(). */
 int VM_PublishMessageShard(ValkeyModuleCtx *ctx, ValkeyModuleString *channel, ValkeyModuleString *message) {
     UNUSED(ctx);
-    return pubsubPublishMessageAndPropagateToCluster(channel, message, 1);
+    int receivers = pubsubPublishMessageAndPropagateToCluster(channel, message, 1);
+    if (receivers == C_ERR) errno = EMSGSIZE;
+    return receivers;
 }
 
 /* Return the currently selected DB.
@@ -9670,9 +9683,10 @@ void VM_RegisterClusterMessageReceiver(ValkeyModuleCtx *ctx,
  * In Valkey 8.1 and later, the cluster protocol overhead for this message is
  * ~30B, to compare with earlier versions where it's ~2KB.
  *
- * The function returns VALKEYMODULE_OK if the message was successfully sent,
- * otherwise if the node is not connected or such node ID does not map to any
- * known cluster node, VALKEYMODULE_ERR is returned. */
+ * The function returns VALKEYMODULE_OK if the message was successfully sent.
+ * VALKEYMODULE_ERR is returned if Cluster is disabled, the target node is
+ * unknown or disconnected, or the message does not fit within the 16 MiB total
+ * cluster-bus packet limit. */
 int VM_SendClusterMessage(ValkeyModuleCtx *ctx, const char *target_id, uint8_t type, const char *msg, uint32_t len) {
     if (!server.cluster_enabled) return VALKEYMODULE_ERR;
     uint64_t module_id = moduleTypeEncodeId(ctx->module->name, 0);

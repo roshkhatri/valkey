@@ -336,10 +336,11 @@ static_assert(offsetof(clusterMsg, data) == 2256, "unexpected field offset");
 
 /* Message flags better specify the packet content or are used to
  * provide some information about the node state. */
-#define CLUSTERMSG_FLAG0_PAUSED (1 << 0)   /* Primary paused for manual failover. */
-#define CLUSTERMSG_FLAG0_FORCEACK (1 << 1) /* Give ACK to AUTH_REQUEST even if \
-                                              primary is up. */
-#define CLUSTERMSG_FLAG0_EXT_DATA (1 << 2) /* Message contains extension data */
+#define CLUSTERMSG_FLAG0_PAUSED (1 << 0)      /* Primary paused for manual failover. */
+#define CLUSTERMSG_FLAG0_FORCEACK (1 << 1)    /* Give ACK to AUTH_REQUEST even if \
+                                                 primary is up. */
+#define CLUSTERMSG_FLAG0_EXT_DATA (1 << 2)    /* Message contains extension data */
+#define CLUSTERMSG_FLAG0_EXT_PARTIAL (1 << 3) /* Some extension data was omitted */
 
 typedef struct {
     char sig[4];     /* Signature "RCmb" (Cluster message bus). */
@@ -360,6 +361,16 @@ static_assert(offsetof(clusterMsgLight, notused2) == offsetof(clusterMsg, count)
 static_assert(offsetof(clusterMsgLight, data) == 16, "unexpected field offset");
 
 #define CLUSTERMSG_LIGHT_MIN_LEN (sizeof(clusterMsgLight) - sizeof(union clusterMsgData))
+
+/* Apply the same 16 MiB total wire-length limit to received and generated
+ * cluster-bus packets. During rolling upgrades, a node enforcing this limit
+ * closes a link if an older peer sends a larger packet. Deployments must avoid
+ * oversized Pub/Sub or module traffic until every sender enforces the limit,
+ * or backport sender enforcement before receiver enforcement. */
+#define CLUSTERMSG_MAX_LEN (16ULL * 1024 * 1024)
+static_assert(CLUSTERMSG_MAX_LEN <= UINT32_MAX, "cluster message length must fit in the wire field");
+static_assert(CLUSTERMSG_MIN_LEN + UINT16_MAX * sizeof(clusterMsgDataGossip) <= CLUSTERMSG_MAX_LEN,
+              "maximum fixed ping/gossip packet must fit within the cluster message limit");
 
 typedef struct {
     char sig[4];       /* Signature "RCmb" (Cluster message bus). */

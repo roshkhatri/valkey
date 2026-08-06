@@ -654,8 +654,12 @@ void punsubscribeCommand(client *c) {
 }
 
 /* This function wraps pubsubPublishMessage and also propagates the message to cluster.
- * Used by the commands PUBLISH/SPUBLISH and their respective module APIs.*/
+ * Used by the commands PUBLISH/SPUBLISH and their respective module APIs. In
+ * cluster mode, C_ERR is returned before local delivery if the channel and
+ * message do not fit within the 16 MiB total cluster-bus packet limit. */
 int pubsubPublishMessageAndPropagateToCluster(robj *channel, robj *message, int sharded) {
+    if (server.cluster_enabled && !clusterCanPropagatePublish(channel, message)) return C_ERR;
+
     int receivers = pubsubPublishMessage(channel, message, sharded);
     if (server.cluster_enabled) clusterPropagatePublish(channel, message, sharded);
     return receivers;
@@ -669,6 +673,10 @@ void publishCommand(client *c) {
     }
 
     int receivers = pubsubPublishMessageAndPropagateToCluster(c->argv[1], c->argv[2], 0);
+    if (receivers == C_ERR) {
+        addReplyError(c, "Message is too large to propagate in cluster mode");
+        return;
+    }
     if (!server.cluster_enabled) forceCommandPropagation(c, PROPAGATE_REPL);
     addReplyLongLong(c, receivers);
 }
@@ -759,6 +767,10 @@ void channelList(client *c, sds pat, kvstore *pubsub_channels) {
 /* SPUBLISH <shardchannel> <message> */
 void spublishCommand(client *c) {
     int receivers = pubsubPublishMessageAndPropagateToCluster(c->argv[1], c->argv[2], 1);
+    if (receivers == C_ERR) {
+        addReplyError(c, "Message is too large to propagate in cluster mode");
+        return;
+    }
     if (!server.cluster_enabled) forceCommandPropagation(c, PROPAGATE_REPL);
     addReplyLongLong(c, receivers);
 }

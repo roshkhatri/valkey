@@ -32,3 +32,42 @@ start_server {tags {"modules"}} {
     } {} {resp3}
 
 }
+
+start_cluster 1 0 [list tags {external:skip cluster modules} config_lines [list loadmodule $testmodule]] {
+    test {module PUBLISH and SPUBLISH accept the exact cluster packet limit} {
+        set max_combined_payload [expr {16 * 1024 * 1024 - 2256 - 8}]
+        set channel exact-limit
+        set exact [string repeat x [expr {$max_combined_payload - [string length $channel]}]]
+
+        assert_equal {0 0} [R 0 publish.classic_status $channel $exact]
+        assert_equal {-1 1} [R 0 publish.classic_status $channel "${exact}x"]
+        assert_equal {0 0} [R 0 publish.shard_status $channel $exact]
+        assert_equal {-1 1} [R 0 publish.shard_status $channel "${exact}x"]
+
+        unset exact
+    }
+
+    test {oversized module PUBLISH and SPUBLISH fail before local delivery} {
+        set classic_subscriber [valkey_deferring_client 0]
+        set shard_subscriber [valkey_deferring_client 0]
+        assert_equal {1} [subscribe $classic_subscriber {oversized-classic}]
+        assert_equal {1} [ssubscribe $shard_subscriber {oversized-shard}]
+        set oversized [string repeat x [expr {16 * 1024 * 1024}]]
+
+        assert_equal {-1 1} [R 0 publish.classic_status oversized-classic $oversized]
+        assert_equal 1 [R 0 publish.classic oversized-classic marker]
+        set delivered [$classic_subscriber read]
+        assert_equal 6 [string length [lindex $delivered 2]]
+        assert_equal {message oversized-classic marker} $delivered
+
+        assert_equal {-1 1} [R 0 publish.shard_status oversized-shard $oversized]
+        assert_equal 1 [R 0 publish.shard oversized-shard marker]
+        set delivered [$shard_subscriber read]
+        assert_equal 6 [string length [lindex $delivered 2]]
+        assert_equal {smessage oversized-shard marker} $delivered
+
+        $classic_subscriber close
+        $shard_subscriber close
+        unset oversized
+    }
+}
