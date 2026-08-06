@@ -51,6 +51,12 @@ typedef struct streamIterator {
     unsigned char value_buf[LP_INTBUF_SIZE];
 } streamIterator;
 
+typedef enum streamIteratorResult {
+    STREAM_ITERATOR_CORRUPT = -1,
+    STREAM_ITERATOR_EOF = 0,
+    STREAM_ITERATOR_FOUND = 1,
+} streamIteratorResult;
+
 /* Consumer group. */
 typedef struct streamCG {
     streamID last_id;       /* Last delivered (not acknowledged) ID for this
@@ -127,7 +133,7 @@ size_t streamReplyWithRange(client *c,
                             int flags,
                             streamPropInfo *spi);
 void streamIteratorStart(streamIterator *si, stream *s, streamID *start, streamID *end, int rev);
-int streamIteratorGetID(streamIterator *si, streamID *id, int64_t *numfields);
+streamIteratorResult streamIteratorGetID(streamIterator *si, streamID *id, int64_t *numfields);
 void streamIteratorGetField(streamIterator *si,
                             unsigned char **fieldptr,
                             unsigned char **valueptr,

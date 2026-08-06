@@ -2203,7 +2203,8 @@ int rewriteStreamObject(rio *r, robj *key, robj *o) {
 
     if (s->length) {
         /* Reconstruct the stream data using XADD commands. */
-        while (streamIteratorGetID(&si, &id, &numfields)) {
+        streamIteratorResult result;
+        while ((result = streamIteratorGetID(&si, &id, &numfields)) == STREAM_ITERATOR_FOUND) {
             /* Emit a two elements array for each item. The first is
              * the ID, the second is an array of field-value pairs. */
 
@@ -2223,6 +2224,10 @@ int rewriteStreamObject(rio *r, robj *key, robj *o) {
                     return 0;
                 }
             }
+        }
+        if (result == STREAM_ITERATOR_CORRUPT) {
+            streamIteratorStop(&si);
+            return 0;
         }
     } else {
         /* Use the XADD MAXLEN 0 trick to generate an empty stream if

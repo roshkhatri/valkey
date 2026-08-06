@@ -253,8 +253,9 @@ void xorObjectDigest(serverDb *db, robj *keyobj, unsigned char *digest, robj *o)
         streamIteratorStart(&si, objectGetVal(o), NULL, NULL, 0);
         streamID id;
         int64_t numfields;
+        streamIteratorResult result;
 
-        while (streamIteratorGetID(&si, &id, &numfields)) {
+        while ((result = streamIteratorGetID(&si, &id, &numfields)) == STREAM_ITERATOR_FOUND) {
             sds itemid = sdscatfmt(sdsempty(), "%U.%U", id.ms, id.seq);
             mixDigest(digest, itemid, sdslen(itemid));
             sdsfree(itemid);
@@ -268,6 +269,7 @@ void xorObjectDigest(serverDb *db, robj *keyobj, unsigned char *digest, robj *o)
             }
         }
         streamIteratorStop(&si);
+        if (result == STREAM_ITERATOR_CORRUPT) serverPanic("Stream listpack corruption detected");
     } else if (objectGetType(o) == OBJ_MODULE) {
         ValkeyModuleDigest md = {{0}, {0}, keyobj, db->id};
         moduleValue *mv = objectGetVal(o);

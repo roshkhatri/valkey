@@ -1240,7 +1240,9 @@ int lpValidateNext(unsigned char *lp, unsigned char **pp, size_t lpbytes) {
 }
 
 /* Validate the integrity of the data structure.
- * Validates the header and scans all entries one by one. */
+ * Header sanity checks reject an impossible cached element count before the
+ * complete entry-by-entry scan. The optional callback can apply additional
+ * encoding-specific checks. Returns 1 when valid and 0 otherwise. */
 int lpValidateIntegrity(unsigned char *lp, size_t size, listpackValidateEntryCB entry_cb, void *cb_userdata) {
     /* Check that we can actually read the header. (and EOF) */
     if (size < LP_HDR_SIZE + 1) return 0;
@@ -1252,9 +1254,12 @@ int lpValidateIntegrity(unsigned char *lp, size_t size, listpackValidateEntryCB 
     /* The last byte must be the terminator. */
     if (lp[size - 1] != LP_EOF) return 0;
 
+    /* Every entry needs at least one encoding byte and one backlen byte. */
+    uint32_t numele = lpGetNumElements(lp);
+    if (numele != LP_HDR_NUMELE_UNKNOWN && numele > (size - LP_HDR_SIZE - 1) / 2) return 0;
+
     /* Validate the individual entries. */
     uint32_t count = 0;
-    uint32_t numele = lpGetNumElements(lp);
     unsigned char *p = lp + LP_HDR_SIZE;
     while (p && p[0] != LP_EOF) {
         unsigned char *prev = p;
@@ -1314,33 +1319,49 @@ static inline void lpSaveValue(unsigned char *val, unsigned int len, int64_t lva
 /* Randomly select a pair of key and value.
  * total_count is a pre-computed length/2 of the listpack (to avoid calls to lpLength)
  * 'key' and 'val' are used to store the result key value pair.
- * 'val' can be NULL if the value is not needed. */
-void lpRandomPair(unsigned char *lp, unsigned long total_count, listpackEntry *key, listpackEntry *val) {
+ * 'val' can be NULL if the value is not needed.
+ * Returns 1 after storing a complete pair and 0 if selection cannot complete.
+ * The output entries are cleared before selection. */
+int lpRandomPair(unsigned char *lp, unsigned long total_count, listpackEntry *key, listpackEntry *val) {
     unsigned char *p;
 
-    /* Avoid div by zero on corrupt listpack */
-    assert(total_count);
+    memset(key, 0, sizeof(*key));
+    if (val) memset(val, 0, sizeof(*val));
+
+    /* Avoid div by zero and out-of-range seeks on corrupt listpacks. */
+    if (total_count == 0) return 0;
 
     /* Generate even numbers, because listpack saved K-V pair */
     int r = (rand() % total_count) * 2;
-    assert((p = lpSeek(lp, r)));
+    if ((p = lpSeek(lp, r)) == NULL) return 0;
     key->sval = lpGetValue(p, &(key->slen), &(key->lval));
 
-    if (!val) return;
-    assert((p = lpNext(lp, p)));
+    /* A pair is complete only when the selected key is followed by a value.
+     * Check this even when the caller does not want the value, so a dangling
+     * trailing key in a corrupt listpack is never reported as a pair. */
+    if ((p = lpNext(lp, p)) == NULL) return 0;
+    if (!val) return 1;
     val->sval = lpGetValue(p, &(val->slen), &(val->lval));
+    return 1;
 }
 
 /* Randomly select 'count' entries and store them in the 'entries' array, which
  * needs to have space for 'count' listpackEntry structs. The order is random
- * and duplicates are possible. */
-void lpRandomEntries(unsigned char *lp, unsigned int count, listpackEntry *entries) {
+ * and duplicates are possible. Returns 'count' on success and 0 if selection
+ * cannot complete. The output array is cleared before selection. */
+unsigned int lpRandomEntries(unsigned char *lp, unsigned int count, listpackEntry *entries) {
+    if (count == 0) return 0;
+    memset(entries, 0, count * sizeof(*entries));
+
     struct pick {
         unsigned int index;
         unsigned int order;
     } *picks = lp_malloc(count * sizeof(struct pick));
     unsigned int total_size = lpLength(lp);
-    assert(total_size);
+    if (total_size == 0) {
+        lp_free(picks);
+        return 0;
+    }
     for (unsigned int i = 0; i < count; i++) {
         picks[i].index = rand() % total_size;
         picks[i].order = i;
@@ -1355,9 +1376,13 @@ void lpRandomEntries(unsigned char *lp, unsigned int count, listpackEntry *entri
     unsigned int j = 0; /* index in listpack */
     for (unsigned int i = 0; i < count; i++) {
         /* Advance listpack pointer to until we reach 'index' listpack. */
-        while (j < picks[i].index) {
+        while (j < picks[i].index && p) {
             p = lpNext(lp, p);
             j++;
+        }
+        if (!p) {
+            lp_free(picks);
+            return 0;
         }
         int storeorder = picks[i].order;
         unsigned int len = 0;
@@ -1366,13 +1391,20 @@ void lpRandomEntries(unsigned char *lp, unsigned int count, listpackEntry *entri
         lpSaveValue(str, len, llval, &entries[storeorder]);
     }
     lp_free(picks);
+    return count;
 }
 
 /* Randomly select count of key value pairs and store into 'keys' and
  * 'vals' args. The order of the picked entries is random, and the selections
  * are non-unique (repetitions are possible).
- * The 'vals' arg can be NULL in which case we skip these. */
-void lpRandomPairs(unsigned char *lp, unsigned int count, listpackEntry *keys, listpackEntry *vals) {
+ * The 'vals' arg can be NULL in which case we skip these. Returns 'count' on
+ * success and 0 if selection cannot complete. The output arrays are cleared
+ * before selection. */
+unsigned int lpRandomPairs(unsigned char *lp, unsigned int count, listpackEntry *keys, listpackEntry *vals) {
+    if (count == 0) return 0;
+    memset(keys, 0, count * sizeof(*keys));
+    if (vals) memset(vals, 0, count * sizeof(*vals));
+
     unsigned char *p, *key, *value;
     unsigned int klen = 0, vlen = 0;
     long long klval = 0, vlval = 0;
@@ -1385,8 +1417,11 @@ void lpRandomPairs(unsigned char *lp, unsigned int count, listpackEntry *keys, l
     rand_pick *picks = lp_malloc(sizeof(rand_pick) * count);
     unsigned int total_size = lpLength(lp) / 2;
 
-    /* Avoid div by zero on corrupt listpack */
-    assert(total_size);
+    /* Avoid div by zero on corrupt listpack. */
+    if (total_size == 0) {
+        lp_free(picks);
+        return 0;
+    }
 
     /* create a pool of random indexes (some may be duplicate). */
     for (unsigned int i = 0; i < count; i++) {
@@ -1403,7 +1438,7 @@ void lpRandomPairs(unsigned char *lp, unsigned int count, listpackEntry *keys, l
     p = lpSeek(lp, lpindex);
     while (p && pickindex < count) {
         key = lpGetValue(p, &klen, &klval);
-        assert((p = lpNext(lp, p)));
+        if ((p = lpNext(lp, p)) == NULL) break;
         value = lpGetValue(p, &vlen, &vlval);
         while (pickindex < count && lpindex == picks[pickindex].index) {
             int storeorder = picks[pickindex].order;
@@ -1416,15 +1451,20 @@ void lpRandomPairs(unsigned char *lp, unsigned int count, listpackEntry *keys, l
     }
 
     lp_free(picks);
+    return pickindex == count ? count : 0;
 }
 
 /* Randomly select count of key value pairs and store into 'keys' and
  * 'vals' args. The selections are unique (no repetitions), and the order of
  * the picked entries is NOT-random.
  * The 'vals' arg can be NULL in which case we skip these.
- * The return value is the number of items picked which can be lower than the
- * requested count if the listpack doesn't hold enough pairs. */
+ * The return value is the number of complete pairs stored, which can be lower
+ * than the requested count if the listpack doesn't hold enough pairs or
+ * selection cannot complete. The output arrays are cleared before selection. */
 unsigned int lpRandomPairsUnique(unsigned char *lp, unsigned int count, listpackEntry *keys, listpackEntry *vals) {
+    memset(keys, 0, count * sizeof(*keys));
+    if (vals) memset(vals, 0, count * sizeof(*vals));
+
     unsigned char *p, *key;
     unsigned int klen = 0;
     long long klval = 0;
@@ -1435,10 +1475,10 @@ unsigned int lpRandomPairsUnique(unsigned char *lp, unsigned int count, listpack
     p = lpFirst(lp);
     unsigned int picked = 0, remaining = count;
     while (picked < count && p) {
-        assert((p = lpNextRandom(lp, p, &index, remaining, 1)));
+        if ((p = lpNextRandom(lp, p, &index, remaining, 1)) == NULL) break;
         key = lpGetValue(p, &klen, &klval);
         lpSaveValue(key, klen, klval, &keys[picked]);
-        assert((p = lpNext(lp, p)));
+        if ((p = lpNext(lp, p)) == NULL) break;
         index++;
         if (vals) {
             key = lpGetValue(p, &klen, &klval);

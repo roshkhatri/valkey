@@ -5904,6 +5904,7 @@ int VM_StreamIteratorStop(ValkeyModuleKey *key) {
  * - ENOTSUP if the key refers to a value of a type other than stream or if the
  *   key is empty
  * - EBADF if no stream iterator is associated with the key
+ * - EIO if the stream encoding is corrupt
  * - ENOENT if there are no more entries in the range of the iterator
  *
  * In practice, if VM_StreamIteratorNextID() is called after a successful call
@@ -5927,7 +5928,8 @@ int VM_StreamIteratorNextID(ValkeyModuleKey *key, ValkeyModuleStreamID *id, long
     streamIterator *si = key->iter;
     int64_t *num_ptr = &key->u.stream.numfieldsleft;
     streamID *streamid_ptr = &key->u.stream.currentid;
-    if (streamIteratorGetID(si, streamid_ptr, num_ptr)) {
+    streamIteratorResult result = streamIteratorGetID(si, streamid_ptr, num_ptr);
+    if (result == STREAM_ITERATOR_FOUND) {
         if (id) {
             id->ms = streamid_ptr->ms;
             id->seq = streamid_ptr->seq;
@@ -5939,7 +5941,7 @@ int VM_StreamIteratorNextID(ValkeyModuleKey *key, ValkeyModuleStreamID *id, long
         key->u.stream.currentid.ms = 0; /* for VM_StreamIteratorDelete() */
         key->u.stream.currentid.seq = 0;
         key->u.stream.numfieldsleft = 0; /* for VM_StreamIteratorNextField() */
-        errno = ENOENT;
+        errno = result == STREAM_ITERATOR_CORRUPT ? EIO : ENOENT;
         return VALKEYMODULE_ERR;
     }
 }

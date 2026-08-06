@@ -44,6 +44,7 @@
 void createSharedObjects(void);
 void rdbLoadProgressCallback(rio *r, const void *buf, size_t len);
 void computeDatasetProfile(int dbid, robj *keyobj, robj *o, long long expiretime);
+void rdbCheckSetError(const char *fmt, ...);
 
 int rdbCheckMode = 0;
 int rdbCheckStats = 0;
@@ -361,8 +362,9 @@ void computeDatasetProfile(int dbid, robj *keyobj, robj *o, long long expiretime
         streamIteratorStart(&si, objectGetVal(o), NULL, NULL, 0);
         streamID id;
         int64_t numfields;
+        streamIteratorResult result;
 
-        while (streamIteratorGetID(&si, &id, &numfields)) {
+        while ((result = streamIteratorGetID(&si, &id, &numfields)) == STREAM_ITERATOR_FOUND) {
             while (numfields--) {
                 unsigned char *field, *value;
                 int64_t field_len, value_len;
@@ -371,6 +373,10 @@ void computeDatasetProfile(int dbid, robj *keyobj, robj *o, long long expiretime
             }
         }
         streamIteratorStop(&si);
+        if (result == STREAM_ITERATOR_CORRUPT) {
+            rdbCheckSetError("Stream listpack corruption detected");
+            return;
+        }
         statsRecordCount(streamLength(o), stats);
     } else if (o->type == OBJ_MODULE) {
         statsRecordCount(1, stats);
@@ -803,6 +809,12 @@ int redis_check_rdb(char *rdbfilename, FILE *fp) {
             }
 
             computeDatasetProfile(selected_dbid, key, val, expiretime);
+            if (rdbstate.error_set) {
+                rdbstate.key = NULL;
+                decrRefCount(key);
+                decrRefCount(val);
+                goto eoferr;
+            }
         }
         /* Check if the key already expired. */
         if (expiretime != -1 && expiretime < now) rdbstate.already_expired++;

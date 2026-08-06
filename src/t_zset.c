@@ -1773,7 +1773,7 @@ void zsetReplyFromListpackEntry(client *c, listpackEntry *e) {
  * 'key' and 'val' will be set to hold the element.
  * The memory in `key` is not to be freed or modified by the caller.
  * 'score' can be NULL in which case it's not extracted. */
-static void zsetTypeRandomElement(robj *zsetobj, unsigned long zsetsize, listpackEntry *key, double *score) {
+static int zsetTypeRandomElement(robj *zsetobj, unsigned long zsetsize, listpackEntry *key, double *score) {
     if (zsetobj->encoding == OBJ_ENCODING_SKIPLIST) {
         zset *zs = objectGetVal(zsetobj);
         void *entry;
@@ -1785,7 +1785,7 @@ static void zsetTypeRandomElement(robj *zsetobj, unsigned long zsetsize, listpac
         if (score) *score = node->score;
     } else if (zsetobj->encoding == OBJ_ENCODING_LISTPACK) {
         listpackEntry val;
-        lpRandomPair(objectGetVal(zsetobj), zsetsize, key, &val);
+        if (!lpRandomPair(objectGetVal(zsetobj), zsetsize, key, &val)) return 0;
         if (score) {
             if (val.sval) {
                 *score = zzlStrtod(val.sval, val.slen);
@@ -1796,6 +1796,7 @@ static void zsetTypeRandomElement(robj *zsetobj, unsigned long zsetsize, listpac
     } else {
         serverPanic("Unknown zset encoding");
     }
+    return 1;
 }
 
 /*-----------------------------------------------------------------------------
@@ -4182,11 +4183,11 @@ void zrandmemberWithCountCommand(client *c, long l, int withscores) {
      * structures. This case is the only one that also needs to return the
      * elements in random order. */
     if (!uniq || count == 1) {
-        if (withscores && c->resp == 2)
-            addReplyArrayLen(c, count * 2);
-        else
-            addReplyArrayLen(c, count);
         if (zsetobj->encoding == OBJ_ENCODING_SKIPLIST) {
+            if (withscores && c->resp == 2)
+                addReplyArrayLen(c, count * 2);
+            else
+                addReplyArrayLen(c, count);
             zset *zs = objectGetVal(zsetobj);
             while (count--) {
                 void *entry;
@@ -4201,18 +4202,22 @@ void zrandmemberWithCountCommand(client *c, long l, int withscores) {
         } else if (zsetobj->encoding == OBJ_ENCODING_LISTPACK) {
             listpackEntry *keys, *vals = NULL;
             unsigned long limit, sample_count;
+            unsigned long reply_size = 0;
+            void *replylen = addReplyDeferredLen(c);
             limit = count > ZRANDMEMBER_RANDOM_SAMPLE_LIMIT ? ZRANDMEMBER_RANDOM_SAMPLE_LIMIT : count;
-            keys = zmalloc(sizeof(listpackEntry) * limit);
-            if (withscores) vals = zmalloc(sizeof(listpackEntry) * limit);
+            keys = zcalloc(sizeof(listpackEntry) * limit);
+            if (withscores) vals = zcalloc(sizeof(listpackEntry) * limit);
             while (count) {
-                sample_count = count > limit ? limit : count;
-                count -= sample_count;
-                lpRandomPairs(objectGetVal(zsetobj), sample_count, keys, vals);
+                unsigned long requested = count > limit ? limit : count;
+                sample_count = lpRandomPairs(objectGetVal(zsetobj), requested, keys, vals);
+                count -= requested;
+                reply_size += sample_count;
                 zrandmemberReplyWithListpack(c, sample_count, keys, vals);
-                if (c->flag.close_asap) break;
+                if (sample_count != requested || c->flag.close_asap) break;
             }
             zfree(keys);
             zfree(vals);
+            setDeferredArrayLen(c, replylen, withscores && c->resp == 2 ? reply_size * 2 : reply_size);
         }
         return;
     }
@@ -4227,7 +4232,10 @@ void zrandmemberWithCountCommand(client *c, long l, int withscores) {
 
     /* Initiate reply count, RESP3 responds with nested array, RESP2 with flat one. */
     long reply_size = count < size ? count : size;
-    if (withscores && c->resp == 2)
+    void *replylen = NULL;
+    if (zsetobj->encoding == OBJ_ENCODING_LISTPACK && count < size)
+        replylen = addReplyDeferredLen(c);
+    else if (withscores && c->resp == 2)
         addReplyArrayLen(c, reply_size * 2);
     else
         addReplyArrayLen(c, reply_size);
@@ -4255,12 +4263,13 @@ void zrandmemberWithCountCommand(client *c, long l, int withscores) {
      * listpack in CASE 4. So we use this instead. */
     if (zsetobj->encoding == OBJ_ENCODING_LISTPACK) {
         listpackEntry *keys, *vals = NULL;
-        keys = zmalloc(sizeof(listpackEntry) * count);
-        if (withscores) vals = zmalloc(sizeof(listpackEntry) * count);
-        serverAssert(lpRandomPairsUnique(objectGetVal(zsetobj), count, keys, vals) == count);
-        zrandmemberReplyWithListpack(c, count, keys, vals);
+        keys = zcalloc(sizeof(listpackEntry) * count);
+        if (withscores) vals = zcalloc(sizeof(listpackEntry) * count);
+        reply_size = lpRandomPairsUnique(objectGetVal(zsetobj), count, keys, vals);
+        zrandmemberReplyWithListpack(c, reply_size, keys, vals);
         zfree(keys);
         zfree(vals);
+        setDeferredArrayLen(c, replylen, withscores && c->resp == 2 ? reply_size * 2 : reply_size);
         zuiClearIterator(&src);
         return;
     }
@@ -4377,8 +4386,10 @@ void zrandmemberCommand(client *c) {
         return;
     }
 
-    zsetTypeRandomElement(zset, zsetLength(zset), &ele, NULL);
-    zsetReplyFromListpackEntry(c, &ele);
+    if (zsetTypeRandomElement(zset, zsetLength(zset), &ele, NULL))
+        zsetReplyFromListpackEntry(c, &ele);
+    else
+        addReplyNull(c);
 }
 
 /* ZMPOP/BZMPOP

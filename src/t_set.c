@@ -417,8 +417,12 @@ sds setTypeNextObject(setTypeIterator *si) {
  * string which is actually an sds string and it can be used as such.
  *
  * Note that both the str, len and llele pointers should be passed and cannot
- * be NULL. If str is set to NULL, the value is an integer stored in llele. */
+ * be NULL. If str is set to NULL, the value is an integer stored in llele.
+ * Returns C_ERR if a listpack element cannot be found. */
 int setTypeRandomElement(robj *setobj, char **str, size_t *len, int64_t *llele) {
+    *str = NULL;
+    *len = 0;
+    *llele = 0;
     if (setobj->encoding == OBJ_ENCODING_HASHTABLE) {
         void *entry = NULL;
         hashtableFairRandomEntry(objectGetVal(setobj), &entry);
@@ -430,8 +434,11 @@ int setTypeRandomElement(robj *setobj, char **str, size_t *len, int64_t *llele) 
         *str = NULL; /* Not needed. Defensive. */
     } else if (setobj->encoding == OBJ_ENCODING_LISTPACK) {
         unsigned char *lp = objectGetVal(setobj);
-        int r = rand() % lpLength(lp);
+        unsigned long total_count = lpLength(lp);
+        if (total_count == 0) return C_ERR;
+        int r = rand() % total_count;
         unsigned char *p = lpSeek(lp, r);
+        if (p == NULL) return C_ERR;
         unsigned int l;
         *str = (char *)lpGetValue(p, &l, (long long *)llele);
         *len = (size_t)l;
@@ -461,6 +468,7 @@ robj *setTypePopRandom(robj *set) {
         size_t len = 0;
         int64_t llele = 0;
         int encoding = setTypeRandomElement(set, &str, &len, &llele);
+        if (encoding == C_ERR) serverPanic("Listpack corruption detected");
         if (str)
             obj = createStringObject(str, len);
         else
@@ -899,6 +907,7 @@ void spopWithCountCommand(client *c) {
         } else {
             while (remaining--) {
                 int encoding = setTypeRandomElement(set, &str, &len, &llele);
+                if (encoding == C_ERR) serverPanic("Listpack corruption detected");
                 if (!newset) {
                     newset = str ? createSetListpackObject() : createIntsetObject();
                 }
@@ -1036,31 +1045,35 @@ void srandmemberWithCountCommand(client *c) {
      * structures. This case is the only one that also needs to return the
      * elements in random order. */
     if (!uniq || count == 1) {
-        addReplyArrayLen(c, count);
-
         if (set->encoding == OBJ_ENCODING_LISTPACK && count > 1) {
             /* Specialized case for listpack, traversing it only once. */
             unsigned long limit, sample_count;
+            unsigned long reply_count = 0;
+            void *replylen = addReplyDeferredLen(c);
             limit = count > SRANDFIELD_RANDOM_SAMPLE_LIMIT ? SRANDFIELD_RANDOM_SAMPLE_LIMIT : count;
-            listpackEntry *entries = zmalloc(limit * sizeof(listpackEntry));
+            listpackEntry *entries = zcalloc(limit * sizeof(listpackEntry));
             while (count) {
-                sample_count = count > limit ? limit : count;
-                count -= sample_count;
-                lpRandomEntries(objectGetVal(set), sample_count, entries);
+                unsigned long requested = count > limit ? limit : count;
+                sample_count = lpRandomEntries(objectGetVal(set), requested, entries);
+                count -= requested;
+                reply_count += sample_count;
                 for (unsigned long i = 0; i < sample_count; i++) {
                     if (entries[i].sval)
                         addReplyBulkCBuffer(c, entries[i].sval, entries[i].slen);
                     else
                         addReplyBulkLongLong(c, entries[i].lval);
                 }
-                if (c->flag.close_asap) break;
+                if (sample_count != requested || c->flag.close_asap) break;
             }
             zfree(entries);
+            setDeferredArrayLen(c, replylen, reply_count);
             return;
         }
 
+        addReplyArrayLen(c, count);
         while (count--) {
-            setTypeRandomElement(set, &str, &len, &llele);
+            if (setTypeRandomElement(set, &str, &len, &llele) == C_ERR)
+                serverPanic("Listpack corruption detected");
             if (str == NULL) {
                 addReplyBulkLongLong(c, llele);
             } else {
@@ -1103,9 +1116,11 @@ void srandmemberWithCountCommand(client *c) {
         unsigned char *lp = objectGetVal(set);
         unsigned char *p = lpFirst(lp);
         unsigned int i = 0;
-        addReplyArrayLen(c, count);
+        void *replylen = addReplyDeferredLen(c);
+        unsigned long reply_count = 0;
         while (count) {
             p = lpNextRandom(lp, p, &i, count--, 0);
+            if (p == NULL) break;
             unsigned int len;
             str = (char *)lpGetValue(p, &len, (long long *)&llele);
             if (str == NULL) {
@@ -1113,9 +1128,11 @@ void srandmemberWithCountCommand(client *c) {
             } else {
                 addReplyBulkCBuffer(c, str, len);
             }
+            reply_count++;
             p = lpNext(lp, p);
             i++;
         }
+        setDeferredArrayLen(c, replylen, reply_count);
         return;
     }
 
@@ -1167,7 +1184,8 @@ void srandmemberWithCountCommand(client *c) {
 
         hashtableExpand(ht, count);
         while (added < count) {
-            setTypeRandomElement(set, &str, &len, &llele);
+            if (setTypeRandomElement(set, &str, &len, &llele) == C_ERR)
+                serverPanic("Listpack corruption detected");
             if (str == NULL) {
                 sdsele = sdsfromlonglong(llele);
             } else {
@@ -1215,7 +1233,8 @@ void srandmemberCommand(client *c) {
     /* Handle variant without <count> argument. Reply with simple bulk string */
     if ((set = lookupKeyReadOrReply(c, c->argv[1], shared.null[c->resp])) == NULL || checkType(c, set, OBJ_SET)) return;
 
-    setTypeRandomElement(set, &str, &len, &llele);
+    if (setTypeRandomElement(set, &str, &len, &llele) == C_ERR)
+        serverPanic("Listpack corruption detected");
     if (str == NULL) {
         addReplyBulkLongLong(c, llele);
     } else {

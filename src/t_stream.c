@@ -395,8 +395,12 @@ void streamGetEdgeID(stream *s, int first, int skip_tombstones, streamID *edge_i
     int64_t numfields;
     streamIteratorStart(&si, s, NULL, NULL, !first);
     si.skip_tombstones = skip_tombstones;
-    int found = streamIteratorGetID(&si, edge_id, &numfields);
-    if (!found) {
+    streamIteratorResult result = streamIteratorGetID(&si, edge_id, &numfields);
+    if (result == STREAM_ITERATOR_CORRUPT) {
+        streamIteratorStop(&si);
+        serverPanic("Stream listpack corruption detected");
+    }
+    if (result == STREAM_ITERATOR_EOF) {
         streamID min_id = {0, 0}, max_id = {UINT64_MAX, UINT64_MAX};
         *edge_id = first ? max_id : min_id;
     }
@@ -1034,7 +1038,7 @@ static int streamParseAddOrTrimArgsOrReply(client *c, streamAddTrimArgs *args, i
  *  streamIterator myiterator;
  *  streamIteratorStart(&myiterator,...);
  *  int64_t numfields;
- *  while(streamIteratorGetID(&myiterator,&ID,&numfields)) {
+ *  while(streamIteratorGetID(&myiterator,&ID,&numfields) == STREAM_ITERATOR_FOUND) {
  *      while(numfields--) {
  *          unsigned char *key, *value;
  *          size_t key_len, value_len;
@@ -1092,52 +1096,86 @@ void streamIteratorStart(streamIterator *si, stream *s, streamID *start, streamI
     si->skip_tombstones = 1; /* By default tombstones aren't emitted. */
 }
 
-/* Return 1 and store the current item ID at 'id' if there are still
- * elements within the iteration range, otherwise return 0 in order to
- * signal the iteration terminated. */
-int streamIteratorGetID(streamIterator *si, streamID *id, int64_t *numfields) {
+static int streamIteratorValidateEntryData(streamIterator *si, int64_t flags, int64_t numfields) {
+    if (numfields < 0 || (uint64_t)numfields > lpBytes(si->lp)) return 0;
+
+    uint64_t data_entries = (flags & STREAM_ITEM_FLAG_SAMEFIELDS) ? (uint64_t)numfields : (uint64_t)numfields * 2;
+    unsigned char *p = si->lp_ele;
+    while (data_entries--) {
+        if (!p) return 0;
+        p = lpNext(si->lp, p);
+    }
+    if (!p) return 0;
+
+    int valid_record;
+    int64_t lp_count = lpGetIntegerIfValid(p, &valid_record);
+    uint64_t expected = (flags & STREAM_ITEM_FLAG_SAMEFIELDS) ? (uint64_t)numfields + 3
+                                                              : (uint64_t)numfields * 2 + 4;
+    return valid_record && lp_count >= 0 && (uint64_t)lp_count == expected;
+}
+
+/* Return STREAM_ITERATOR_FOUND and store the current item ID at 'id' if there
+ * are still valid elements within the iteration range. Return
+ * STREAM_ITERATOR_EOF when the range is exhausted and STREAM_ITERATOR_CORRUPT
+ * when the encoded entry structure is incomplete or inconsistent. */
+streamIteratorResult streamIteratorGetID(streamIterator *si, streamID *id, int64_t *numfields) {
     while (1) { /* Will stop when element > stop_key or end of radix tree. */
         /* If the current listpack is set to NULL, this is the start of the
          * iteration or the previous listpack was completely iterated.
          * Go to the next node. */
         if (si->lp == NULL || si->lp_ele == NULL) {
             if (!si->rev && !raxNext(&si->ri))
-                return 0;
+                return STREAM_ITERATOR_EOF;
             else if (si->rev && !raxPrev(&si->ri))
-                return 0;
-            serverAssert(si->ri.key_len == sizeof(streamID));
+                return STREAM_ITERATOR_EOF;
+            if (si->ri.key_len != sizeof(streamID)) return STREAM_ITERATOR_CORRUPT;
             /* Get the primary ID. */
             streamDecodeID(si->ri.key, &si->primary_id);
             /* Get the primary fields count. */
             si->lp = si->ri.data;
-            si->lp_ele = lpFirst(si->lp);            /* Seek items count */
+            si->lp_ele = lpFirst(si->lp); /* Seek items count. */
+            if (!si->lp_ele) return STREAM_ITERATOR_CORRUPT;
             si->lp_ele = lpNext(si->lp, si->lp_ele); /* Seek deleted count. */
+            if (!si->lp_ele) return STREAM_ITERATOR_CORRUPT;
             si->lp_ele = lpNext(si->lp, si->lp_ele); /* Seek num fields. */
-            si->primary_fields_count = lpGetInteger(si->lp_ele);
+            if (!si->lp_ele) return STREAM_ITERATOR_CORRUPT;
+            int valid_record;
+            int64_t primary_fields_count = lpGetIntegerIfValid(si->lp_ele, &valid_record);
+            if (!valid_record || primary_fields_count < 0 || (uint64_t)primary_fields_count > lpBytes(si->lp))
+                return STREAM_ITERATOR_CORRUPT;
+            si->primary_fields_count = primary_fields_count;
             si->lp_ele = lpNext(si->lp, si->lp_ele); /* Seek first field. */
             si->primary_fields_start = si->lp_ele;
-            /* We are now pointing to the first field of the primary entry.
-             * We need to seek either the first or the last entry depending
-             * on the direction of the iteration. */
-            if (!si->rev) {
-                /* If we are iterating in normal order, skip the primary fields
-                 * to seek the first actual entry. */
-                for (uint64_t i = 0; i < si->primary_fields_count; i++) si->lp_ele = lpNext(si->lp, si->lp_ele);
-            } else {
+
+            /* Verify all primary fields and leave the forward cursor on the zero terminator. */
+            for (uint64_t i = 0; i < si->primary_fields_count; i++) {
+                if (!si->lp_ele) return STREAM_ITERATOR_CORRUPT;
+                si->lp_ele = lpNext(si->lp, si->lp_ele);
+            }
+            if (!si->lp_ele || lpGetIntegerIfValid(si->lp_ele, &valid_record) != 0 || !valid_record)
+                return STREAM_ITERATOR_CORRUPT;
+
+            if (si->rev) {
                 /* If we are iterating in reverse direction, just seek the
                  * last part of the last entry in the listpack (that is, the
                  * fields count). */
                 si->lp_ele = lpLast(si->lp);
+                if (!si->lp_ele) return STREAM_ITERATOR_CORRUPT;
             }
         } else if (si->rev) {
             /* If we are iterating in the reverse order, and this is not
              * the first entry emitted for this listpack, then we already
              * emitted the current entry, and have to go back to the previous
              * one. */
-            int64_t lp_count = lpGetInteger(si->lp_ele);
-            while (lp_count--) si->lp_ele = lpPrev(si->lp, si->lp_ele);
+            int valid_record;
+            int64_t lp_count = lpGetIntegerIfValid(si->lp_ele, &valid_record);
+            if (!valid_record || lp_count < 0 || (uint64_t)lp_count > lpBytes(si->lp))
+                return STREAM_ITERATOR_CORRUPT;
+            while (lp_count-- && si->lp_ele) si->lp_ele = lpPrev(si->lp, si->lp_ele);
+            if (!si->lp_ele) return STREAM_ITERATOR_CORRUPT;
             /* Seek lp-count of prev entry. */
             si->lp_ele = lpPrev(si->lp, si->lp_ele);
+            if (!si->lp_ele) return STREAM_ITERATOR_CORRUPT;
         }
 
         /* For every radix tree node, iterate the corresponding listpack,
@@ -1153,55 +1191,70 @@ int streamIteratorGetID(streamIterator *si, streamID *id, int64_t *numfields) {
                 /* If we are going backward, read the number of elements this
                  * entry is composed of, and jump backward N times to seek
                  * its start. */
-                int64_t lp_count = lpGetInteger(si->lp_ele);
+                int valid_record;
+                int64_t lp_count = lpGetIntegerIfValid(si->lp_ele, &valid_record);
+                if (!valid_record || lp_count < 0 || (uint64_t)lp_count > lpBytes(si->lp))
+                    return STREAM_ITERATOR_CORRUPT;
                 if (lp_count == 0) { /* We reached the primary entry. */
                     si->lp = NULL;
                     si->lp_ele = NULL;
                     break;
                 }
-                while (lp_count--) si->lp_ele = lpPrev(si->lp, si->lp_ele);
+                while (lp_count-- && si->lp_ele) si->lp_ele = lpPrev(si->lp, si->lp_ele);
+                if (!si->lp_ele) return STREAM_ITERATOR_CORRUPT;
             }
 
             /* Get the flags entry. */
             si->lp_flags = si->lp_ele;
-            int64_t flags = lpGetInteger(si->lp_ele);
+            int valid_record;
+            int64_t flags = lpGetIntegerIfValid(si->lp_ele, &valid_record);
+            if (!valid_record) return STREAM_ITERATOR_CORRUPT;
             si->lp_ele = lpNext(si->lp, si->lp_ele); /* Seek ID. */
+            if (!si->lp_ele) return STREAM_ITERATOR_CORRUPT;
 
             /* Get the ID: it is encoded as difference between the primary
              * ID and this entry ID. */
             *id = si->primary_id;
-            id->ms += lpGetInteger(si->lp_ele);
+            id->ms += lpGetIntegerIfValid(si->lp_ele, &valid_record);
+            if (!valid_record) return STREAM_ITERATOR_CORRUPT;
             si->lp_ele = lpNext(si->lp, si->lp_ele);
-            id->seq += lpGetInteger(si->lp_ele);
+            if (!si->lp_ele) return STREAM_ITERATOR_CORRUPT;
+            id->seq += lpGetIntegerIfValid(si->lp_ele, &valid_record);
+            if (!valid_record) return STREAM_ITERATOR_CORRUPT;
             si->lp_ele = lpNext(si->lp, si->lp_ele);
+            if (!si->lp_ele) return STREAM_ITERATOR_CORRUPT;
 
             /* The number of entries is here or not depending on the
              * flags. */
             if (flags & STREAM_ITEM_FLAG_SAMEFIELDS) {
                 *numfields = si->primary_fields_count;
             } else {
-                *numfields = lpGetInteger(si->lp_ele);
+                *numfields = lpGetIntegerIfValid(si->lp_ele, &valid_record);
+                if (!valid_record) return STREAM_ITERATOR_CORRUPT;
                 si->lp_ele = lpNext(si->lp, si->lp_ele);
+                if (!si->lp_ele) return STREAM_ITERATOR_CORRUPT;
             }
-            serverAssert(*numfields >= 0);
+            if (!streamIteratorValidateEntryData(si, flags, *numfields)) return STREAM_ITERATOR_CORRUPT;
 
             /* If current >= start, and the entry is not marked as
              * deleted or tombstones are included, emit it. */
             if (!si->rev) {
                 if (streamCompareID(id, &si->start_id) >= 0 &&
                     (!si->skip_tombstones || !(flags & STREAM_ITEM_FLAG_DELETED))) {
-                    if (streamCompareID(id, &si->end_id) > 0) return 0; /* We are already out of range. */
+                    if (streamCompareID(id, &si->end_id) > 0)
+                        return STREAM_ITERATOR_EOF; /* We are already out of range. */
                     si->entry_flags = flags;
                     if (flags & STREAM_ITEM_FLAG_SAMEFIELDS) si->primary_fields_ptr = si->primary_fields_start;
-                    return 1; /* Valid item returned. */
+                    return STREAM_ITERATOR_FOUND;
                 }
             } else {
                 if (streamCompareID(id, &si->end_id) <= 0 &&
                     (!si->skip_tombstones || !(flags & STREAM_ITEM_FLAG_DELETED))) {
-                    if (streamCompareID(id, &si->start_id) < 0) return 0; /* We are already out of range. */
+                    if (streamCompareID(id, &si->start_id) < 0)
+                        return STREAM_ITERATOR_EOF; /* We are already out of range. */
                     si->entry_flags = flags;
                     if (flags & STREAM_ITEM_FLAG_SAMEFIELDS) si->primary_fields_ptr = si->primary_fields_start;
-                    return 1; /* Valid item returned. */
+                    return STREAM_ITERATOR_FOUND;
                 }
             }
 
@@ -1218,7 +1271,8 @@ int streamIteratorGetID(streamIterator *si, streamID *id, int64_t *numfields) {
                 /* If the entry was not flagged SAMEFIELD we also read the
                  * number of fields, so go back one more. */
                 if (!(flags & STREAM_ITEM_FLAG_SAMEFIELDS)) prev_times++;
-                while (prev_times--) si->lp_ele = lpPrev(si->lp, si->lp_ele);
+                while (prev_times-- && si->lp_ele) si->lp_ele = lpPrev(si->lp, si->lp_ele);
+                if (!si->lp_ele) return STREAM_ITERATOR_CORRUPT;
             }
         }
 
@@ -1323,9 +1377,10 @@ int streamEntryExists(stream *s, streamID *id) {
     streamIteratorStart(&si, s, id, id, 0);
     streamID myid;
     int64_t numfields;
-    int found = streamIteratorGetID(&si, &myid, &numfields);
+    streamIteratorResult result = streamIteratorGetID(&si, &myid, &numfields);
     streamIteratorStop(&si);
-    if (!found) return 0;
+    if (result == STREAM_ITERATOR_CORRUPT) serverPanic("Stream listpack corruption detected");
+    if (result == STREAM_ITERATOR_EOF) return 0;
     serverAssert(streamCompareID(id, &myid) == 0);
     return 1;
 }
@@ -1338,11 +1393,13 @@ int streamDeleteItem(stream *s, streamID *id) {
     streamIteratorStart(&si, s, id, id, 0);
     streamID myid;
     int64_t numfields;
-    if (streamIteratorGetID(&si, &myid, &numfields)) {
+    streamIteratorResult result = streamIteratorGetID(&si, &myid, &numfields);
+    if (result == STREAM_ITERATOR_FOUND) {
         streamIteratorRemoveEntry(&si, &myid);
         deleted = 1;
     }
     streamIteratorStop(&si);
+    if (result == STREAM_ITERATOR_CORRUPT) serverPanic("Stream listpack corruption detected");
     return deleted;
 }
 
@@ -1351,7 +1408,9 @@ void streamLastValidID(stream *s, streamID *maxid) {
     streamIterator si;
     streamIteratorStart(&si, s, NULL, NULL, 1);
     int64_t numfields;
-    if (!streamIteratorGetID(&si, maxid, &numfields) && s->length)
+    streamIteratorResult result = streamIteratorGetID(&si, maxid, &numfields);
+    if (result == STREAM_ITERATOR_CORRUPT) serverPanic("Stream listpack corruption detected");
+    if (result == STREAM_ITERATOR_EOF && s->length)
         serverPanic("Corrupt stream, length is %llu, but no max id", (unsigned long long)s->length);
     streamIteratorStop(&si);
 }
@@ -1684,6 +1743,7 @@ size_t streamReplyWithRange(client *c,
     streamIterator si;
     int64_t numfields;
     streamID id;
+    streamIteratorResult result;
     int propagate_last_id = 0;
     int noack = flags & STREAM_RWR_NOACK;
 
@@ -1700,7 +1760,7 @@ size_t streamReplyWithRange(client *c,
 
     if (!(flags & STREAM_RWR_RAWENTRIES)) arraylen_ptr = addReplyDeferredLen(c);
     streamIteratorStart(&si, s, start, end, rev);
-    while (streamIteratorGetID(&si, &id, &numfields)) {
+    while ((result = streamIteratorGetID(&si, &id, &numfields)) == STREAM_ITERATOR_FOUND) {
         /* Update the group last_id if needed. */
         if (group && streamCompareID(&id, &group->last_id) > 0) {
             if (group->entries_read != SCG_INVALID_ENTRIES_READ &&
@@ -1790,6 +1850,15 @@ size_t streamReplyWithRange(client *c,
 
         arraylen++;
         if (count && count == arraylen) break;
+    }
+
+    if (result == STREAM_ITERATOR_CORRUPT) {
+        /* The reply length is deferred, so the entries validated so far can be
+         * returned with a correct length instead of stopping the server. The
+         * corrupt entry and everything after it in this listpack is omitted.
+         * Callers that asked for raw entries own the reply framing and detect
+         * the short count through the return value. */
+        serverLog(LL_WARNING, "Corrupt stream listpack detected, returning %llu entries", (unsigned long long)arraylen);
     }
 
     if (spi && propagate_last_id) streamPropagateGroupID(c, spi->keyname, group, spi->groupname);
@@ -3976,15 +4045,19 @@ void xinfoCommand(client *c) {
     }
 }
 
-/* Validate the integrity stream listpack entries structure. Both in term of a
- * valid listpack, but also that the structure of the entries matches a valid
- * stream. return 1 if valid 0 if not valid. */
+/* Validate both the listpack structure and the stream-specific record
+ * layout. Counts must be non-negative, fit within the remaining listpack
+ * entries, and agree with the number of records consumed. Returns 1 when
+ * valid and 0 otherwise. */
 int streamValidateListpackIntegrity(unsigned char *lp, size_t size) {
     int valid_record;
     unsigned char *p, *next;
 
     /* Validate the listpack structure (header + all entries). */
     if (!lpValidateIntegrity(lp, size, NULL, NULL)) return 0;
+
+    uint64_t lp_entries = lpLength(lp);
+    if (lp_entries < 4) return 0;
 
     next = p = lpValidateFirst(lp);
     if (!lpValidateNext(lp, &next, size)) return 0;
@@ -4004,7 +4077,7 @@ int streamValidateListpackIntegrity(unsigned char *lp, size_t size) {
 
     /* num-of-fields */
     int64_t primary_fields = lpGetIntegerIfValid(p, &valid_record);
-    if (!valid_record) return 0;
+    if (!valid_record || primary_fields < 0 || (uint64_t)primary_fields > lp_entries - 4) return 0;
     p = next;
     if (!lpValidateNext(lp, &next, size)) return 0;
 
@@ -4020,12 +4093,24 @@ int streamValidateListpackIntegrity(unsigned char *lp, size_t size) {
     p = next;
     if (!lpValidateNext(lp, &next, size)) return 0;
 
-    entry_count += deleted_count;
-    while (entry_count--) {
-        if (!p) return 0;
+    if (entry_count < 0 || deleted_count < 0 || entry_count > INT64_MAX - deleted_count) return 0;
+    int64_t total_count = entry_count + deleted_count;
+    uint64_t actual_entry_count = 0;
+    uint64_t actual_deleted_count = 0;
+
+    uint64_t consumed = (uint64_t)primary_fields + 4;
+    if ((uint64_t)total_count > (lp_entries - consumed) / 4) return 0;
+
+    while (total_count--) {
+        if (!p || lp_entries - consumed < 4) return 0;
         int64_t fields = primary_fields, extra_fields = 3;
+        consumed += 3; /* flags + two ID parts */
         int64_t flags = lpGetIntegerIfValid(p, &valid_record);
         if (!valid_record) return 0;
+        if (flags & STREAM_ITEM_FLAG_DELETED)
+            actual_deleted_count++;
+        else
+            actual_entry_count++;
         p = next;
         if (!lpValidateNext(lp, &next, size)) return 0;
 
@@ -4042,9 +4127,12 @@ int streamValidateListpackIntegrity(unsigned char *lp, size_t size) {
         if (!(flags & STREAM_ITEM_FLAG_SAMEFIELDS)) {
             /* num-of-fields */
             fields = lpGetIntegerIfValid(p, &valid_record);
-            if (!valid_record) return 0;
+            if (!valid_record || fields < 0) return 0;
             p = next;
             if (!lpValidateNext(lp, &next, size)) return 0;
+            consumed++;
+
+            if (lp_entries - consumed < 1 || (uint64_t)fields > (lp_entries - consumed - 1) / 2) return 0;
 
             /* the field names */
             for (int64_t j = 0; j < fields; j++) {
@@ -4053,7 +4141,11 @@ int streamValidateListpackIntegrity(unsigned char *lp, size_t size) {
             }
 
             extra_fields += fields + 1;
+        } else if ((uint64_t)fields > lp_entries - consumed - 1) {
+            return 0;
         }
+
+        consumed += (flags & STREAM_ITEM_FLAG_SAMEFIELDS) ? (uint64_t)fields + 1 : (uint64_t)fields * 2 + 1;
 
         /* the values */
         for (int64_t j = 0; j < fields; j++) {
@@ -4069,7 +4161,9 @@ int streamValidateListpackIntegrity(unsigned char *lp, size_t size) {
         if (!lpValidateNext(lp, &next, size)) return 0;
     }
 
-    if (next) return 0;
+    if (next || consumed != lp_entries || actual_entry_count != (uint64_t)entry_count ||
+        actual_deleted_count != (uint64_t)deleted_count)
+        return 0;
 
     return 1;
 }

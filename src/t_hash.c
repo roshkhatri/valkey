@@ -906,7 +906,7 @@ static int hashTypeRandomElement(robj *hashobj, unsigned long hashsize, listpack
         }
         hashTypeIgnoreTTL(hashobj, false);
     } else if (hashobj->encoding == OBJ_ENCODING_LISTPACK) {
-        lpRandomPair(objectGetVal(hashobj), hashsize, field, val);
+        if (!lpRandomPair(objectGetVal(hashobj), hashsize, field, val)) rc = C_ERR;
     } else {
         serverPanic("Unknown hash encoding");
     }
@@ -2212,15 +2212,15 @@ void hrandfieldWithCountCommand(client *c, long l, int withvalues) {
             unsigned long limit, sample_count;
 
             limit = count > HRANDFIELD_RANDOM_SAMPLE_LIMIT ? HRANDFIELD_RANDOM_SAMPLE_LIMIT : count;
-            fields = zmalloc(sizeof(listpackEntry) * limit);
-            if (withvalues) vals = zmalloc(sizeof(listpackEntry) * limit);
+            fields = zcalloc(sizeof(listpackEntry) * limit);
+            if (withvalues) vals = zcalloc(sizeof(listpackEntry) * limit);
             while (count) {
-                sample_count = count > limit ? limit : count;
-                count -= sample_count;
+                unsigned long requested = count > limit ? limit : count;
+                sample_count = lpRandomPairs(objectGetVal(hash), requested, fields, vals);
+                count -= requested;
                 reply_size += sample_count;
-                lpRandomPairs(objectGetVal(hash), sample_count, fields, vals);
                 hrandfieldReplyWithListpack(wpc, sample_count, fields, vals);
-                if (c->flag.close_asap) break;
+                if (sample_count != requested || c->flag.close_asap) break;
             }
             zfree(fields);
             zfree(vals);
@@ -2255,12 +2255,11 @@ void hrandfieldWithCountCommand(client *c, long l, int withvalues) {
      * And it is inefficient to repeatedly pick one random element from a
      * listpack in CASE 4. So we use this instead. */
     if (hash->encoding == OBJ_ENCODING_LISTPACK) {
-        reply_size = count < size ? count : size;
         listpackEntry *fields, *vals = NULL;
-        fields = zmalloc(sizeof(listpackEntry) * count);
-        if (withvalues) vals = zmalloc(sizeof(listpackEntry) * count);
-        serverAssert(lpRandomPairsUnique(objectGetVal(hash), count, fields, vals) == count);
-        hrandfieldReplyWithListpack(wpc, count, fields, vals);
+        fields = zcalloc(sizeof(listpackEntry) * count);
+        if (withvalues) vals = zcalloc(sizeof(listpackEntry) * count);
+        reply_size = lpRandomPairsUnique(objectGetVal(hash), count, fields, vals);
+        hrandfieldReplyWithListpack(wpc, reply_size, fields, vals);
         zfree(fields);
         zfree(vals);
         goto set_deferred_response;

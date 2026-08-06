@@ -264,12 +264,96 @@ test {corrupt payload: hash listpack with duplicate records - convert} {
     }
 }
 
+proc assert_restore_rejects_corrupt_payload {key payload} {
+    assert_equal 1 [catch {r restore $key 0 $payload} err]
+    assert_match "*Bad data format*" $err
+    assert_equal 0 [r exists $key]
+}
+
+test {corrupt payload: F1 inflated listpack cached counts are safe} {
+    start_server [list overrides [list loglevel verbose use-exit-on-panic yes crash-memcheck-enabled no] ] {
+        # Each malformed payload was created from the valid control below by
+        # changing only the listpack num-elements header from its actual value
+        # to 4 and recomputing the DUMP CRC64.
+        set hash_valid "\x10\x0D\x0D\x00\x00\x00\x02\x00\x81\x66\x02\x81\x76\x02\xFF\x50\x00\xEF\xDB\xF4\xD5\xBD\x06\x6F\x69"
+        set hash_bad "\x10\x0D\x0D\x00\x00\x00\x04\x00\x81\x66\x02\x81\x76\x02\xFF\x50\x00\xBB\x34\xAE\x20\x7B\xD9\x1B\xAE"
+        set zset_valid "\x11\x0C\x0C\x00\x00\x00\x02\x00\x81\x6D\x02\x01\x01\xFF\x50\x00\xE9\xC9\x34\x0C\x43\x2F\x09\x3F"
+        set zset_bad "\x11\x0C\x0C\x00\x00\x00\x04\x00\x81\x6D\x02\x01\x01\xFF\x50\x00\xFC\xEA\x8B\x9C\x96\x69\xBC\xA3"
+        set set_valid "\x14\x0D\x0D\x00\x00\x00\x02\x00\x81\x61\x02\x81\x62\x02\xFF\x50\x00\xAC\x19\x7E\x56\x2A\x6E\x58\x29"
+        set set_bad "\x14\x0D\x0D\x00\x00\x00\x04\x00\x81\x61\x02\x81\x62\x02\xFF\x50\x00\xF8\xF6\x24\xA3\xEC\xB1\x2C\xEE"
+
+        assert_restore_rejects_corrupt_payload badhash $hash_bad
+        assert_restore_rejects_corrupt_payload badzset $zset_bad
+        assert_restore_rejects_corrupt_payload badset $set_bad
+
+        verify_log_message 0 "*Hash listpack integrity check failed*" 0
+        verify_log_message 0 "*Zset listpack integrity check failed*" 0
+        verify_log_message 0 "*Set listpack integrity check failed*" 0
+
+        assert_equal OK [r restore validhash 0 $hash_valid]
+        assert_encoding listpack validhash
+        assert_equal 1 [r hlen validhash]
+        assert_equal 3 [llength [r hrandfield validhash -3]]
+        assert_equal 6 [llength [r hrandfield validhash -3 withvalues]]
+
+        assert_equal OK [r restore validzset 0 $zset_valid]
+        assert_encoding listpack validzset
+        assert_equal 1 [r zcard validzset]
+        assert_equal 3 [llength [r zrandmember validzset -3]]
+        assert_equal {m 1} [r zpopmin validzset 2]
+
+        assert_equal OK [r restore validset 0 $set_valid]
+        assert_encoding listpack validset
+        assert_equal 2 [r scard validset]
+        assert_equal 3 [llength [r srandmember validset -3]]
+        assert_equal {a b} [lsort [r spop validset 2]]
+        assert_equal PONG [r ping]
+    }
+}
+
+test {corrupt payload: F3 inflated stream field counts are safe} {
+    start_server [list overrides [list loglevel verbose use-exit-on-panic yes crash-memcheck-enabled no] ] {
+        # The control has two entries: the first uses the master field "f",
+        # and the second stores its own field "g". Each malformed payload
+        # changes only one field count from 1 to 2 and has a recomputed CRC64.
+        set stream_valid "\x15\x01\x10\x00\x00\x00\x00\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x00\x00\x2D\x2D\x00\x00\x00\x11\x00\x02\x01\x00\x01\x01\x01\x81\x66\x02\x00\x01\x02\x01\x00\x01\x00\x01\x81\x76\x02\x04\x01\x00\x01\x01\x01\x00\x01\x01\x01\x81\x67\x02\x81\x77\x02\x06\x01\xFF\x02\x02\x00\x01\x00\x00\x00\x02\x00\x50\x00\xA1\xDF\xE0\xE1\x48\xC5\xF8\x85"
+        set stream_bad_master "\x15\x01\x10\x00\x00\x00\x00\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x00\x00\x2D\x2D\x00\x00\x00\x11\x00\x02\x01\x00\x01\x02\x01\x81\x66\x02\x00\x01\x02\x01\x00\x01\x00\x01\x81\x76\x02\x04\x01\x00\x01\x01\x01\x00\x01\x01\x01\x81\x67\x02\x81\x77\x02\x06\x01\xFF\x02\x02\x00\x01\x00\x00\x00\x02\x00\x50\x00\x40\xF4\x7A\x80\xB6\xB5\x33\xF4"
+        set stream_bad_entry "\x15\x01\x10\x00\x00\x00\x00\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x00\x00\x2D\x2D\x00\x00\x00\x11\x00\x02\x01\x00\x01\x01\x01\x81\x66\x02\x00\x01\x02\x01\x00\x01\x00\x01\x81\x76\x02\x04\x01\x00\x01\x01\x01\x00\x01\x02\x01\x81\x67\x02\x81\x77\x02\x06\x01\xFF\x02\x02\x00\x01\x00\x00\x00\x02\x00\x50\x00\x26\xED\x27\xD7\x37\x55\x14\x7A"
+
+        assert_restore_rejects_corrupt_payload badstream-master $stream_bad_master
+        assert_restore_rejects_corrupt_payload badstream-entry $stream_bad_entry
+        verify_log_message 0 "*Stream listpack integrity check failed*" 0
+
+        assert_equal OK [r restore validstream 0 $stream_valid]
+        assert_equal 2 [r xlen validstream]
+        assert_equal {{1-0 {f v}} {2-0 {g w}}} [r xrange validstream - +]
+        assert_equal {{2-0 {g w}} {1-0 {f v}}} [r xrevrange validstream + -]
+        assert_equal {{validstream {{1-0 {f v}} {2-0 {g w}}}}} [r xread count 2 streams validstream 0-0]
+        assert_equal 2 [dict get [r xinfo stream validstream] length]
+        assert_equal PONG [r ping]
+    }
+}
+
 test {corrupt payload: hash ziplist uneven record count} {
     # when we do NOT perform full sanitization, but shallow sanitization can detect uneven count
     start_server [list overrides [list loglevel verbose use-exit-on-panic yes crash-memcheck-enabled no] ] {
         r debug set-skip-checksum-validation 1
         catch { r RESTORE _hash 0 "\r\x1b\x1b\x00\x00\x00\x16\x00\x00\x00\x04\x00\x00\x02a\x00\x04\x02b\x00\x04\x02a\x00\x04\x02d\x00\xff\t\x00\xa1\x98\x36x\xcc\x8e\x93\x2e" } err
         assert_match "*Bad data format*" $err
+    }
+}
+
+test {corrupt payload: stream live and deleted count split mismatch} {
+    start_server [list overrides [list loglevel verbose use-exit-on-panic yes crash-memcheck-enabled no] ] {
+        # Both records are live, but the listpack header declares one live and
+        # one deleted record. The total remains two. This payload keeps the
+        # valid control checksum, so skip checksum validation for this case.
+        set stream_bad_split "\x15\x01\x10\x00\x00\x00\x00\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x00\x00\x2D\x2D\x00\x00\x00\x11\x00\x01\x01\x01\x01\x01\x81\x66\x02\x00\x01\x02\x01\x00\x01\x00\x01\x81\x76\x02\x04\x01\x00\x01\x01\x01\x00\x01\x01\x01\x81\x67\x02\x81\x77\x02\x06\x01\xFF\x02\x02\x00\x01\x00\x00\x00\x02\x00\x50\x00\xA1\xDF\xE0\xE1\x48\xC5\xF8\x85"
+
+        r debug set-skip-checksum-validation 1
+        assert_restore_rejects_corrupt_payload badstream-split $stream_bad_split
+        verify_log_message 0 "*Stream listpack integrity check failed*" 0
+        assert_equal PONG [r ping]
     }
 }
 

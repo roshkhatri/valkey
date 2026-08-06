@@ -1127,6 +1127,118 @@ TEST_F(ListpackBenchmark, DISABLED_listpackBenchmarkLpSeek) {
     printf("Done. usec=%lld\n", usec() - start);
 }
 
+/* The random selection helpers below are reachable with a cached element count
+ * that disagrees with the listpack contents. They must fail closed rather than
+ * assert or leave output entries uninitialized, because callers reply with
+ * whatever the output array holds. */
+class ListpackCorruptSelectionTest : public ::testing::Test {
+  protected:
+    void SetUp() override {
+        srand(0);
+    }
+};
+
+/* A caller whose cached count is zero must not divide by zero. */
+TEST_F(ListpackCorruptSelectionTest, listpackRandomPairRejectsZeroCount) {
+    listpackEntry key, val;
+    unsigned char *lp = lpNew(0);
+
+    ASSERT_EQ(lpRandomPair(lp, 0, &key, &val), 0);
+    ASSERT_TRUE(key.sval == nullptr);
+    ASSERT_EQ(key.slen, 0u);
+    ASSERT_EQ(key.lval, 0);
+    ASSERT_TRUE(val.sval == nullptr);
+    ASSERT_EQ(val.lval, 0);
+    lpFree(lp);
+}
+
+/* An odd number of elements cannot form a complete pair. The value entry must
+ * stay cleared so a caller cannot emit a fabricated value. */
+TEST_F(ListpackCorruptSelectionTest, listpackRandomPairRejectsMissingValue) {
+    listpackEntry key, val;
+    unsigned char *lp = lpNew(0);
+    lp = lpAppend(lp, (unsigned char *)("abc"), 3);
+
+    ASSERT_EQ(lpRandomPair(lp, 1, &key, &val), 0);
+    ASSERT_TRUE(val.sval == nullptr);
+    ASSERT_EQ(val.slen, 0u);
+    ASSERT_EQ(val.lval, 0);
+    lpFree(lp);
+}
+
+/* A caller that does not want the value must still not accept a dangling
+ * trailing key, because it would report a field with no value behind it. */
+TEST_F(ListpackCorruptSelectionTest, listpackRandomPairRejectsMissingValueWithoutValArg) {
+    listpackEntry key;
+    unsigned char *lp = lpNew(0);
+    lp = lpAppend(lp, (unsigned char *)("abc"), 3);
+
+    ASSERT_EQ(lpRandomPair(lp, 1, &key, nullptr), 0);
+    lpFree(lp);
+}
+
+/* A nonzero cached count over an empty listpack makes the seek fail for every
+ * index, so this exercises the failed seek without depending on the values
+ * rand() happens to produce. */
+TEST_F(ListpackCorruptSelectionTest, listpackRandomPairRejectsFailedSeek) {
+    listpackEntry key, val;
+    unsigned char *lp = lpNew(0);
+
+    ASSERT_EQ(lpRandomPair(lp, 4, &key, &val), 0);
+    ASSERT_TRUE(key.sval == nullptr);
+    ASSERT_EQ(key.slen, 0u);
+    ASSERT_EQ(key.lval, 0);
+    ASSERT_TRUE(val.sval == nullptr);
+    ASSERT_EQ(val.lval, 0);
+    lpFree(lp);
+}
+
+TEST_F(ListpackCorruptSelectionTest, listpackRandomEntriesRejectsEmptyListpack) {
+    listpackEntry entries[3];
+    unsigned char *lp = lpNew(0);
+
+    ASSERT_EQ(lpRandomEntries(lp, 3, entries), 0u);
+    for (int i = 0; i < 3; i++) {
+        ASSERT_TRUE(entries[i].sval == nullptr);
+        ASSERT_EQ(entries[i].slen, 0u);
+        ASSERT_EQ(entries[i].lval, 0);
+    }
+    lpFree(lp);
+}
+
+/* Partial pair selection is all-or-zero, and the output arrays are cleared, so
+ * a caller can never serialize uninitialized heap contents. */
+TEST_F(ListpackCorruptSelectionTest, listpackRandomPairsRejectsIncompletePair) {
+    listpackEntry keys[3], vals[3];
+    unsigned char *lp = lpNew(0);
+    lp = lpAppend(lp, (unsigned char *)("abc"), 3);
+
+    ASSERT_EQ(lpRandomPairs(lp, 3, keys, vals), 0u);
+    for (int i = 0; i < 3; i++) {
+        ASSERT_TRUE(keys[i].sval == nullptr);
+        ASSERT_EQ(keys[i].lval, 0);
+        ASSERT_TRUE(vals[i].sval == nullptr);
+        ASSERT_EQ(vals[i].lval, 0);
+    }
+    lpFree(lp);
+}
+
+/* Unique selection stops at the truncated pair and reports only the pairs it
+ * fully stored. */
+TEST_F(ListpackCorruptSelectionTest, listpackRandomPairsUniqueStopsAtTruncatedPair) {
+    listpackEntry keys[2], vals[2];
+    unsigned char *lp = lpNew(0);
+    lp = lpAppend(lp, (unsigned char *)("abc"), 3);
+    lp = lpAppend(lp, (unsigned char *)("123"), 3);
+    lp = lpAppend(lp, (unsigned char *)("def"), 3);
+
+    ASSERT_EQ(lpRandomPairsUnique(lp, 2, keys, vals), 1u);
+    ASSERT_TRUE(vals[1].sval == nullptr);
+    ASSERT_EQ(vals[1].slen, 0u);
+    ASSERT_EQ(vals[1].lval, 0);
+    lpFree(lp);
+}
+
 TEST_F(ListpackBenchmark, DISABLED_listpackBenchmarkLpValidateIntegrity) {
     /* Benchmark lpValidateIntegrity */
     unsigned long long start = usec();
