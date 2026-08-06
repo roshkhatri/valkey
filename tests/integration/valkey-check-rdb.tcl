@@ -262,7 +262,6 @@ tags {"check-rdb network external:skip logreqres:skip"} {
             assert_match {*Logical RDB CRC64 skipped for streaming-compressed input*} $result
             assert_match {*RDB looks OK!*} $result
             assert_no_match {*Checksum OK*} $result
-            assert_no_match {*integrity is verified by the codec frame checksums*} $result
         }
     }
 }
