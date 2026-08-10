@@ -79,6 +79,23 @@ void rdbCheckSetError(const char *fmt, ...);
 int rdbLoadRioWithLoadingCtx(rio *rdb, int rdbflags, rdbSaveInfo *rsi, rdbLoadingCtx *rdb_loading_ctx);
 void replicationEmptyDbCallback(hashtable *ht);
 
+/* Resolve the configured policy to an algorithm. The `yes` policy follows the
+ * default algorithm, while explicit algorithm names remain pinned. */
+static compressionAlgo rdbCompressionAlgorithm(rdb_compression_mode mode) {
+    switch (mode) {
+    case RDB_COMPRESSION_NO:
+        return ALGO_NONE;
+    case RDB_COMPRESSION_YES:
+        return ALGO_LZF;
+    case RDB_COMPRESSION_LZF:
+        return ALGO_LZF;
+    case RDB_COMPRESSION_LZ4:
+        return ALGO_LZ4;
+    default:
+        serverPanic("Unknown RDB compression mode: %d", mode);
+    }
+}
+
 /* Returns true if the RDB version is valid and accepted, false otherwise. This
  * function takes configuration into account. The parameter `is_valkey_magic`
  * indicates that an RDB file with the VALKEY magic string was parsed.
@@ -1582,8 +1599,8 @@ static int rdbSaveInternal(int req, const char *filename, rdbSaveInfo *rsi, int 
     int error = 0;
     int saved_errno;
     char *err_op; /* For a detailed log */
-    compressionAlgo streaming_algo = server.rdb_compression == RDB_COMPRESSION_LZ4 ? ALGO_LZ4 : ALGO_NONE;
-    bool use_streaming_compression = streaming_algo != ALGO_NONE;
+    compressionAlgo compression_algo = rdbCompressionAlgorithm(server.rdb_compression);
+    bool use_streaming_compression = compression_algo == ALGO_LZ4;
     /* Keep replication snapshots plain until full sync negotiates compression.
      * Disk-based sync snapshots can also become AOF bases, which currently do
      * not record whether the reused RDB has whole-stream compression. */
@@ -1621,7 +1638,7 @@ static int rdbSaveInternal(int req, const char *filename, rdbSaveInfo *rsi, int 
      * rioWriteRaw lets streamWriter reach the backend without recursively
      * compressing its own output. */
     if (use_streaming_compression) {
-        if (rdbCompressionInit(&rdb, &compression_writer, streaming_algo, server.rdb_checksum) == C_ERR) {
+        if (rdbCompressionInit(&rdb, &compression_writer, compression_algo, server.rdb_checksum) == C_ERR) {
             errno = EIO; /* Compressor init failure, set errno for werr log */
             err_op = "rdbCompressionInit";
             goto werr;

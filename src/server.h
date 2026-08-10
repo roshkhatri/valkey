@@ -606,9 +606,10 @@ typedef enum {
 } rdb_version_check_type;
 
 typedef enum {
-    RDB_COMPRESSION_NO = 0,
-    RDB_COMPRESSION_YES,
-    RDB_COMPRESSION_LZ4
+    RDB_COMPRESSION_NO = 0, /* Disable RDB compression. */
+    RDB_COMPRESSION_YES,    /* Use the default compression algorithm. */
+    RDB_COMPRESSION_LZF,    /* Pin legacy per-string LZF compression. */
+    RDB_COMPRESSION_LZ4     /* Pin whole-stream LZ4 compression. */
 } rdb_compression_mode;
 
 /* Structure representing a non-owning view of a buffer.

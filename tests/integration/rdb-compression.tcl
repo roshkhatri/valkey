@@ -188,11 +188,11 @@ start_server {overrides {save "" enable-debug-command local}} {
 
         # Save with LZ4, then restart with LZF and load the existing file.
         assert_equal "OK" [r save]
-        r config set rdbcompression yes
+        r config set rdbcompression lzf
         r config rewrite
         restart_server 0 true false
 
-        assert_equal "yes" [lindex [r config get rdbcompression] 1]
+        assert_equal "lzf" [lindex [r config get rdbcompression] 1]
         set newdigest [debug_digest]
         assert {$digest eq $newdigest}
         assert_rdb_test_dataset r $prefix
@@ -200,7 +200,7 @@ start_server {overrides {save "" enable-debug-command local}} {
 
     test {Switching from LZF to LZ4 preserves data} {
         set prefix "lzf-to-lz4"
-        r config set rdbcompression yes
+        r config set rdbcompression lzf
         write_rdb_test_dataset r $prefix
         assert_rdb_test_dataset r $prefix
         set digest [debug_digest]
@@ -219,7 +219,7 @@ start_server {overrides {save "" enable-debug-command local}} {
 
     test {Invalid compression config is rejected} {
         set previous [lindex [r config get rdbcompression] 1]
-        assert_error "*argument(s) must be one of the following: no, yes, lz4*" {
+        assert_error "*argument(s) must be one of the following: no, yes, lzf, lz4*" {
             r config set rdbcompression snappy
         }
         assert_equal $previous [lindex [r config get rdbcompression] 1]
