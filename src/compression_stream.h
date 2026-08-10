@@ -61,13 +61,11 @@ typedef struct streamWriter {
 } streamWriter;
 
 /* Writer API. Init uses the codec's default compression level and configures
- * its integrity checks according to codec_checksum. Init, Write, Flush, Finish,
- * and write_cb use C_OK/C_ERR. The writer pushes compressed bytes to write_cb.
+ * its integrity checks according to codec_checksum. Init, Write, Finish, and
+ * write_cb use C_OK/C_ERR. The writer pushes compressed bytes to write_cb.
  * Errors are sticky: later operations fail without emitting bytes. */
 int streamWriterInit(streamWriter *writer, compressionAlgo algo, bool codec_checksum, streamWriterWriteFn write_cb, void *write_ctx);
 int streamWriterWrite(streamWriter *writer, const void *buf, size_t len);
-/* Emits codec-buffered bytes while leaving the frame open. */
-int streamWriterFlush(streamWriter *writer);
 /* Finalizes the frame. Repeated calls after successful completion are safe. */
 int streamWriterFinish(streamWriter *writer);
 /* Releases resources without implicitly finalizing the frame. */
@@ -75,11 +73,12 @@ void streamWriterFree(streamWriter *writer);
 
 /* ===== Reader ===== */
 
-/* Default reader compressed-input/decompressed-output buffer size. Tiny caller
- * values are clamped up so the decoder can always make forward progress
- * without growing internal state. */
+/* Default decompressed-output buffer size. Tiny caller values are clamped up
+ * so the decoder can always make forward progress without growing internal
+ * state. The compressed-input buffer only needs to hold one LZ4 block. */
 #define STREAM_READER_BUFFER_SIZE_DEFAULT (1024 * 1024)
 #define STREAM_READER_BUFFER_SIZE_MIN (128 * 1024)
+#define STREAM_READER_COMPRESSED_BUFFER_SIZE (128 * 1024)
 
 /* When allow_passthrough is set, non-VCS input is forwarded as raw bytes;
  * otherwise it is rejected. */
@@ -94,6 +93,7 @@ typedef enum {
     STREAM_READER_ERROR_IO = 1,
     STREAM_READER_ERROR_INCOMPATIBLE = 2,
     STREAM_READER_ERROR_CORRUPT = 3,
+    STREAM_READER_ERROR_INTERNAL = 4,
 } streamReaderErrorKind;
 
 typedef enum {
@@ -117,6 +117,7 @@ typedef struct streamReader {
     streamDecompressor decompressor;
 
     uint8_t *compressed_buf;
+    size_t compressed_buf_size;
     size_t compressed_buf_pos;
     size_t compressed_buf_len;
 

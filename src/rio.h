@@ -145,7 +145,6 @@ typedef struct _rio rio;
 /* Implemented in rio.c, where the opaque stream types are visible. */
 size_t rioWriteStream(rio *r, const void *buf, size_t len);
 size_t rioReadStream(rio *r, void *buf, size_t len);
-int rioFlushStream(rio *r);
 
 /* Write directly to the concrete backend, bypassing the stream writer and
  * logical checksum/accounting. streamWriter uses this to emit encoded bytes
@@ -207,10 +206,8 @@ static inline size_t rioRead(rio *r, void *buf, size_t len) {
 }
 
 static inline off_t rioTell(rio *r) {
-    /* Writers report logical bytes accepted from callers, which drives RDB
-     * save progress. Readers report physical bytes consumed from the backend,
-     * which drives file-loading progress for decoded streams. */
-    if (r->stream_writer) return (off_t)r->processed_bytes;
+    /* Stream readers report physical bytes consumed from the source, which
+     * drives file-loading progress for decoded streams. */
     if (r->stream_reader) return (off_t)r->stream_processed_bytes;
     return r->tell(r);
 }
@@ -220,7 +217,7 @@ static inline int rioFlushRaw(rio *r) {
 }
 
 static inline int rioFlush(rio *r) {
-    return r->stream_writer ? rioFlushStream(r) : rioFlushRaw(r);
+    return rioFlushRaw(r);
 }
 
 static inline void rioCloseASAP(rio *r) {

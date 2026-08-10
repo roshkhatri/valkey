@@ -517,7 +517,7 @@ ssize_t rdbSaveRawString(rio *rdb, unsigned char *s, size_t len) {
      * don't compress twice; standalone rios (DUMP, AOF rewrite, diskless)
      * still hit this path. rdb may be NULL when rdbSavedObjectLen() calculates
      * the encoded length without writing the object. */
-    if (server.rdb_compression && len > 20 && !(rdb && rdb->stream_writer)) {
+    if (server.rdb_compression != RDB_COMPRESSION_NO && len > 20 && !(rdb && rdb->stream_writer)) {
         n = rdbSaveLzfStringObject(rdb, s, len);
         if (n == -1) return -1;
         if (n > 0) return n;
@@ -1584,7 +1584,9 @@ static int rdbSaveInternal(int req, const char *filename, rdbSaveInfo *rsi, int 
     char *err_op; /* For a detailed log */
     compressionAlgo streaming_algo = server.rdb_compression == RDB_COMPRESSION_LZ4 ? ALGO_LZ4 : ALGO_NONE;
     bool use_streaming_compression = streaming_algo != ALGO_NONE;
-    /* Replication full sync does not negotiate streaming compression yet. */
+    /* Keep replication snapshots plain until full sync negotiates compression.
+     * Disk-based sync snapshots can also become AOF bases, which currently do
+     * not record whether the reused RDB has whole-stream compression. */
     if (rdbflags & RDBFLAGS_REPLICATION) use_streaming_compression = false;
     streamWriter compression_writer;
     bool compression_initialized = false;
@@ -3175,6 +3177,11 @@ bool rdbRioHasCorruptCompressedInput(rio *rdb) {
     return rdb->stream_reader->error_kind == STREAM_READER_ERROR_CORRUPT;
 }
 
+bool rdbRioHasInternalStreamReaderError(rio *rdb) {
+    if (!rdb->stream_reader) return false;
+    return rdb->stream_reader->error_kind == STREAM_READER_ERROR_INTERNAL;
+}
+
 static ssize_t rdbStreamReadRaw(void *ctx, void *buf, size_t len) {
     return rioReadRawPartial((rio *)ctx, buf, len);
 }
@@ -3730,8 +3737,7 @@ int rdbLoadRioWithLoadingCtx(rio *rdb, int rdbflags, rdbSaveInfo *rsi, rdbLoadin
         uint64_t cksum, expected = rdb->cksum;
 
         if (rioRead(rdb, &cksum, 8) == 0) goto eoferr;
-        if ((rdb->flags & RIO_FLAG_STREAMING_COMPRESSION) &&
-            (rdb->flags & RIO_FLAG_SKIP_RDB_CHECKSUM)) {
+        if (rdb->flags & RIO_FLAG_STREAMING_COMPRESSION) {
             serverLog(LL_NOTICE, "Logical RDB CRC64 skipped for streaming-compressed input.");
         } else if (server.rdb_checksum && !server.skip_checksum_validation) {
             memrev64ifbe(&cksum);
@@ -3764,6 +3770,11 @@ int rdbLoadRioWithLoadingCtx(rio *rdb, int rdbflags, rdbSaveInfo *rsi, rdbLoadin
      * the RDB file from a socket during initial SYNC (diskless replica mode),
      * we'll report the error to the caller, so that we can retry. */
 eoferr:
+    if (rdbRioHasInternalStreamReaderError(rdb)) {
+        serverLog(LL_WARNING, "Internal error while decoding streaming-compressed RDB input. Aborting now.");
+        rdbReportReadError("Internal error decoding compressed RDB stream");
+        return RDB_FAILED;
+    }
     if (rdbRioHasCorruptCompressedInput(rdb)) {
         serverLog(LL_WARNING, "Corrupt streaming-compressed RDB input. Unrecoverable error, aborting now.");
         rdbReportCorruptRDB("Corrupt compressed RDB stream");

@@ -1,15 +1,15 @@
 STD=
 WARN= -Wall
-OPT= -O3
+OPT= -Os
 
-R_CFLAGS= $(STD) $(WARN) $(OPT) $(DEBUG) $(CFLAGS)
+R_CFLAGS= $(STD) $(WARN) $(OPT) $(DEBUG) $(CFLAGS) -DXXH_NAMESPACE=VALKEY_LZ4_
 R_LDFLAGS= $(LDFLAGS)
 DEBUG= -g
 
 R_CC=$(CC) $(R_CFLAGS)
 R_LD=$(CC) $(R_LDFLAGS)
 
-AR ?= ar
+AR= ar
 ARFLAGS= rcs
 
 liblz4.a: lz4.o lz4hc.o lz4frame.o xxhash.o

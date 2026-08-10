@@ -21,8 +21,7 @@ typedef enum {
 
 typedef enum {
     COMPRESS_FLUSH_CONTINUE = 0, /* Buffer internally. */
-    COMPRESS_FLUSH_SYNC = 1,     /* Drain buffered bytes, keep frame open. */
-    COMPRESS_FLUSH_END = 2,      /* Finalize frame. */
+    COMPRESS_FLUSH_END = 1,      /* Finalize frame. */
 } compressFlushMode;
 
 /* Returns a static algorithm name for logs and config output. */
@@ -44,10 +43,9 @@ int streamCompressorInit(streamCompressor *compressor, compressionAlgo algo, int
 size_t streamCompressorOutputBound(const streamCompressor *compressor, size_t input_len);
 /* Feeds raw input into the compressor and writes compressed bytes to output.
  * Called repeatedly to build a complete frame: COMPRESS_FLUSH_CONTINUE keeps
- * buffering, COMPRESS_FLUSH_SYNC drains buffered bytes but leaves the frame
- * open, and COMPRESS_FLUSH_END closes it. output must be at least
- * streamCompressorOutputBound(compressor, input_len) bytes. Returns bytes
- * written, or -1 on error. */
+ * buffering and COMPRESS_FLUSH_END closes the frame. output must be at least
+ * streamCompressorOutputBound(compressor, input_len) bytes. Returns bytes written,
+ * or -1 on error. */
 ssize_t streamCompressorFeed(streamCompressor *compressor,
                              uint8_t *output,
                              size_t output_capacity,

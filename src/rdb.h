@@ -223,6 +223,7 @@ int rdbLoadBinaryFloatValue(rio *rdb, float *val);
 int rdbLoadRio(rio *rdb, int rdbflags, rdbSaveInfo *rsi);
 int rdbLoadRioWithLoadingCtxScopedRdb(rio *rdb, int rdbflags, rdbSaveInfo *rsi, rdbLoadingCtx *rdb_loading_ctx);
 bool rdbRioHasCorruptCompressedInput(rio *rdb);
+bool rdbRioHasInternalStreamReaderError(rio *rdb);
 
 typedef enum {
     RDB_STREAM_READER_INIT_ERROR = -1,

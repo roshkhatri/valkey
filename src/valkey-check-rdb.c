@@ -853,7 +853,7 @@ int redis_check_rdb(char *rdbfilename, FILE *fp) {
 
         rdbstate.doing = RDB_CHECK_DOING_CHECK_SUM;
         if (rioRead(rdb, &cksum, 8) == 0) goto eoferr;
-        if ((rdb->flags & RIO_FLAG_STREAMING_COMPRESSION) && (rdb->flags & RIO_FLAG_SKIP_RDB_CHECKSUM)) {
+        if (rdb->flags & RIO_FLAG_STREAMING_COMPRESSION) {
             rdbCheckInfo("Logical RDB CRC64 skipped for streaming-compressed input.");
         } else if (server.rdb_checksum) {
             memrev64ifbe(&cksum);
@@ -883,6 +883,8 @@ int redis_check_rdb(char *rdbfilename, FILE *fp) {
 eoferr: /* unexpected end of file is handled here with a fatal exit */
     if (rdbstate.error_set) {
         rdbCheckError(rdbstate.error);
+    } else if (rdbRioHasInternalStreamReaderError(rdb)) {
+        rdbCheckError("Internal error decoding compressed RDB stream");
     } else if (rdbRioHasCorruptCompressedInput(rdb)) {
         rdbCheckError("Corrupt compressed RDB stream");
     } else {

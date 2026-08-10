@@ -487,16 +487,6 @@ size_t rioReadStream(rio *r, void *buf, size_t len) {
     return 1;
 }
 
-int rioFlushStream(rio *r) {
-    serverAssert(r->stream_writer != NULL);
-    if (r->flags & (RIO_FLAG_WRITE_ERROR | RIO_FLAG_CLOSE_ASAP)) return 0;
-    if (streamWriterFlush(r->stream_writer) == C_ERR || rioFlushRaw(r) == 0) {
-        r->flags |= RIO_FLAG_WRITE_ERROR;
-        return 0;
-    }
-    return 1;
-}
-
 /* rioRead() is for callers that know an exact logical field size. A stream
  * reader instead treats its input buffer size as a capacity, so its callback
  * uses this upper-bound raw read. Read up to `len` bytes from the concrete
