@@ -42,6 +42,44 @@ test "Pub/Sub shard basics" {
     $anotherclient close
 }
 
+test "SPUBLISH accepts the exact cluster packet limit" {
+    set slot [$cluster cluster keyslot "exact-limit"]
+    array set exact_publishnode [$cluster masternode_for_slot $slot]
+    set publishclient [valkey_client_by_addr $exact_publishnode(host) $exact_publishnode(port)]
+    set max_combined_payload [expr {16 * 1024 * 1024 - 2256 - 8}]
+    set channel exact-limit
+    set exact [string repeat x [expr {$max_combined_payload - [string length $channel]}]]
+
+    assert_equal 0 [$publishclient SPUBLISH $channel $exact]
+    assert_error {*Message is too large to propagate in cluster mode*} {
+        $publishclient SPUBLISH $channel "${exact}x"
+    }
+
+    $publishclient close
+    unset exact
+}
+
+test "Oversized SPUBLISH is rejected before local delivery" {
+    set slot [$cluster cluster keyslot "oversized-channel"]
+    array set oversized_publishnode [$cluster masternode_for_slot $slot]
+    set publishclient [valkey_client_by_addr $oversized_publishnode(host) $oversized_publishnode(port)]
+    set subscribeclient [valkey_deferring_client_by_addr $oversized_publishnode(host) $oversized_publishnode(port)]
+    assert_equal {1} [ssubscribe $subscribeclient {oversized-channel}]
+    set oversized [string repeat x [expr {16 * 1024 * 1024}]]
+
+    assert_error {*Message is too large to propagate in cluster mode*} {
+        $publishclient SPUBLISH oversized-channel $oversized
+    }
+    assert_equal 1 [$publishclient SPUBLISH oversized-channel marker]
+    set delivered [$subscribeclient read]
+    assert_equal 6 [string length [lindex $delivered 2]]
+    assert_equal {smessage oversized-channel marker} $delivered
+
+    $publishclient close
+    $subscribeclient close
+    unset oversized
+}
+
 test "client can't subscribe to multiple shard channels across different slots in same call" {
     catch {$cluster ssubscribe channel.0 channel.1} err
     assert_match {CROSSSLOT Keys*} $err

@@ -18,6 +18,17 @@ proc cluster_nodes_conf_path {id} {
     return [file join $dir $conf]
 }
 
+proc cluster_shards_node {observer node_id} {
+    foreach shard [R $observer CLUSTER SHARDS] {
+        foreach node [dict get $shard nodes] {
+            if {[dict get $node id] eq $node_id} {
+                return $node
+            }
+        }
+    }
+    return {}
+}
+
 start_cluster 2 0 {tags {external:skip cluster} overrides {cluster-ping-interval 100}} {
     test "Availability zone appears in SLOTS/SHARDS" {
         set slots_resp [R 0 CLUSTER SLOTS]
@@ -113,6 +124,51 @@ start_cluster 2 0 {tags {external:skip cluster} overrides {cluster-ping-interval
         assert_no_match "*availability-zone*" $shards_str
     }
 
+    test "Oversized availability zone is omitted from PING extensions" {
+        set retained_az retained-before-oversized
+        assert_equal OK [R 0 CONFIG SET availability-zone $retained_az]
+
+        wait_for_condition 50 100 {
+            [string match "*$retained_az*" [join [R 1 CLUSTER SHARDS] " "]]
+        } else {
+            fail "Availability zone was not propagated before setting an oversized value"
+        }
+
+        set loglines [count_log_lines 0]
+        set oversized_az [string repeat z [expr {16 * 1024 * 1024}]]
+        assert_equal OK [R 0 CONFIG SET availability-zone $oversized_az]
+        unset oversized_az
+
+        wait_for_log_messages 0 [list \
+            "*Omitting lower-priority extensions from * packet*selected*within the remaining packet budget*"] \
+            $loglines 500 10
+
+        set source_id [R 0 CLUSTER MYID]
+        set announced_ip 192.0.2.10
+        set announced_port 6399
+        assert_equal OK [R 0 CONFIG SET cluster-announce-client-ipv4 $announced_ip]
+        assert_equal OK [R 0 CONFIG SET cluster-announce-client-port $announced_port]
+        assert_equal OK [R 0 CONFIG SET cluster-announce-client-tls-port $announced_port]
+        wait_for_condition 50 100 {
+            [dict get [cluster_shards_node 1 $source_id] ip] eq $announced_ip &&
+            [dict get [cluster_shards_node 1 $source_id] port] eq $announced_port &&
+            (!$::tls || [dict get [cluster_shards_node 1 $source_id] tls-port] eq $announced_port)
+        } else {
+            fail "Endpoint metadata was not propagated with an oversized availability-zone extension"
+        }
+
+        assert_equal PONG [R 0 PING]
+        assert_equal PONG [R 1 PING]
+        wait_for_cluster_state ok
+        assert_match "*$retained_az*" [join [R 1 CLUSTER SHARDS] " "]
+
+        assert_equal OK [R 0 CONFIG SET availability-zone ""]
+        assert_equal OK [R 0 CONFIG SET cluster-announce-client-ipv4 ""]
+        assert_equal OK [R 0 CONFIG SET cluster-announce-client-port 0]
+        assert_equal OK [R 0 CONFIG SET cluster-announce-client-tls-port 0]
+        wait_for_cluster_propagation
+    }
+
     test "Load cluster az config on server start" {
         R 0 config set availability-zone load-az0
         R 1 config set availability-zone load-az1
@@ -148,5 +204,24 @@ start_cluster 2 0 {tags {external:skip cluster} overrides {cluster-ping-interval
         } else {
             fail "Availability zone was not restored after restart in CLUSTER SHARDS"
         }
+    }
+}
+
+
+start_cluster 1 2 {
+    tags {external:skip cluster}
+    overrides {cluster-ping-interval 100 cluster-replica-no-failover yes}
+} {
+    test "Forgotten-node state is prioritized over oversized descriptive extensions" {
+        set loglines [count_log_lines 0]
+        set oversized_az [string repeat z [expr {16 * 1024 * 1024}]]
+        assert_equal OK [R 0 CONFIG SET availability-zone $oversized_az]
+        unset oversized_az
+        wait_for_log_messages 0 [list \
+            "*Omitting lower-priority extensions from * packet*selected*within the remaining packet budget*"] \
+            $loglines 500 10
+
+        isolate_node 2
+        assert_equal OK [R 0 CONFIG SET availability-zone ""]
     }
 }
