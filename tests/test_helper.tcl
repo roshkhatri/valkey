@@ -811,7 +811,7 @@ for {set j 0} {$j < [llength $argv]} {incr j} {
             } else {
                 # Validate that allowtags only use top-level tags
                 if {[lsearch -exact $::toplevel_only_tags $tag] < 0} {
-                    puts "Error: --tags allowlist can only use top-level-only tags: large-memory, needs:other-server, compatible-redis, network"
+                    puts "Error: --tags allowlist can only use top-level-only tags: $::toplevel_only_tags"
                     puts "Invalid tag: $tag"
                     exit 1
                 }
