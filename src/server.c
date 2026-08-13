@@ -47,6 +47,8 @@
 #include "threads_mngr.h"
 #include "fmtargs.h"
 #include "io_threads.h"
+#include "compression.h"
+#include "compression_repl.h"
 #include "tls.h"
 #include "sds.h"
 #include "module.h"
@@ -2823,6 +2825,10 @@ void resetServerStats(void) {
     server.stat_sync_full = 0;
     server.stat_sync_partial_ok = 0;
     server.stat_sync_partial_err = 0;
+    atomic_store_explicit(&server.repl_compression_errors, 0, memory_order_relaxed);
+    server.repl_decompression_errors = 0;
+    server.repl_decompression_time_usec = 0;
+    server.repl_decompressed_bytes_total = 0;
     server.stat_io_reads_processed = 0;
     server.stat_total_reads_processed = 0;
     server.stat_io_writes_processed = 0;
@@ -6627,6 +6633,23 @@ sds genValkeyInfoString(dict *section_dict, int all_sections, int everything) {
                     "slave_priority:%d\r\n", server.replica_priority,
                     "slave_read_only:%d\r\n", server.repl_replica_ro,
                     "replica_announced:%d\r\n", server.replica_announced));
+            if (server.repl_decompression_errors > 0) {
+                info = sdscatfmt(info, "repl_decompression_errors:%I\r\n", server.repl_decompression_errors);
+            }
+            if (server.repl_decompressed_bytes_total > 0) {
+                info = sdscatfmt(info,
+                                 "repl_decompression_time_usec:%I\r\n"
+                                 "repl_decompressed_bytes_total:%I\r\n",
+                                 server.repl_decompression_time_usec,
+                                 server.repl_decompressed_bytes_total);
+            }
+        }
+
+        /* Aggregated across replicas; survives disconnects. Emitted when non-zero. */
+        long long repl_compression_errors =
+            (long long)atomic_load_explicit(&server.repl_compression_errors, memory_order_relaxed);
+        if (repl_compression_errors > 0) {
+            info = sdscatfmt(info, "repl_compression_errors:%I\r\n", repl_compression_errors);
         }
 
         info = sdscatprintf(info, "connected_slaves:%lu\r\n", listLength(server.replicas));
@@ -6659,12 +6682,30 @@ sds genValkeyInfoString(dict *section_dict, int all_sections, int everything) {
 
                 info = sdscatprintf(info,
                                     "slave%d:ip=%s,port=%d,state=%s,"
-                                    "offset=%lld,lag=%ld,type=%s\r\n",
+                                    "offset=%lld,lag=%ld,type=%s",
                                     replica_id, replica_ip, replica->repl_data->replica_listening_port, state,
                                     replica->repl_data->repl_ack_off, lag,
                                     replica->flag.repl_rdb_channel                                ? "rdb-channel"
                                     : replica->repl_data->repl_state == REPLICA_STATE_BG_RDB_LOAD ? "main-channel"
                                                                                                   : "replica");
+                if (replica->repl_data->repl_compressor) {
+                    info = sdscatprintf(info,
+                                        ",compression=%s"
+                                        ",compressed_bytes=%lld"
+                                        ",uncompressed_bytes=%lld"
+                                        ",compression_ratio=%.2f"
+                                        ",compression_time_usec=%lld",
+                                        compressionAlgoName(replCompressorAlgo(replica->repl_data->repl_compressor)),
+                                        replica->repl_data->repl_compressed_bytes_total,
+                                        replica->repl_data->repl_uncompressed_bytes_total,
+                                        replica->repl_data->repl_uncompressed_bytes_total > 0
+                                            ? (double)replica->repl_data->repl_compressed_bytes_total /
+                                                  (double)replica->repl_data->repl_uncompressed_bytes_total
+                                            : 0.0,
+                                        atomic_load_explicit(&replica->repl_data->repl_compression_time_usec,
+                                                             memory_order_relaxed));
+                }
+                info = sdscat(info, "\r\n");
                 replica_id++;
             }
         }
