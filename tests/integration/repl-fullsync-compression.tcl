@@ -74,6 +74,21 @@ proc fsc_start_fake_primary {payload announce} {
     return [list $pid $port]
 }
 
+# Park two replicas together in WAIT_BGSAVE_START behind a slow manual BGSAVE so
+# the next replication round serves both as one group. Clears the save delay.
+proc fsc_park_two_replicas {primary r1 r2 host port tag} {
+    $r1 replicaof $host $port
+    $r2 replicaof $host $port
+    wait_for_condition 200 10 {
+        [status $primary connected_slaves] == 2 &&
+        [status $primary rdb_bgsave_in_progress] eq 1
+    } else {
+        $primary config set rdb-key-save-delay 0
+        fail "both replicas did not register before the manual BGSAVE finished ($tag)"
+    }
+    $primary config set rdb-key-save-delay 0
+}
+
 # ============================================================================
 # Disk-based full sync: ONE shared primary fixture.
 #
@@ -241,22 +256,7 @@ start_server {tags {"repl rdb-compression external:skip needs:debug"} overrides 
                     fail "manual BGSAVE did not start"
                 }
 
-                # Register both replicas while the manual child is still running.
-                # They cannot trigger their own BGSAVE, so both park in
-                # WAIT_BGSAVE_START (counted by connected_slaves).
-                $capable replicaof $primary_host $primary_port
-                $noncap replicaof $primary_host $primary_port
-                wait_for_condition 200 10 {
-                    [status $primary connected_slaves] == 2 &&
-                    [status $primary rdb_bgsave_in_progress] eq 1
-                } else {
-                    $primary config set rdb-key-save-delay 0
-                    fail "both replicas did not register before manual BGSAVE finished (grouping not achieved)"
-                }
-
-                # Let the grouped replication BGSAVE run fast once the manual
-                # child clears.
-                $primary config set rdb-key-save-delay 0
+                fsc_park_two_replicas $primary $capable $noncap $primary_host $primary_port "case3b disk group"
 
                 fsc_assert_synced $primary $capable "(case3b capable, grouped)"
                 fsc_assert_synced $primary $noncap   "(case3b non-capable, grouped)"
@@ -737,18 +737,7 @@ start_server {overrides {save "" rdbcompression lz4 repl-diskless-sync yes repl-
                     fail "manual BGSAVE did not start"
                 }
 
-                $replica_capable replicaof $primary_host $primary_port
-                $replica_plain replicaof $primary_host $primary_port
-                wait_for_condition 200 10 {
-                    [status $primary connected_slaves] == 2 &&
-                    [status $primary rdb_bgsave_in_progress] eq 1
-                } else {
-                    $primary config set rdb-key-save-delay 0
-                    fail "both diskless replicas did not register before manual BGSAVE finished"
-                }
-
-                # Let the diskless round run fast once the manual child clears.
-                $primary config set rdb-key-save-delay 0
+                fsc_park_two_replicas $primary $replica_capable $replica_plain $primary_host $primary_port "mixed diskless cohort"
 
                 fsc_assert_synced $primary $replica_capable \
                     "Capable replica digest mismatch after mixed diskless full sync"

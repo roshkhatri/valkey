@@ -162,8 +162,7 @@ void rdbReportError(int corruption_error, int linenum, char *reason, ...) {
 /* Route a corrupt compressed frame through the parser's fatal path, so a bad
  * stream logs and terminates instead of driving a full-sync retry loop. */
 void rdbReportCorruptCompressedStream(const char *source) {
-    serverLog(LL_WARNING, "Corrupt streaming-compressed RDB input. Unrecoverable error, aborting now.");
-    rdbReportCorruptRDB("Corrupt compressed RDB stream from %s", source);
+    rdbReportCorruptRDB("Corrupt streaming-compressed RDB input from %s. Unrecoverable error, aborting now.", source);
 }
 
 typedef struct {
