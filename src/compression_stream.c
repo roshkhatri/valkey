@@ -359,7 +359,9 @@ ssize_t streamReaderRead(streamReader *reader, void *buf, size_t len) {
             available = reader->decompressed_buf_len;
             if (available == 0 && fill_result == C_ERR) return total > 0 ? (ssize_t)total : -1;
             if (available == 0 && !reader->decompressor.frame_done) {
-                streamReaderSetError(reader, STREAM_READER_ERROR_CORRUPT);
+                /* Clean EOF mid-frame is truncation, not corruption: a codec
+                 * failure would already have latched an error above. */
+                streamReaderSetError(reader, STREAM_READER_ERROR_TRUNCATED);
                 return total > 0 ? (ssize_t)total : -1;
             }
             if (available == 0) break;

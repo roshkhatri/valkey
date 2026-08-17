@@ -201,6 +201,11 @@ int rdbGetObjectType(robj *o, int rdbver);
 int rdbLoadObjectType(rio *rdb);
 int rdbLoad(char *filename, rdbSaveInfo *rsi, int rdbflags);
 int rdbSaveBackground(int req, char *filename, rdbSaveInfo *rsi, int rdbflags);
+int rdbSaveBackgroundForReplication(int req,
+                                    char *filename,
+                                    rdbSaveInfo *rsi,
+                                    int rdbflags,
+                                    compressionAlgo compression_algo);
 int rdbSaveToReplicasSockets(int req, int rdbver, rdbSaveInfo *rsi);
 void rdbRemoveTempFile(pid_t childpid, int from_signal);
 int rdbSaveToFile(const char *filename);
@@ -224,6 +229,7 @@ int rdbLoadRio(rio *rdb, int rdbflags, rdbSaveInfo *rsi);
 int rdbLoadRioWithLoadingCtxScopedRdb(rio *rdb, int rdbflags, rdbSaveInfo *rsi, rdbLoadingCtx *rdb_loading_ctx);
 bool rdbRioHasCorruptCompressedInput(rio *rdb);
 bool rdbRioHasInternalStreamReaderError(rio *rdb);
+void rdbReportCorruptCompressedStream(const char *source);
 
 typedef enum {
     RDB_STREAM_READER_INIT_ERROR = -1,
@@ -240,6 +246,10 @@ rdbStreamReaderInitResult rdbInitStreamReader(rio *rdb,
                                               bool skip_codec_checksum_validation,
                                               compressionAlgo *algo);
 void rdbFreeStreamReader(rio *rdb, streamReader *reader);
+
+/* Select the configured full-sync compression when every replica in the cohort supports it. */
+compressionAlgo replSelectFullSyncCompression(int replica_capa);
+bool replicaCanUseFullSyncFormat(int replica_capa, compressionAlgo compression_algo);
 int rdbFunctionLoad(rio *rdb, int ver, functionsLibCtx *lib_ctx, int rdbflags, sds *err);
 int rdbSaveRio(int req, int rdbver, rio *rdb, int *error, int rdbflags, rdbSaveInfo *rsi);
 ssize_t rdbSaveFunctions(rio *rdb);
