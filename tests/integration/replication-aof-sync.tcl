@@ -17,7 +17,7 @@ proc get_aof_manifest_path {r} {
     return [file join $dir $appenddirname $appendfilename$::manifest_suffix]
 }
 
-tags {"repl external:skip"} {
+tags {"repl external:skip" repl-compression} {
 
     # Test 1: Disk-based full sync with aof-use-rdb-preamble yes should
     # reuse the RDB file as AOF base file

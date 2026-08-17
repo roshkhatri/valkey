@@ -124,7 +124,8 @@ set(VALKEY_SERVER_SRCS
     ${CMAKE_SOURCE_DIR}/src/queues.c
     ${CMAKE_SOURCE_DIR}/src/compression.c
     ${CMAKE_SOURCE_DIR}/src/compression_lz4.c
-    ${CMAKE_SOURCE_DIR}/src/compression_stream.c)
+    ${CMAKE_SOURCE_DIR}/src/compression_stream.c
+    ${CMAKE_SOURCE_DIR}/src/compression_repl.c)
 
 
 # valkey-cli

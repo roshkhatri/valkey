@@ -182,6 +182,10 @@ configEnum rdb_compression_enum[] = {{"no", RDB_COMPRESSION_NO},
                                      {"lz4", RDB_COMPRESSION_LZ4},
                                      {NULL, 0}};
 
+configEnum repl_compression_enum[] = {{"no", REPL_COMPRESSION_NO},
+                                      {"lz4", REPL_COMPRESSION_LZ4},
+                                      {NULL, 0}};
+
 /* Output buffer limits presets. */
 clientBufferLimitsConfig clientBufferLimitsDefaults[CLIENT_TYPE_OBUF_COUNT] = {
     {0, 0, 0},                                 /* normal */
@@ -867,6 +871,10 @@ static dict *matchPatternsToConfigs(robj **patterns, int pattern_count) {
  * CONFIG SET implementation
  *----------------------------------------------------------------------------*/
 
+/* Set by the repl-compression apply callback. Reconnects are irreversible, so
+ * reconciliation is deferred until the whole CONFIG SET commits. */
+static int repl_compression_reconcile_pending = 0;
+
 void configSetCommand(client *c) {
     const char *errstr = NULL;
     const char *invalid_arg_name = NULL;
@@ -984,6 +992,10 @@ void configSetCommand(client *c) {
         }
     }
 
+    /* Reset deferred side-effect state before applies run; apply callbacks set
+     * it, and it is consumed only on a successful commit below. */
+    repl_compression_reconcile_pending = 0;
+
     /* Apply all configs after being set */
     for (i = 0; i < config_count && apply_fns[i] != NULL; i++) {
         if (!apply_fns[i](&errstr)) {
@@ -1006,6 +1018,11 @@ void configSetCommand(client *c) {
     ValkeyModuleConfigChangeV1 cc = {.num_changes = config_count, .config_names = config_names};
     moduleFireServerEvent(VALKEYMODULE_EVENT_CONFIG, VALKEYMODULE_SUBEVENT_CONFIG_CHANGE, &cc);
     addReply(c, shared.ok);
+    /* CONFIG SET committed: now safe to run deferred irreversible side effects. */
+    if (repl_compression_reconcile_pending) {
+        repl_compression_reconcile_pending = 0;
+        reconcileReplicaCompression();
+    }
     goto end;
 
 err:
@@ -2659,6 +2676,14 @@ static int updateJemallocBgThread(const char **err) {
     return 1;
 }
 
+static int updateReplCompression(const char **err) {
+    UNUSED(err);
+    /* Record intent only; configSetCommand reconciles after the command commits,
+     * so a rolled-back CONFIG SET disconnects nothing. */
+    repl_compression_reconcile_pending = 1;
+    return 1;
+}
+
 static int updateReplBacklogSize(const char **err) {
     UNUSED(err);
     resizeReplicationBacklog();
@@ -3461,6 +3486,7 @@ standardConfig static_configs[] = {
     createEnumConfig("log-timestamp-format", NULL, MODIFIABLE_CONFIG, log_timestamp_format_enum, server.log_timestamp_format, LOG_TIMESTAMP_LEGACY, NULL, NULL),
     createEnumConfig("rdb-version-check", NULL, MODIFIABLE_CONFIG, rdb_version_check_enum, server.rdb_version_check, RDB_VERSION_CHECK_STRICT, NULL, NULL),
     createEnumConfig("rdbcompression", NULL, MODIFIABLE_CONFIG, rdb_compression_enum, server.rdb_compression, RDB_COMPRESSION_YES, NULL, NULL),
+    createEnumConfig("repl-compression", NULL, MODIFIABLE_CONFIG, repl_compression_enum, server.repl_compression, REPL_COMPRESSION_NO, NULL, updateReplCompression),
 
     /* Integer configs */
     createIntConfig("databases", NULL, IMMUTABLE_CONFIG, 1, INT_MAX, server.config_databases, 16, INTEGER_CONFIG, NULL, NULL),
