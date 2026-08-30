@@ -2667,6 +2667,25 @@ int main(int argc, char **argv) {
             free(cmd);
         }
 
+        if (test_is_selected("hset_listpack")) {
+            len = valkeyFormatCommand(&cmd, "HSET key:__rand_int__ field1 %s field2 %s field3 %s field4 %s",
+                                      data, data, data, data);
+            benchmark("HSET_LISTPACK (4 fields)", cmd, len);
+            free(cmd);
+        }
+
+        if (test_is_selected("hget_listpack")) {
+            len = valkeyFormatCommand(&cmd, "HGET key:__rand_int__ field1");
+            benchmark("HGET_LISTPACK", cmd, len);
+            free(cmd);
+        }
+
+        if (test_is_selected("hget")) {
+            len = valkeyFormatCommand(&cmd, "HGET myhash%s element:__rand_int__", tag);
+            benchmark("HGET", cmd, len);
+            free(cmd);
+        }
+
         if (test_is_selected("spop")) {
             len = valkeyFormatCommand(&cmd, "SPOP myset%s", tag);
             benchmark("SPOP", cmd, len);
