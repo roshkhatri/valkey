@@ -11,8 +11,8 @@ Upgrade urgency levels:
 | CRITICAL | There is a critical bug affecting MOST USERS. Upgrade ASAP.         |
 | SECURITY | There are security fixes in the release.                            |
 
-Valkey 9.0.6  -  Released Tue 01 September 2026
------------------------------------------------
+Valkey 9.0.6  -  Released Mon 31 August 2026
+--------------------------------------------
 
 Upgrade urgency SECURITY: This release includes security fixes we recommend you apply as soon as possible.
 
