@@ -1284,13 +1284,19 @@ TEST(CompressionTest, streamReaderClassifiesDamagedFrames) {
         streamReaderErrorKind expected_error;
         bool payload_readable;
         bool finish_detects_damage;
+        bool eof_is_truncation; /* Retryable source: mid-frame EOF => TRUNCATED, else CORRUPT. */
     } cases[] = {
-        {"EOF one byte into frame", VCS_ENVELOPE_SIZE + 1, 0, STREAM_READER_ERROR_TRUNCATED, false, false},
-        {"EOF mid-frame", middle_offset, 0, STREAM_READER_ERROR_TRUNCATED, false, false},
-        {"EOF one byte before frame end on read", frame_len - 1, 0, STREAM_READER_ERROR_TRUNCATED, true, false},
-        {"EOF one byte before frame end on finish", frame_len - 1, 0, STREAM_READER_ERROR_TRUNCATED, true, true},
-        {"flipped byte mid-frame", frame_len, middle_offset, STREAM_READER_ERROR_CORRUPT, false, false},
-        {"flipped last byte (content checksum)", frame_len, frame_len - 1, STREAM_READER_ERROR_CORRUPT, true, true},
+        /* Retryable (socket-like) source: a clean mid-frame EOF is a recoverable short read. */
+        {"EOF one byte into frame", VCS_ENVELOPE_SIZE + 1, 0, STREAM_READER_ERROR_TRUNCATED, false, false, true},
+        {"EOF mid-frame", middle_offset, 0, STREAM_READER_ERROR_TRUNCATED, false, false, true},
+        {"EOF one byte before frame end on read", frame_len - 1, 0, STREAM_READER_ERROR_TRUNCATED, true, false, true},
+        {"EOF one byte before frame end on finish", frame_len - 1, 0, STREAM_READER_ERROR_TRUNCATED, true, true, true},
+        /* Seekable (file-like) source: no more bytes are coming, so a clean mid-frame EOF is corruption. */
+        {"EOF one byte into frame (file source)", VCS_ENVELOPE_SIZE + 1, 0, STREAM_READER_ERROR_CORRUPT, false, false, false},
+        {"EOF mid-frame (file source)", middle_offset, 0, STREAM_READER_ERROR_CORRUPT, false, false, false},
+        /* A flipped byte latches a codec error regardless of source type. */
+        {"flipped byte mid-frame", frame_len, middle_offset, STREAM_READER_ERROR_CORRUPT, false, false, false},
+        {"flipped last byte (content checksum)", frame_len, frame_len - 1, STREAM_READER_ERROR_CORRUPT, true, true, false},
     };
 
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
@@ -1301,6 +1307,7 @@ TEST(CompressionTest, streamReaderClassifiesDamagedFrames) {
         mr.len = cases[i].source_len;
         mr.max_chunk = 7; /* odd chunk size to exercise refill boundaries */
         streamReaderConfig rcfg = makeReaderConfig(false, STREAM_READER_BUFFER_SIZE_MIN, false);
+        rcfg.eof_mid_frame_is_truncation = cases[i].eof_is_truncation;
         streamReader r;
         ASSERT_EQ(streamReaderInit(&r, &rcfg, memReaderRead, &mr, NULL), C_OK) << cases[i].name;
 

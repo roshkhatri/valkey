@@ -86,6 +86,7 @@ typedef struct {
     bool allow_passthrough;
     bool skip_codec_checksum_validation;
     size_t buffer_size;
+    bool eof_mid_frame_is_truncation; /* Set for sources that can deliver the rest later. */
 } streamReaderConfig;
 
 typedef enum {
@@ -112,6 +113,7 @@ typedef struct streamReader {
     } probe;
     size_t probe_replay_pos; /* Passthrough bytes left to replay from probe. */
     size_t buffer_size;
+    bool eof_mid_frame_is_truncation;
     streamReaderErrorKind error_kind;
     streamReaderState state;
 

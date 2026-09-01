@@ -3305,6 +3305,8 @@ rdbStreamReaderInitResult rdbInitStreamReader(rio *rdb,
         .allow_passthrough = true,
         .skip_codec_checksum_validation = skip_codec_checksum_validation,
         .buffer_size = STREAM_READER_BUFFER_SIZE_DEFAULT,
+        /* A file is fully present, so a short frame there is corruption. */
+        .eof_mid_frame_is_truncation = (rioCheckType(rdb) == RIO_TYPE_CONN),
     };
     compressionAlgo detected_algo = ALGO_NONE;
 
