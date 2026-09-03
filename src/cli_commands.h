@@ -38,10 +38,8 @@ struct commandDocs {
     int numargs;
     cliCommandArg *args; /* An array of the command arguments. */
     struct commandDocs *subcommands;
-    int member_key_index; /* unused in CLI, present for commands.def compatibility */
-    int member_key_step;
-    int member_key_count;
-    char *params; /* A string describing the syntax of the command arguments. */
+    int member_arg_index; /* unused in CLI, present for commands.def compatibility */
+    char *params;         /* A string describing the syntax of the command arguments. */
 };
 
 extern struct commandDocs serverCommandTable[];

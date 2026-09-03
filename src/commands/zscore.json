@@ -5,8 +5,6 @@
         "group": "sorted_set",
         "since": "1.2.0",
         "arity": 3,
-        "member_key_index": 2,
-        "member_key_count": 1,
         "function": "zscoreCommand",
         "command_flags": [
             "READONLY",
@@ -57,7 +55,7 @@
             },
             {
                 "name": "member",
-                "type": "string"
+                "type": "member"
             }
         ]
     }

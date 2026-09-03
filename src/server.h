@@ -2701,12 +2701,7 @@ struct serverCommand {
     int num_args; /* Length of args array. */
     /* Nested prefetch: argv index of the first field/member for inner hashtable lookup.
      * 0 means disabled. Used by the prefetch system to find the lookup key. */
-    int member_key_index;
-    int member_key_step; /* stride between fields (default 1) */
-    /* Number of fields to prefetch starting at member_key_index. Defaults to 1
-     * (single field) when unset. Set to -1 for variadic commands to prefetch
-     * all remaining fields to argc, or a positive N to cap the count. */
-    int member_key_count;
+    int member_arg_index;
     /* Array of subcommands (may be NULL) */
     struct serverCommand *subcommands;
     /* Array of arguments (may be NULL) */

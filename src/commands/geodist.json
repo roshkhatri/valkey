@@ -34,8 +34,6 @@
                 }
             }
         ],
-        "member_key_index": 2,
-        "member_key_count": 2,
         "arguments": [
             {
                 "name": "key",
@@ -44,11 +42,11 @@
             },
             {
                 "name": "member1",
-                "type": "string"
+                "type": "member"
             },
             {
                 "name": "member2",
-                "type": "string"
+                "type": "member"
             },
             {
                 "name": "unit",

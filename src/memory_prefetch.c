@@ -30,13 +30,10 @@ typedef struct KeyPrefetchInfo {
     PrefetchState state; /* Current state of the prefetch operation */
     hashtableIncrementalFindState hashtab_state;
     /* Fields for nested prefetching of inner hashtables (hash/zset) */
-    robj **argv;           /* argv of the command that owns this key */
-    int argc;              /* argc of the command that owns this key */
-    int member_key_index;  /* argv index of the first field/member */
-    int member_key_step;   /* stride between fields (1 = consecutive, 2 = interleaved) */
-    int member_key_count;  /* max fields to prefetch (-1 = all remaining) */
-    int current_field_idx; /* current argv index being prefetched */
-    hashtable *inner_ht;   /* cached inner hashtable pointer */
+    robj **argv;          /* argv of the command that owns this key */
+    int argc;             /* argc of the command that owns this key */
+    int member_arg_index; /* argv index of the first field/member */
+    hashtable *inner_ht;  /* cached inner hashtable pointer */
     NestedPrefetchPhase nested_phase;
     hashtableIncrementalFindState inner_hashtab_state;
 } KeyPrefetchInfo;
@@ -54,9 +51,7 @@ typedef struct PrefetchCommandsBatch {
     client **clients;               /* Array of clients in the current batch */
     robj ***key_argv;               /* Per-key argv pointer (correct for queued commands) */
     int *key_argc;                  /* Per-key argc (correct for queued commands) */
-    int *key_member_indices;        /* member_key_index from cmd for each key (0 = no nested prefetch) */
-    int *key_member_steps;          /* member_key_step from cmd for each key */
-    int *key_member_counts;         /* member_key_count from cmd for each key */
+    int *key_member_indices;        /* member_arg_index from cmd for each key (0 = no nested prefetch) */
     hashtable **keys_tables;        /* Main table for each key */
     KeyPrefetchInfo *prefetch_info; /* Prefetch info for each key */
 } PrefetchCommandsBatch;
@@ -72,8 +67,6 @@ void freePrefetchCommandsBatch(void) {
     zfree(batch->key_argv);
     zfree(batch->key_argc);
     zfree(batch->key_member_indices);
-    zfree(batch->key_member_steps);
-    zfree(batch->key_member_counts);
     zfree(batch->keys);
     zfree(batch->keys_tables);
     zfree(batch->slots);
@@ -96,8 +89,6 @@ void prefetchCommandsBatchInit(void) {
     batch->key_argv = zcalloc(max_prefetch_size * sizeof(robj **));
     batch->key_argc = zcalloc(max_prefetch_size * sizeof(int));
     batch->key_member_indices = zcalloc(max_prefetch_size * sizeof(int));
-    batch->key_member_steps = zcalloc(max_prefetch_size * sizeof(int));
-    batch->key_member_counts = zcalloc(max_prefetch_size * sizeof(int));
     batch->keys = zcalloc(max_prefetch_size * sizeof(void *));
     batch->keys_tables = zcalloc(max_prefetch_size * sizeof(hashtable *));
     batch->slots = zcalloc(max_prefetch_size * sizeof(int));
@@ -153,10 +144,7 @@ static void initBatchInfo(hashtable **tables) {
         info->state = PREFETCH_ENTRY;
         info->argv = batch->key_argv[i];
         info->argc = batch->key_argc[i];
-        info->member_key_index = batch->key_member_indices[i];
-        info->member_key_step = batch->key_member_steps[i];
-        info->member_key_count = batch->key_member_counts[i];
-        info->current_field_idx = 0;
+        info->member_arg_index = batch->key_member_indices[i];
         info->inner_ht = NULL;
         info->nested_phase = NESTED_PREFETCH_HEADER;
         hashtableIncrementalFindInit(&info->hashtab_state, tables[i], batch->keys[i]);
@@ -164,10 +152,10 @@ static void initBatchInfo(hashtable **tables) {
 }
 
 /* Check if a key is eligible for nested prefetch: the command declares a member
- * field (member_key_index) present in argv, and the value is a hash/zset whose
+ * field (member_arg_index) present in argv, and the value is a hash/zset whose
  * inner hashtable we can walk. */
 static inline int canNestedPrefetch(KeyPrefetchInfo *info, robj *val) {
-    return info->member_key_index > 0 && info->argc > info->member_key_index &&
+    return info->member_arg_index > 0 && info->argc > info->member_arg_index &&
            (val->encoding == OBJ_ENCODING_HASHTABLE || val->encoding == OBJ_ENCODING_SKIPLIST);
 }
 
@@ -212,23 +200,9 @@ static void prefetchValue(KeyPrefetchInfo *info) {
     markKeyAsdone(info);
 }
 
-/* Advance to the next field for multi-field commands, or mark the key done. */
-static void nestedPrefetchAdvance(KeyPrefetchInfo *info) {
-    int next_idx = info->current_field_idx + info->member_key_step;
-    int fields_done = (next_idx - info->member_key_index) / info->member_key_step;
-    if (next_idx < info->argc &&
-        (info->member_key_count < 0 || fields_done < info->member_key_count)) {
-        info->current_field_idx = next_idx;
-        info->nested_phase = NESTED_PREFETCH_INIT;
-        moveToNextKey();
-        return;
-    }
-    markKeyAsdone(info);
-}
-
 /* Nested prefetch: walk the inner hashtable for hash/zset types using a phased
  * approach (HEADER -> INIT -> STEP [-> VALUE]) to amortize cache misses across
- * commands in the batch. Supports multiple fields via member_key_step/count.
+ * commands in the batch. Prefetches the first fixed-position field/member only.
  * The VALUE phase runs only for non-embedded hash values. */
 static void prefetchValueNested(KeyPrefetchInfo *info) {
     void *entry;
@@ -243,7 +217,6 @@ static void prefetchValueNested(KeyPrefetchInfo *info) {
         /* Phase 1: Prefetch the data structure header (val->ptr) */
         valkey_prefetch(objectGetVal(val));
         info->nested_phase = NESTED_PREFETCH_INIT;
-        info->current_field_idx = info->member_key_index;
         moveToNextKey();
         return;
 
@@ -262,7 +235,7 @@ static void prefetchValueNested(KeyPrefetchInfo *info) {
             }
         }
         hashtableIncrementalFindInit(&info->inner_hashtab_state, info->inner_ht,
-                                     objectGetVal(info->argv[info->current_field_idx]));
+                                     objectGetVal(info->argv[info->member_arg_index]));
         info->nested_phase = NESTED_PREFETCH_STEP;
         moveToNextKey();
         return;
@@ -285,7 +258,7 @@ static void prefetchValueNested(KeyPrefetchInfo *info) {
                 return;
             }
         }
-        nestedPrefetchAdvance(info);
+        markKeyAsdone(info);
         return;
 
     case NESTED_PREFETCH_VALUE: {
@@ -295,7 +268,7 @@ static void prefetchValueNested(KeyPrefetchInfo *info) {
             char *value = entryGetValue(inner_entry, NULL);
             if (value) valkey_prefetch(value);
         }
-        nestedPrefetchAdvance(info);
+        markKeyAsdone(info);
         return;
     }
     }
@@ -410,11 +383,7 @@ static void addCommandToBatch(struct serverCommand *cmd, robj **argv, int argc, 
         batch->keys_tables[batch->key_count] = kvstoreGetHashtable(db->keys, batch->slots[batch->key_count]);
         batch->key_argv[batch->key_count] = argv;
         batch->key_argc[batch->key_count] = argc;
-        batch->key_member_indices[batch->key_count] = cmd->member_key_index;
-        /* Normalize defaults: step 0 -> 1 (consecutive), count 0 -> 1 (single
-         * member). Variadic commands declare count -1 ("all remaining") explicitly. */
-        batch->key_member_steps[batch->key_count] = cmd->member_key_step ? cmd->member_key_step : 1;
-        batch->key_member_counts[batch->key_count] = cmd->member_key_count ? cmd->member_key_count : 1;
+        batch->key_member_indices[batch->key_count] = cmd->member_arg_index;
         batch->key_count++;
     }
     getKeysFreeResult(&result);

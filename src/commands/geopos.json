@@ -34,8 +34,6 @@
                 }
             }
         ],
-        "member_key_index": 2,
-        "member_key_count": -1,
         "arguments": [
             {
                 "name": "key",
@@ -44,7 +42,7 @@
             },
             {
                 "name": "member",
-                "type": "string",
+                "type": "member",
                 "multiple": true,
                 "optional": true
             }

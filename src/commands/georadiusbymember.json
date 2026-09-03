@@ -84,7 +84,6 @@
                 }
             }
         ],
-        "member_key_index": 2,
         "arguments": [
             {
                 "name": "key",
@@ -93,7 +92,7 @@
             },
             {
                 "name": "member",
-                "type": "string"
+                "type": "member"
             },
             {
                 "name": "radius",

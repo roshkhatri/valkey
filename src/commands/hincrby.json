@@ -5,8 +5,6 @@
         "group": "hash",
         "since": "2.0.0",
         "arity": 4,
-        "member_key_index": 2,
-        "member_key_count": 1,
         "function": "hincrbyCommand",
         "command_flags": [
             "WRITE",
@@ -51,7 +49,7 @@
             },
             {
                 "name": "field",
-                "type": "string"
+                "type": "field"
             },
             {
                 "name": "increment",
