@@ -751,6 +751,92 @@ foreach testType {Successful Aborted} {
     }
 }
 
+proc stop_fake_primary {pid} {
+    catch {exec kill $pid}
+    wait_for_condition 100 10 {
+        ![is_alive $pid]
+    } else {
+        catch {exec kill -KILL $pid}
+        wait_for_condition 100 10 {
+            ![is_alive $pid]
+        } else {
+            fail "Fake primary process $pid did not exit"
+        }
+    }
+}
+
+proc test_fake_primary_bulk_length {bulk_payload expect_rejection {diskless_load swapdb}} {
+    start_server [list tags {repl external:skip tls:skip} \
+                      overrides [list save {} repl-diskless-load $diskless_load]] {
+        set replica [srv 0 client]
+        set fake_port [find_available_port $::baseport $::portcount]
+        set tclsh [info nameofexecutable]
+        set script "tests/helpers/fake_redis_node.tcl"
+        set fullresync_reply "+FULLRESYNC [string repeat a 40] 0\n$bulk_payload"
+        binary scan $fullresync_reply H* encoded_reply
+        set encoded_reply "hex:$encoded_reply"
+        set fake_pid [exec $tclsh $script $fake_port \
+            "PING" "+PONG" \
+            "REPLCONF listening-port [srv 0 port]" "+OK" \
+            "REPLCONF capa eof capa psync2" "+OK" \
+            "REPLCONF version [s 0 valkey_version]" "+OK" \
+            "glob:PSYNC *" $encoded_reply &]
+
+        set errcode [catch {
+            wait_for_condition 50 10 {
+                [catch {close [socket 127.0.0.1 $fake_port]}] == 0
+            } else {
+                fail "Fake primary did not start listening"
+            }
+
+            set loglines [count_log_lines 0]
+            $replica replicaof 127.0.0.1 $fake_port
+            if {$expect_rejection} {
+                wait_for_log_messages 0 {"*Invalid bulk metadata from PRIMARY*"} $loglines 1500 10
+                verify_no_log_message 0 "*Loading DB in memory*" $loglines
+                assert_equal down [s 0 master_link_status]
+            } else {
+                wait_for_log_messages 0 {"*Loading DB in memory*"} $loglines 1500 10
+                verify_no_log_message 0 "*Failed to read sync metadata*" $loglines
+            }
+            assert_equal PONG [$replica ping]
+        } result options]
+        catch {$replica replicaof no one}
+        set cleanup_errcode [catch {
+            stop_fake_primary $fake_pid
+        } cleanup_result cleanup_options]
+        if {$errcode} {
+            return -options $options $result
+        }
+        if {$cleanup_errcode} {
+            return -options $cleanup_options $cleanup_result
+        }
+    }
+}
+
+foreach {description bulk_payload} [list \
+    {null bulk length} {$-1} \
+    {zero bulk length} {$0} \
+    {signed-overflow bulk length} {$9223372036854775808} \
+    {bulk length with leading plus} {$+1} \
+    {bulk length with leading zero} {$01} \
+    {bulk length with trailing garbage} {$1x} \
+    {bulk length with embedded NUL} "\$1\x00garbage"] {
+    foreach diskless_load {swapdb disabled} {
+        test "Replica with repl-diskless-load $diskless_load rejects fake primary $description" {
+            test_fake_primary_bulk_length $bulk_payload 1 $diskless_load
+        }
+    }
+}
+
+test {Diskless replica accepts valid fake primary bulk length} {
+    test_fake_primary_bulk_length "\$1\nx" 0
+}
+
+test {Diskless replica accepts fake primary bulk length above 2^32} {
+    test_fake_primary_bulk_length {$4294967296} 0
+}
+
 test {diskless loading short read} {
     start_server {tags {"repl"} overrides {save ""}} {
         set replica [srv 0 client]
@@ -1737,6 +1823,50 @@ test "SYNC/PSYNC returns NOMASTERLINK with replica-serve-stale-data yes/no and m
             $replica config set replica-serve-stale-data $stale
             assert_error {NOMASTERLINK*} {$replica psync ? -1}
             assert_error {NOMASTERLINK*} {$replica sync}
+        }
+    }
+}
+
+start_server {tags {"repl external:skip cluster:skip"}} {
+    set primary [srv 0 client]
+    set primary_host [srv 0 host]
+    set primary_port [srv 0 port]
+    set bigstr [string repeat x 1000000]
+
+    start_server {} {
+        set replica [srv 0 client]
+
+        test "Cached primary discard must not leak stat_clients_type_memory" {
+            $replica replicaof no one
+            $replica replicaof $primary_host $primary_port
+            wait_for_sync $replica
+
+            # We set the replica's hz to a high value so that the replica can
+            # invoke clientsCron() more frequently for updates.
+            $replica config set hz 500
+
+            for {set j 0} {$j < 30} {incr j} {
+                # Each iteration changes the primary replid (forcing a full resync)
+                # and uses "replicaof no one" to disconnect the primary, which caches
+                # the primary client as a cached_primary and then discards it.
+                $primary debug change-repl-id
+                $replica replicaof no one
+                $replica replicaof $primary_host $primary_port
+                wait_for_sync $replica
+
+                # Use bigstr to inflate the primary client's querybuf on the replica,
+                # so its memory is accounted under mem_clients_normal.
+                $primary set foo $bigstr
+                wait_for_ofs_sync $primary $replica
+            }
+
+            # The replica no longer holds the large querybuf; wait for clientsCron()
+            # to shrink it and let mem_clients_normal drop back to a small value.
+            wait_for_condition 1000 50 {
+                [status $replica mem_clients_normal] < 1000000
+            } else {
+                fail "mem_clients_normal leaked: expected < 1000000 but got [status $replica mem_clients_normal]"
+            }
         }
     }
 }
