@@ -72,6 +72,12 @@ struct _rio {
      * computation. */
     void (*update_cksum)(struct _rio *, const void *buf, size_t len);
 
+    /* Optional callback invoked between write chunks. If it returns
+     * non-zero, the write is aborted (rioWrite returns 0 to caller).
+     * Allows long-running operations that issue many writes (e.g.
+     * serializing a large collection) to be interrupted. */
+    int (*check_abort_between_writes)(struct _rio *);
+
     /* The current checksum and flags (see RIO_FLAG_*) */
     uint64_t cksum, flags;
 
@@ -113,11 +119,11 @@ struct _rio {
         } file;
         /* Connection object (used to read from socket) */
         struct {
-            connection *conn;   /* Connection */
-            off_t pos;          /* pos in buf that was returned */
-            sds buf;            /* buffered data */
-            size_t read_limit;  /* don't allow to buffer/read more than that */
-            size_t read_so_far; /* amount of data read from the rio (not buffered) */
+            connection *conn;     /* Connection */
+            off_t pos;            /* pos in buf that was returned */
+            sds buf;              /* buffered data */
+            uint64_t read_limit;  /* don't allow to buffer/read more than that */
+            uint64_t read_so_far; /* amount of data read from the rio (not buffered) */
         } conn;
         /* FD target (used to write to pipe). */
         struct {
@@ -168,6 +174,7 @@ static inline size_t rioWriteRaw(rio *r, const void *buf, size_t len) {
 static inline size_t rioWrite(rio *r, const void *buf, size_t len) {
     if (r->flags & RIO_FLAG_WRITE_ERROR || r->flags & RIO_FLAG_CLOSE_ASAP) return 0;
     while (len) {
+        if (r->check_abort_between_writes && r->check_abort_between_writes(r)) return 0;
         size_t bytes_to_write =
             (r->max_processing_chunk && r->max_processing_chunk < len) ? r->max_processing_chunk : len;
         if (r->update_cksum) r->update_cksum(r, buf, bytes_to_write);
@@ -247,7 +254,7 @@ static inline void rioClearErrors(rio *r) {
 
 void rioInitWithFile(rio *r, FILE *fp);
 void rioInitWithBuffer(rio *r, sds s);
-void rioInitWithConn(rio *r, connection *conn, size_t read_limit);
+void rioInitWithConn(rio *r, connection *conn, uint64_t read_limit);
 void rioInitWithFd(rio *r, int fd);
 void rioAttachStreamWriter(rio *r, struct streamWriter *writer);
 void rioDetachStreamWriter(rio *r);

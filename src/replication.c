@@ -1244,7 +1244,7 @@ void syncCommand(client *c) {
     }
 
     /* CASE 1: BGSAVE is in progress, with disk target. */
-    if (server.child_type == CHILD_TYPE_RDB && server.rdb_child_type == RDB_CHILD_TYPE_DISK) {
+    if (server.rdb_write_target == RDB_WRITE_TARGET_DISK) {
         /* Ok a background save is in progress. Let's check if it is a good
          * one for replication, i.e. if there is another replica that is
          * registering differences since the server forked to save. */
@@ -1279,7 +1279,7 @@ void syncCommand(client *c) {
         }
 
         /* CASE 2: BGSAVE is in progress, with socket target. */
-    } else if (server.child_type == CHILD_TYPE_RDB && server.rdb_child_type == RDB_CHILD_TYPE_SOCKET) {
+    } else if (server.rdb_write_target == RDB_WRITE_TARGET_SOCKET) {
         /* There is an RDB child process but it is writing directly to
          * children sockets. We need to wait for the next BGSAVE
          * in order to synchronize. */
@@ -1344,7 +1344,7 @@ void freeClientReplicationData(client *c) {
          * should not remove directly since that means RDB is important for users
          * to keep data safe and we may delay configured 'save' for full sync. */
         if (server.saveparamslen == 0 && c->repl_data->repl_state == REPLICA_STATE_WAIT_BGSAVE_END &&
-            server.child_type == CHILD_TYPE_RDB && server.rdb_child_type == RDB_CHILD_TYPE_DISK &&
+            server.child_type == CHILD_TYPE_RDB && server.rdb_write_target == RDB_WRITE_TARGET_DISK &&
             anyOtherReplicaWaitRdb(c) == 0) {
             serverLog(LL_NOTICE, "Background saving, persistence disabled, last replica dropped, killing fork child.");
             killRDBChild();
@@ -2056,7 +2056,7 @@ void updateReplicasWaitingBgsave(int bgsaveerr, int type) {
              * already an RDB -> Replicas socket transfer, used in the case of
              * diskless replication, our work is trivial, we can just put
              * the replica online. */
-            if (type == RDB_CHILD_TYPE_SOCKET) {
+            if (type == RDB_WRITE_TARGET_SOCKET) {
                 serverLog(LL_NOTICE,
                           "Streamed RDB transfer with replica %s succeeded (socket). Waiting for REPLCONF ACK from "
                           "replica to enable streaming",
@@ -2327,9 +2327,9 @@ void replicationAttachToNewPrimary(void) {
 
 /* During replication, the primary sends sync metadata as the first line
  * which can be either a standard bulk format ($<count>) or an EOF-delimited
- * format ($EOF:<delimiter>) for diskless transfers. We need this data in order
- * to detect transfer completion. This function reads and parses that
- * metadata line.
+ * format ($EOF:<delimiter>) for diskless transfers. A size-based count must be
+ * a complete, positive decimal integer. We need this data in order to detect
+ * transfer completion. This function reads and parses that metadata line.
  * The primary may also send an error message starting with '-' or a ping
  * (newline) to keep the connection alive, in which case this function
  * should be called again later.
@@ -2341,18 +2341,28 @@ int tryReadBulkPayloadMetadata(connection *conn, char *buf, char *eofmark, char 
         return C_ERR;
     } else {
         /* nread here is returned by connSyncReadLine(), which calls syncReadLine() and
-         * convert "\r\n" to '\0' so 1 byte is lost. */
+         * converts "\r\n" to '\0' so 1 byte is lost. */
         if (inBioThread())
             server.bio_stat_net_repl_input_bytes += nread + 1;
         else
             server.stat_net_repl_input_bytes += nread + 1;
     }
 
-    /* Check the bulk payload header for errors */
-    if (buf[0] == '-') {
-        serverLog(LL_WARNING, "PRIMARY aborted replication with an error: %s", buf + 1);
+    size_t metadata_len = nread;
+    /* connSyncReadLine() turns a stripped CR into NUL but still counts it, so
+     * drop a trailing NUL before checking for one inside the line. */
+    if (metadata_len > 0 && buf[metadata_len - 1] == '\0') metadata_len--;
+
+    if (memchr(buf, '\0', metadata_len) != NULL) {
+        serverLog(LL_WARNING, "Invalid bulk metadata from PRIMARY: %.*s", (int)metadata_len, buf);
         return C_ERR;
-    } else if (buf[0] == '\0') {
+    }
+
+    /* Check the bulk payload header for errors */
+    if (metadata_len > 0 && buf[0] == '-') {
+        serverLog(LL_WARNING, "PRIMARY aborted replication with an error: %.*s", (int)metadata_len - 1, buf + 1);
+        return C_ERR;
+    } else if (metadata_len == 0) {
         /* At this stage just a newline works as a PING in order to take
          * the connection live. So we refresh our last interaction
          * timestamp. */
@@ -2360,23 +2370,29 @@ int tryReadBulkPayloadMetadata(connection *conn, char *buf, char *eofmark, char 
         return C_RETRY;
     } else if (buf[0] != '$') {
         serverLog(LL_WARNING,
-                  "Bad protocol from PRIMARY, the first byte is not '$' (we received '%s'), are you sure the host "
+                  "Bad protocol from PRIMARY, the first byte is not '$' (we received '%.*s'), are you sure the host "
                   "and port are right?",
-                  buf);
+                  (int)metadata_len, buf);
         return C_ERR;
     }
 
     /* Check if this is an EOF-based transfer ($EOF:<delimiter>) or size-based ($<size>) */
-    if (strncmp(buf + 1, "EOF:", 4) == 0 && strlen(buf + 5) >= RDB_EOF_MARK_SIZE) {
+    if (metadata_len >= 5 + RDB_EOF_MARK_SIZE && memcmp(buf + 1, "EOF:", 4) == 0) {
         /* EOF-based transfer: extract the delimiter */
         memcpy(eofmark, buf + 5, RDB_EOF_MARK_SIZE);
         memset(lastbytes, 0, RDB_EOF_MARK_SIZE);
         *usemark = true;
         *repl_transfer_size = 0;
     } else {
-        /* Size-based transfer: parse the size */
+        /* Size-based transfer: parse the size. 0 is reserved for the EOF form
+         * above, and a real RDB is never empty, so require a positive count. */
+        long long transfer_size;
+        if (!string2ll(buf + 1, metadata_len - 1, &transfer_size) || transfer_size <= 0) {
+            serverLog(LL_WARNING, "Invalid bulk metadata from PRIMARY: %.*s", (int)metadata_len, buf);
+            return C_ERR;
+        }
         *usemark = false;
-        *repl_transfer_size = strtol(buf + 1, NULL, 10);
+        *repl_transfer_size = transfer_size;
     }
 
     return C_OK;
@@ -2511,7 +2527,7 @@ int replicaLoadPrimaryRDBFromSocket(connection *conn, char *buf, char *eofmark, 
         functions_lib_ctx = functionsLibCtxGetCurrent();
     }
 
-    rioInitWithConn(&rdb, conn, server.repl_transfer_size);
+    rioInitWithConn(&rdb, conn, (uint64_t)server.repl_transfer_size);
 
     /* Put the socket in blocking mode to simplify RDB transfer.
      * We'll restore it when the RDB is received. */
@@ -2751,6 +2767,7 @@ int tryReadBulkPayload(connection *conn, char *buf, int usemark, ssize_t *nread_
         readlen = sizeof(buf[0]) * PROTO_IOBUF_LEN;
     } else {
         left = server.bio_repl_transfer_size - server.bio_repl_transfer_read;
+        if (left <= 0) return C_ERR;
         readlen = (left < (signed)(sizeof(buf[0]) * PROTO_IOBUF_LEN)) ? left : (signed)(sizeof(buf[0]) * PROTO_IOBUF_LEN);
     }
 
@@ -5149,7 +5166,10 @@ void waitCommand(client *c) {
     }
 
     /* Otherwise, block the client and put it into our list of clients
-     * waiting for ack from replicas. */
+     * waiting for ack from replicas. WAIT handles its own reply in
+     * processClientsWaitingReplicas, so clear pending_command to avoid
+     * being mistaken for a command that needs re-execution. */
+    c->flag.pending_command = 0;
     blockClientForReplicaAck(c, timeout, offset, numreplicas, 0);
 
     /* Make sure that the server will send an ACK request to all the replicas
@@ -5191,7 +5211,10 @@ void waitaofCommand(client *c) {
     }
 
     /* Otherwise, block the client and put it into our list of clients
-     * waiting for ack from replicas. */
+     * waiting for ack from replicas. WAITAOF handles its own reply in
+     * processClientsWaitingReplicas, so clear pending_command to avoid
+     * being mistaken for a command that needs re-execution. */
+    c->flag.pending_command = 0;
     blockClientForReplicaAck(c, timeout, offset, numreplicas, numlocal);
 
     /* Make sure that the server will send an ACK request to all the replicas
@@ -5440,7 +5463,7 @@ void replicationCron(void) {
 
         int is_presync =
             (replica->repl_data->repl_state == REPLICA_STATE_WAIT_BGSAVE_START ||
-             (replica->repl_data->repl_state == REPLICA_STATE_WAIT_BGSAVE_END && server.rdb_child_type != RDB_CHILD_TYPE_SOCKET));
+             (replica->repl_data->repl_state == REPLICA_STATE_WAIT_BGSAVE_END && server.rdb_write_target != RDB_WRITE_TARGET_SOCKET));
 
         if (is_presync) {
             connWrite(replica->conn, "\n", 1);
@@ -5469,7 +5492,7 @@ void replicationCron(void) {
              * by the fork child so if a disk-based replica is stuck it doesn't prevent the fork child
              * from terminating. */
             if (replica->repl_data->repl_state == REPLICA_STATE_WAIT_BGSAVE_END &&
-                server.rdb_child_type == RDB_CHILD_TYPE_SOCKET) {
+                server.rdb_write_target == RDB_WRITE_TARGET_SOCKET) {
                 if (replica->repl_data->repl_last_partial_write != 0 &&
                     (server.unixtime - replica->repl_data->repl_last_partial_write) > server.repl_timeout) {
                     serverLog(LL_WARNING, "Disconnecting timedout replica (full sync): %s",
@@ -5548,7 +5571,7 @@ int shouldStartChildReplication(int *mincapa_out, int *req_out, int *rdbver_out)
      * In case of diskless replication, we make sure to wait the specified
      * number of seconds (according to configuration) so that other replicas
      * have the time to arrive before we start streaming. */
-    if (!hasActiveChildProcess()) {
+    if (!hasActiveSaveOrChild()) {
         time_t idle, max_idle = 0;
         int replicas_waiting = 0;
         int mincapa;

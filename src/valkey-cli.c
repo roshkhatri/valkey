@@ -8143,7 +8143,7 @@ static int clusterManagerCommandSetTimeout(int argc, char **argv) {
             err = "";
         else
             need_free = 1;
-        clusterManagerLogErr("ERR setting node-timeout for %s:%d: %s\n", n->ip, n->port, err);
+        clusterManagerLogErr("ERR setting cluster-node-timeout for %s:%d: %s\n", n->ip, n->port, err);
         if (need_free) zfree(err);
         err_count++;
     }
@@ -8797,7 +8797,23 @@ unsigned long long sendSync(valkeyContext *c, int send_sync, char *out_eof, int 
         memcpy(out_eof, buf + 5, RDB_EOF_MARK_SIZE);
         return 0;
     }
-    return strtoull(buf + 1, NULL, 10);
+
+    /* Parse $<count>, requiring a positive decimal integer. Callers read until
+     * EOF when this returns 0, which is how the EOF-delimited form above is
+     * reported, so an unvalidated parse would turn a malformed count into an
+     * unbounded transfer instead of an error. */
+    if (buf[0] != '$' || buf[1] < '0' || buf[1] > '9') {
+        fprintf(stderr, "Bad bulk length while SYNCing: %s\n", buf);
+        exit(1);
+    }
+    char *endptr;
+    errno = 0;
+    unsigned long long payload = strtoull(buf + 1, &endptr, 10);
+    if (errno == ERANGE || payload == 0 || (*endptr != '\0' && *endptr != '\r')) {
+        fprintf(stderr, "Bad bulk length while SYNCing: %s\n", buf);
+        exit(1);
+    }
+    return payload;
 }
 
 static void replicaMode(int send_sync) {
