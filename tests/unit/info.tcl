@@ -100,6 +100,23 @@ start_server {tags {"info" "external:skip" "debug_defrag:skip"}} {
             assert {$p50_debug >= $p50_set}
         } {} {needs:debug}
 
+        test {commandstats: sorted alphabetically} {
+            r config resetstat
+            r zadd commandstats-sort 1 member
+            r set commandstats-sort value
+            r command count
+            r commandlog len slow
+            r client id
+
+            set command_names {}
+            foreach line [split [r info commandstats] "\r\n"] {
+                if {[regexp {^cmdstat_([^:]+):} $line _ command_name]} {
+                    lappend command_names $command_name
+                }
+            }
+            assert_equal [lsort $command_names] $command_names
+        }
+
         test {errorstats: failed call authentication error} {
             r config resetstat
             assert_match {} [errorstat ERR]

@@ -6250,27 +6250,62 @@ const char *getSafeInfoString(const char *s, size_t len, char **tmp) {
     return memmapchars(new, len, unsafe_info_chars, unsafe_info_chars_substs, sizeof(unsafe_info_chars) - 1);
 }
 
-sds genValkeyInfoStringCommandStats(sds info, hashtable *commands) {
+typedef struct commandStatsEntry {
+    struct serverCommand *command;
+    const char *name;
+    char *allocated_name;
+} commandStatsEntry;
+
+static int commandStatsEntryCompare(const void *a, const void *b) {
+    const commandStatsEntry *entry_a = a;
+    const commandStatsEntry *entry_b = b;
+    return strcmp(entry_a->name, entry_b->name);
+}
+
+static size_t collectCommandStats(hashtable *commands, commandStatsEntry *entries) {
     hashtableIterator iter;
     void *next;
+    size_t count = 0;
+
     hashtableInitIterator(&iter, commands, HASHTABLE_ITER_SAFE);
     while (hashtableNext(&iter, &next)) {
         struct serverCommand *c = next;
-        char *tmpsafe;
         if (c->calls || c->failed_calls || c->rejected_calls) {
-            info = sdscatprintf(info,
-                                "cmdstat_%s:calls=%lld,usec=%lld,usec_per_call=%.2f"
-                                ",rejected_calls=%lld,failed_calls=%lld\r\n",
-                                getSafeInfoString(c->fullname, sdslen(c->fullname), &tmpsafe), c->calls,
-                                c->microseconds, (c->calls == 0) ? 0 : ((float)c->microseconds / c->calls),
-                                c->rejected_calls, c->failed_calls);
-            if (tmpsafe != NULL) zfree(tmpsafe);
+            if (entries) {
+                entries[count].command = c;
+                entries[count].name =
+                    getSafeInfoString(c->fullname, sdslen(c->fullname), &entries[count].allocated_name);
+            }
+            count++;
         }
         if (c->subcommands_ht) {
-            info = genValkeyInfoStringCommandStats(info, c->subcommands_ht);
+            count += collectCommandStats(c->subcommands_ht, entries ? entries + count : NULL);
         }
     }
     hashtableCleanupIterator(&iter);
+
+    return count;
+}
+
+sds genValkeyInfoStringCommandStats(sds info, hashtable *commands) {
+    size_t count = collectCommandStats(commands, NULL);
+    if (count == 0) return info;
+
+    commandStatsEntry *entries = zmalloc(sizeof(*entries) * count);
+    serverAssert(collectCommandStats(commands, entries) == count);
+    qsort(entries, count, sizeof(*entries), commandStatsEntryCompare);
+
+    for (size_t i = 0; i < count; i++) {
+        struct serverCommand *c = entries[i].command;
+        info = sdscatprintf(info,
+                            "cmdstat_%s:calls=%lld,usec=%lld,usec_per_call=%.2f"
+                            ",rejected_calls=%lld,failed_calls=%lld\r\n",
+                            entries[i].name, c->calls, c->microseconds,
+                            (c->calls == 0) ? 0 : ((float)c->microseconds / c->calls), c->rejected_calls,
+                            c->failed_calls);
+        if (entries[i].allocated_name != NULL) zfree(entries[i].allocated_name);
+    }
+    zfree(entries);
 
     return info;
 }
