@@ -102,7 +102,6 @@ HDR_HISTOGRAM_LIB := ../../deps/hdr_histogram/libhdrhistogram.a
 FPCONV_LIB := ../../deps/fpconv/libfpconv.a
 LZ4_LIB := ../../deps/lz4/liblz4.a
 TLS_LIBS := ../../deps/libvalkey/lib/libvalkey_tls.a -lssl -lcrypto
-PKG_CONFIG ?= pkg-config
 GTEST_CFLAGS ?=
 GTEST_LIBS   ?=
 ifeq ($(strip $(GTEST_LIBS)),)
@@ -117,21 +116,8 @@ endif
 ZSTD_LD_LIBS :=
 
 ifeq ($(BUILD_ZSTD),yes)
-ifdef ZSTD_PREFIX
-	ZSTD_STATIC_ARCHIVE := $(firstword $(wildcard \
-	    $(ZSTD_PREFIX)/lib/libzstd.a \
-	    $(ZSTD_PREFIX)/lib64/libzstd.a))
-	TEST_CFLAGS += -DHAVE_ZSTD -I$(ZSTD_PREFIX)/include
-	ZSTD_LD_LIBS := $(ZSTD_STATIC_ARCHIVE)
-else
-	ZSTD_PKGCONFIG_LIBDIR := $(shell $(PKG_CONFIG) --variable=libdir libzstd 2>/dev/null)
-	ZSTD_PKGCONFIG_PCFILEDIR := $(shell $(PKG_CONFIG) --variable=pcfiledir libzstd 2>/dev/null)
-	ZSTD_STATIC_ARCHIVE := $(firstword $(wildcard \
-	    $(if $(ZSTD_PKGCONFIG_LIBDIR),$(ZSTD_PKGCONFIG_LIBDIR)/libzstd.a) \
-	    $(if $(ZSTD_PKGCONFIG_PCFILEDIR),$(abspath $(ZSTD_PKGCONFIG_PCFILEDIR)/..)/libzstd.a)))
-	TEST_CFLAGS += -DHAVE_ZSTD $(shell $(PKG_CONFIG) --cflags libzstd)
-	ZSTD_LD_LIBS := $(ZSTD_STATIC_ARCHIVE) $(filter-out -lzstd,$(shell $(PKG_CONFIG) --libs --static libzstd))
-endif
+	TEST_CFLAGS += -DHAVE_ZSTD $(ZSTD_CFLAGS)
+	ZSTD_LD_LIBS := $(ZSTD_LIBS)
 endif
 
 # On Darwin (macOS), the linker does not support -Wl,--wrap,

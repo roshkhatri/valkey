@@ -299,6 +299,10 @@ endif
 endif
 endif
 
+UNIT_ZSTD_FLAGS = BUILD_ZSTD="$(BUILD_ZSTD)" \
+    ZSTD_CFLAGS="$(ZSTD_CFLAGS)" \
+    ZSTD_LIBS="$(ZSTD_LIBS)"
+
 # Lua scripting engine module
 ifeq ($(BUILD_LUA),no)
 	LUA_MODULE_NAME=
@@ -854,11 +858,11 @@ test: $(ALL_BUILD_PREREQUISITES)
 	@(cd ..; VALKEY_PROG_SUFFIX="$(PROG_SUFFIX)" ./runtest)
 
 test-unit:
-	@(cd unit && $(MAKE) test-unit)
+	@(cd unit && $(MAKE) $(UNIT_ZSTD_FLAGS) test-unit)
 
 # valkey-unit-gtests
 $(ENGINE_UNIT_GTESTS): $(ENGINE_LIB_NAME)
-	@(cd unit && $(MAKE) $(ENGINE_UNIT_GTESTS))
+	@(cd unit && $(MAKE) $(UNIT_ZSTD_FLAGS) $(ENGINE_UNIT_GTESTS))
 
 test-modules: $(SERVER_NAME)
 	@(cd ..; ./runtest-moduleapi)
