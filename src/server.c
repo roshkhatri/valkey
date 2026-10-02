@@ -7530,6 +7530,7 @@ int serverFork(int purpose) {
 
     int childpid;
     ustime_t start = ustime();
+    lockThreadSharedQueryBufs();
     if ((childpid = valkey_fork()) == 0) {
         /* Child.
          *
@@ -7540,6 +7541,8 @@ int serverFork(int purpose) {
          */
         server.in_fork_child = purpose;
         setupChildSignalHandlers();
+        freeIOThreadSharedQueryBufsInChild();
+        unlockThreadSharedQueryBufs();
         setOOMScoreAdj(CONFIG_OOM_BGCHILD);
         updateDictResizePolicy();
         dismissMemoryInChild();
@@ -7549,6 +7552,7 @@ int serverFork(int purpose) {
         if (server.child_info_pipe[0] != -1) close(server.child_info_pipe[0]);
     } else {
         /* Parent */
+        unlockThreadSharedQueryBufs();
         if (childpid == -1) {
             int fork_errno = errno;
             if (isMutuallyExclusiveChildType(purpose)) closeChildInfoPipe();
