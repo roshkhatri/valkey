@@ -162,6 +162,8 @@ static int parseMultibulk(client *c,
 
 int ProcessingEventsWhileBlocked = 0; /* See processEventsWhileBlocked(). */
 _Thread_local sds thread_shared_qb = NULL;
+static sds thread_shared_qbs[IO_THREADS_MAX_NUM] = {NULL};
+static pthread_mutex_t thread_shared_qbs_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 typedef enum {
     PARSE_OK = 0,
@@ -3860,13 +3862,49 @@ void resetClientIOState(client *c) {
 /* Initializes the shared query buffer to a new sds with the default capacity.
  * Need to ensure the initlen is not less than readlen in readToQueryBuf. */
 void initSharedQueryBuf(void) {
-    thread_shared_qb = sdsnewlen(NULL, PROTO_IOBUF_LEN);
-    sdsclear(thread_shared_qb);
+    pthread_mutex_lock(&thread_shared_qbs_mutex);
+    sds querybuf = sdsnewlen(NULL, PROTO_IOBUF_LEN);
+    sdsclear(querybuf);
+    thread_shared_qb = querybuf;
+    thread_shared_qbs[getCurTid()] = querybuf;
+    pthread_mutex_unlock(&thread_shared_qbs_mutex);
 }
 
 void freeSharedQueryBuf(void) {
+    pthread_mutex_lock(&thread_shared_qbs_mutex);
     sdsfree(thread_shared_qb);
     thread_shared_qb = NULL;
+    thread_shared_qbs[getCurTid()] = NULL;
+    pthread_mutex_unlock(&thread_shared_qbs_mutex);
+}
+
+void lockThreadSharedQueryBufs(void) {
+    pthread_mutex_lock(&thread_shared_qbs_mutex);
+}
+
+void unlockThreadSharedQueryBufs(void) {
+    pthread_mutex_unlock(&thread_shared_qbs_mutex);
+}
+
+/* After fork, only the main thread survives. Release the shared query buffers
+ * owned by the I/O threads that no longer exist in the child. Buffers currently
+ * owned by clients are handled by dismissMemoryInChild(). */
+void freeIOThreadSharedQueryBufsInChild(void) {
+    listIter li;
+    listNode *ln;
+    listRewind(server.clients, &li);
+    while ((ln = listNext(&li))) {
+        client *c = listNodeValue(ln);
+        int tid = c->cur_tid;
+        if (tid > 0 && tid < IO_THREADS_MAX_NUM && c->querybuf == thread_shared_qbs[tid]) {
+            thread_shared_qbs[tid] = NULL;
+        }
+    }
+
+    for (int i = 1; i < IO_THREADS_MAX_NUM; i++) {
+        sdsfree(thread_shared_qbs[i]);
+        thread_shared_qbs[i] = NULL;
+    }
 }
 
 /* This function is used when we want to re-enter the event loop but there
@@ -4756,8 +4794,15 @@ static bool readToQueryBuf(client *c) {
     }
 
     if (c->querybuf == NULL) {
-        serverAssert(sdslen(thread_shared_qb) == 0);
-        c->querybuf = big_arg ? sdsempty() : thread_shared_qb;
+        if (big_arg) {
+            c->querybuf = sdsempty();
+        } else {
+            pthread_mutex_lock(&thread_shared_qbs_mutex);
+            serverAssert(sdslen(thread_shared_qb) == 0);
+            c->cur_tid = getCurTid();
+            c->querybuf = thread_shared_qb;
+            pthread_mutex_unlock(&thread_shared_qbs_mutex);
+        }
         qblen = sdslen(c->querybuf);
     }
 
