@@ -77,8 +77,8 @@ jobs:
           EVENT: ${{ github.event_name }}
           EVENT_PR: ${{ github.event.pull_request.number }}
           IN_PR_NUMBER: ${{ inputs.pr_number }}
-          IN_BASE: ${{ inputs.base_ref }}
-          IN_PR: ${{ inputs.pr_ref || 'unstable' }}
+          IN_BASE: ${{ inputs.base_ref || 'data-tiering-unstable' }}
+          IN_PR: ${{ inputs.pr_ref || 'data-tiering-unstable' }}
         run: |
           NUMBER=${EVENT_PR:-$IN_PR_NUMBER}
           if [[ -n "$NUMBER" ]]; then
