@@ -36,6 +36,10 @@
 #include "cluster_migrateslots.h"
 #include <math.h>
 
+#ifdef USE_EXT_STORAGE
+#include "ext_storage.h"
+#endif
+
 /* ----------------------------------------------------------------------------
  * Data structures
  * --------------------------------------------------------------------------*/
@@ -62,6 +66,11 @@ struct evictionPoolEntry {
 };
 
 static struct evictionPoolEntry *EvictionPoolLRU;
+#ifdef USE_EXT_STORAGE
+/* Kept apart from EvictionPoolLRU so spill and eviction don't consume each
+ * other's candidates. */
+static struct evictionPoolEntry *SpillPoolLRU;
+#endif
 
 /* ----------------------------------------------------------------------------
  * Implementation of eviction, aging and LRU
@@ -88,7 +97,7 @@ static struct evictionPoolEntry *EvictionPoolLRU;
  * evicted in the whole database. */
 
 /* Create a new eviction pool. */
-void evictionPoolAlloc(void) {
+static struct evictionPoolEntry *evictionPoolCreate(void) {
     struct evictionPoolEntry *ep;
     int j;
 
@@ -99,20 +108,31 @@ void evictionPoolAlloc(void) {
         ep[j].cached = sdsnewlen(NULL, EVPOOL_CACHED_SDS_SIZE);
         ep[j].dbid = 0;
     }
-    EvictionPoolLRU = ep;
+    return ep;
+}
+
+void evictionPoolAlloc(void) {
+    EvictionPoolLRU = evictionPoolCreate();
+#ifdef USE_EXT_STORAGE
+    SpillPoolLRU = evictionPoolCreate();
+#endif
 }
 
 /* This is a helper function for performEvictions(), it is used in order
  * to populate the evictionPool with a few entries every time we want to
  * expire a key. Keys with idle time bigger than one of the current
  * keys are added. Keys are always added if there are free entries.
+ * With 'spill' set, only spill candidates are added.
  *
  * We insert keys on place in ascending order, so keys with the smaller
  * idle time are on the left, and keys with the higher idle time on the
  * right. */
-int evictionPoolPopulate(serverDb *db, kvstore *samplekvs, struct evictionPoolEntry *pool) {
+int evictionPoolPopulate(serverDb *db, kvstore *samplekvs, struct evictionPoolEntry *pool, int spill) {
     int j, k, count;
     void *samples[server.maxmemory_samples];
+#ifndef USE_EXT_STORAGE
+    UNUSED(spill);
+#endif
 
     int slot = kvstoreGetFairRandomHashtableIndex(samplekvs);
     /* We may get not found if there are no keys */
@@ -123,6 +143,9 @@ int evictionPoolPopulate(serverDb *db, kvstore *samplekvs, struct evictionPoolEn
         robj *o = samples[j];
         sds key = objectGetKey(o);
 
+#ifdef USE_EXT_STORAGE
+        if (spill && !isSpillCandidate(o)) continue;
+#endif
         /* Calculate the idle time according to the policy. This is called
          * idle just because the code initially handled LRU, but is in fact
          * just a score where a higher score means better candidate. */
@@ -188,6 +211,50 @@ int evictionPoolPopulate(serverDb *db, kvstore *samplekvs, struct evictionPoolEn
 
     return count;
 }
+
+#ifdef USE_EXT_STORAGE
+/* Returns the coldest spill candidate and sets *dbid, or returns NULL if no
+ * sampled key is a candidate. Samples every DB the way performEvictions() does.
+ * Only allkeys-lru and allkeys-lfu select candidates. */
+robj *spillSelectCandidate(int *dbid) {
+    if (server.maxmemory_policy != MAXMEMORY_ALLKEYS_LRU && server.maxmemory_policy != MAXMEMORY_ALLKEYS_LFU) {
+        return NULL;
+    }
+
+    struct evictionPoolEntry *pool = SpillPoolLRU;
+    for (int i = 0; i < server.dbnum; i++) {
+        serverDb *db = server.db[i];
+        if (db == NULL) continue;
+        unsigned long db_keys = kvstoreSize(db->keys);
+        if (db_keys == 0) continue;
+
+        unsigned long sampled_keys = 0;
+        int l = kvstoreNumNonEmptyHashtables(db->keys);
+        while (l--) {
+            sampled_keys += evictionPoolPopulate(db, db->keys, pool, 1);
+            if (sampled_keys >= (unsigned long)server.maxmemory_samples) break;
+            if (db_keys < (unsigned long)server.maxmemory_samples * 10) break;
+        }
+    }
+
+    for (int k = EVPOOL_SIZE - 1; k >= 0; k--) {
+        if (pool[k].key == NULL) continue;
+        void *entry = NULL;
+        bool found = kvstoreHashtableFind(server.db[pool[k].dbid]->keys, pool[k].slot, pool[k].key, &entry);
+
+        if (pool[k].key != pool[k].cached) sdsfree(pool[k].key);
+        pool[k].key = NULL;
+        pool[k].idle = 0;
+
+        /* The key may have been deleted or changed since it was sampled. */
+        if (found && isSpillCandidate(entry)) {
+            *dbid = pool[k].dbid;
+            return entry;
+        }
+    }
+    return NULL;
+}
+#endif
 
 /* We don't want to count AOF buffers and replicas output buffers as
  * used memory: the eviction should use mostly data size, because
@@ -509,7 +576,7 @@ int performEvictions(void) {
                     int l = kvstoreNumNonEmptyHashtables(kvs);
                     /* Do not exceed the number of non-empty slots when looping. */
                     while (l--) {
-                        sampled_keys += evictionPoolPopulate(db, kvs, pool);
+                        sampled_keys += evictionPoolPopulate(db, kvs, pool, 0);
                         /* We have sampled enough keys in the current db, exit the loop. */
                         if (sampled_keys >= (unsigned long)server.maxmemory_samples) break;
                         /* If there are not a lot of keys in the current db, dict/s may be very

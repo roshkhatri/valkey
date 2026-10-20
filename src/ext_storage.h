@@ -33,6 +33,13 @@ sds extStorageInfoString(sds info);
 /* The serialization callbacks. */
 const storageSerializer *extStorageSerializer(void);
 
+/* Where an object's value resides, kept in its header. */
+storageState getStorageState(const robj *o);
+void setStorageState(robj *o, storageState state);
+
+/* Whether a key's value can be spilled. */
+int isSpillCandidate(const robj *o);
+
 #endif /* USE_EXT_STORAGE */
 
 #endif /* VALKEY_EXT_STORAGE_H */

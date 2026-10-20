@@ -4187,6 +4187,9 @@ void evictionPoolAlloc(void);
 #define EVICT_FAIL 2
 int performEvictions(void);
 void startEvictionTimeProc(void);
+#ifdef USE_EXT_STORAGE
+robj *spillSelectCandidate(int *dbid);
+#endif
 
 /* Keys hashing/comparison functions for dict.c and hashtable.c hash tables. */
 uint8_t *getConfigurableHashSeed(void);
