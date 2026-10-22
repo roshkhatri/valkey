@@ -4182,14 +4182,15 @@ int clientsCronHandleTimeout(client *c, mstime_t now_ms);
 
 /* evict.c -- maxmemory handling and LRU eviction. */
 void evictionPoolAlloc(void);
+typedef bool evictionPoolFilter(const robj *o);
+struct evictionPoolEntry *evictionPoolCreate(void);
+int evictionPoolPopulate(serverDb *db, kvstore *samplekvs, struct evictionPoolEntry *pool, evictionPoolFilter *filter);
+robj *evictionPoolPop(struct evictionPoolEntry *pool, evictionPoolFilter *filter, int *dbid, int *slot);
 #define EVICT_OK 0
 #define EVICT_RUNNING 1
 #define EVICT_FAIL 2
 int performEvictions(void);
 void startEvictionTimeProc(void);
-#ifdef USE_EXT_STORAGE
-robj *spillSelectCandidate(int *dbid);
-#endif
 
 /* Keys hashing/comparison functions for dict.c and hashtable.c hash tables. */
 uint8_t *getConfigurableHashSeed(void);

@@ -891,8 +891,6 @@ TEST(StorageStateTest, SetStorageState) {
 
 class SpillSelectTest : public ::testing::Test {
   protected:
-    static bool pools_allocated;
-
     void SetUp() override {
         memset(&server, 0, sizeof(valkeyServer));
         server.dbnum = 1;
@@ -902,12 +900,7 @@ class SpillSelectTest : public ::testing::Test {
         server.db[0] = (serverDb *)zcalloc(sizeof(serverDb));
         server.db[0]->keys = kvstoreCreate(&kvstoreKeysHashtableType, 0, 0);
 
-        if (!pools_allocated) {
-            evictionPoolAlloc();
-            pools_allocated = true;
-        }
-        /* The spill pool outlives a test. Selecting from the empty DB drops the
-         * keys an earlier test left in it. */
+        /* Clear whatever an earlier test left in the spill pool. */
         int dbid;
         ASSERT_EQ(spillSelectCandidate(&dbid), nullptr);
     }
@@ -934,7 +927,7 @@ class SpillSelectTest : public ::testing::Test {
     }
 
     robj *addRawKey(const char *key) {
-        /* Over the 128-byte embedding limit, so the value has its own allocation. */
+        /* Too big to embed. */
         char val[200];
         memset(val, 'v', sizeof(val));
         robj *entry = addKey(key, createStringObject(val, sizeof(val)));
@@ -944,9 +937,7 @@ class SpillSelectTest : public ::testing::Test {
     }
 };
 
-bool SpillSelectTest::pools_allocated = false;
-
-/* The pool must rank by the policy's idleness, the same as eviction. */
+/* Keys are ranked the same way eviction ranks them. */
 TEST_F(SpillSelectTest, PicksTheLeastRecentlyUsedKeyUnderAllkeysLru) {
     usePolicy(MAXMEMORY_ALLKEYS_LRU);
     objectSetLRUOrLFU(addRawKey("recent"), -1, 10);
@@ -970,7 +961,7 @@ TEST_F(SpillSelectTest, PicksTheLeastFrequentlyUsedKeyUnderAllkeysLfu) {
     EXPECT_EQ(spillSelectCandidate(&dbid), coldest);
 }
 
-/* A colder key that can't be spilled must not hide a candidate. */
+/* Colder keys that can't be spilled are passed over. */
 TEST_F(SpillSelectTest, SkipsKeysThatCannotBeSpilled) {
     usePolicy(MAXMEMORY_ALLKEYS_LRU);
     robj *embedded = addKey("embedded", createStringObject("short", 5));
@@ -997,8 +988,26 @@ TEST_F(SpillSelectTest, SkipsKeysThatCannotBeSpilled) {
     decrRefCount(referenced);
 }
 
-/* Keys that can't be spilled must not take pool slots. More of them than the
- * pool holds would otherwise push the only candidate out. */
+/* Module keys aren't spillable yet (#81). */
+TEST_F(SpillSelectTest, SkipsModuleKeys) {
+    usePolicy(MAXMEMORY_ALLKEYS_LRU);
+    static moduleType mt = {};
+    mt.free = freeNothingOnRelease;
+    moduleValue *mv = (moduleValue *)zmalloc(sizeof(*mv));
+    mv->type = &mt;
+    mv->value = nullptr;
+    robj *module_key = addKey("module", createObject(OBJ_MODULE, mv));
+    ASSERT_FALSE(module_key->hasembval);
+    objectSetLRUOrLFU(module_key, -1, 5000);
+
+    robj *candidate = addRawKey("candidate");
+    objectSetLRUOrLFU(candidate, -1, 10);
+
+    int dbid = -1;
+    EXPECT_EQ(spillSelectCandidate(&dbid), candidate);
+}
+
+/* Non-candidates must not crowd the candidate out of the pool. */
 TEST_F(SpillSelectTest, KeysThatCannotBeSpilledDoNotFillThePool) {
     usePolicy(MAXMEMORY_ALLKEYS_LRU);
     server.maxmemory_samples = 64; /* sample every key in one pass */
@@ -1014,7 +1023,7 @@ TEST_F(SpillSelectTest, KeysThatCannotBeSpilledDoNotFillThePool) {
     EXPECT_EQ(spillSelectCandidate(&dbid), candidate);
 }
 
-/* Pooled keys deleted since they were sampled must not hide a live candidate. */
+/* Deleted keys left in the pool must not hide a live one. */
 TEST_F(SpillSelectTest, DeletedPooledKeysDoNotHideACandidate) {
     usePolicy(MAXMEMORY_ALLKEYS_LRU);
     server.maxmemory_samples = 64; /* sample every key in one pass */
@@ -1026,7 +1035,7 @@ TEST_F(SpillSelectTest, DeletedPooledKeysDoNotHideACandidate) {
     int dbid = -1;
     ASSERT_NE(spillSelectCandidate(&dbid), nullptr);
 
-    /* The pool now holds the coldest of the rest. Delete them all. */
+    /* Leave the pool holding only deleted keys. */
     for (int i = 0; i < 20; i++) {
         snprintf(name, sizeof(name), "cold:%d", i);
         sds key = sdsnew(name);
@@ -1039,7 +1048,7 @@ TEST_F(SpillSelectTest, DeletedPooledKeysDoNotHideACandidate) {
     EXPECT_EQ(spillSelectCandidate(&dbid), candidate);
 }
 
-/* NULL is how the spill loop knows to stop. */
+/* Nothing spillable returns NULL. */
 TEST_F(SpillSelectTest, ReturnsNullWhenNoKeyCanBeSpilled) {
     usePolicy(MAXMEMORY_ALLKEYS_LRU);
     addKey("embedded", createStringObject("short", 5));

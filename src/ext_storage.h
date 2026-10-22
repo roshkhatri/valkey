@@ -12,7 +12,7 @@
 
 #ifdef USE_EXT_STORAGE
 
-#include "sds.h"
+#include "server.h"
 #include "storage/storage.h"
 
 /* Opens the configured storage engine. */
@@ -33,12 +33,10 @@ sds extStorageInfoString(sds info);
 /* The serialization callbacks. */
 const storageSerializer *extStorageSerializer(void);
 
-/* Where an object's value resides, kept in its header. */
 storageState getStorageState(const robj *o);
 void setStorageState(robj *o, storageState state);
-
-/* Whether a key's value can be spilled. */
-int isSpillCandidate(const robj *o);
+bool isSpillCandidate(const robj *o);
+robj *spillSelectCandidate(int *dbid);
 
 #endif /* USE_EXT_STORAGE */
 
