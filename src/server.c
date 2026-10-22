@@ -1991,6 +1991,7 @@ void beforeSleep(struct aeEventLoop *eventLoop) {
 #ifdef USE_EXT_STORAGE
     /* Finish storage engine requests before serving unblocked clients. */
     if (extStorageProcessCompletions() > 0) server.el_iteration_active = true;
+    spillCron();
 #endif
     /* Handle blocked clients.
      * must be done before flushAppendOnlyFile, in case of appendfsync=always,
