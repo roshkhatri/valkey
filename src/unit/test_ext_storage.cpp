@@ -1644,6 +1644,96 @@ TEST_F(SpillSubmitTest, ASpilledHashHasNoFieldExpirations) {
     }
 }
 
+/* ---------------------------------------------------------------------------
+ * Values in flight
+ * ---------------------------------------------------------------------------*/
+
+/* A write waits for the engine to release the value, and the value stays in
+ * DRAM. Another key's completion that arrives first waits for beforeSleep(),
+ * since the running command may still use its value. */
+TEST_F(SpillSubmitTest, WritingAKeyMidSpillKeepsItsValue) {
+    robj *other = addRawKey("other");
+    robj *entry = addRawKey("key");
+    ASSERT_EQ(spillItem(0, other), STORAGE_OK);
+    ASSERT_EQ(spillItem(0, entry), STORAGE_OK);
+    sds val = sdsdup((sds)objectGetVal(entry));
+
+    spillBeforeWrite(entry);
+    EXPECT_EQ(getStorageState(entry), STORAGE_STATE_ONLY_MEMORY);
+    EXPECT_EQ(sdscmp((sds)objectGetVal(entry), val), 0);
+    EXPECT_EQ(getStorageState(other), STORAGE_STATE_COPYING_TO_FLASH);
+    EXPECT_NE(objectGetVal(other), nullptr);
+
+    EXPECT_EQ(extStorageProcessCompletions(), 1);
+    EXPECT_EQ(getStorageState(other), STORAGE_STATE_ONLY_FLASH);
+    EXPECT_EQ(spillInflightRamBytes(), 0u);
+    sdsfree(val);
+}
+
+/* A completion that was set aside while waiting for another key is found when
+ * its own key is written. */
+TEST_F(SpillSubmitTest, WritingAKeyWhoseCompletionWasSetAside) {
+    robj *first = addRawKey("first");
+    robj *second = addRawKey("second");
+    ASSERT_EQ(spillItem(0, first), STORAGE_OK);
+    ASSERT_EQ(spillItem(0, second), STORAGE_OK);
+
+    spillBeforeWrite(second);
+    ASSERT_EQ(getStorageState(first), STORAGE_STATE_COPYING_TO_FLASH);
+    spillBeforeWrite(first);
+    EXPECT_EQ(getStorageState(first), STORAGE_STATE_ONLY_MEMORY);
+    EXPECT_NE(objectGetVal(first), nullptr);
+    EXPECT_EQ(extStorageProcessCompletions(), 0);
+    EXPECT_EQ(spillInflightRamBytes(), 0u);
+}
+
+/* Deleting a key mid-spill must not free the value the engine is reading. */
+TEST_F(SpillSubmitTest, DeletingAKeyMidSpill) {
+    robj *entry = addRawKey("key");
+    ASSERT_EQ(spillItem(0, entry), STORAGE_OK);
+
+    spillBeforeRemove(entry);
+    EXPECT_EQ(getStorageState(entry), STORAGE_STATE_ONLY_MEMORY);
+    sds key = sdsnew("key");
+    ASSERT_TRUE(kvstoreHashtableDelete(server.db[0]->keys, 0, key));
+    sdsfree(key);
+    EXPECT_EQ(finishSpills(), 0);
+}
+
+/* The key replacing a spilled key's value must not look spilled. */
+TEST_F(SpillSubmitTest, RemovingASpilledKeyResetsItsState) {
+    robj *entry = addRawKey("key");
+    ASSERT_EQ(spillItem(0, entry), STORAGE_OK);
+    ASSERT_EQ(finishSpills(), 1);
+
+    spillBeforeRemove(entry);
+    EXPECT_EQ(getStorageState(entry), STORAGE_STATE_ONLY_MEMORY);
+    EXPECT_EQ(objectGetVal(entry), nullptr);
+}
+
+/* Closing the engine discards completions it hasn't handed back, which would
+ * leak the requests and leave keys COPYING_TO_FLASH. */
+TEST_F(SpillSubmitTest, ClosingTheEngineFinishesSpillsInFlight) {
+    robj *a = addRawKey("a");
+    robj *b = addRawKey("b");
+    ASSERT_EQ(spillItem(0, a), STORAGE_OK);
+    ASSERT_EQ(spillItem(0, b), STORAGE_OK);
+
+    extStorageDeinit();
+    EXPECT_EQ(getStorageState(a), STORAGE_STATE_ONLY_FLASH);
+    EXPECT_EQ(getStorageState(b), STORAGE_STATE_ONLY_FLASH);
+    EXPECT_EQ(spillInflightRamBytes(), 0u);
+}
+
+TEST_F(SpillSubmitTest, EvictionOnlyTakesKeysInMemory) {
+    robj *entry = addRawKey("key");
+    EXPECT_TRUE(spillCanEvict(entry));
+    ASSERT_EQ(spillItem(0, entry), STORAGE_OK);
+    EXPECT_FALSE(spillCanEvict(entry));
+    ASSERT_EQ(finishSpills(), 1);
+    EXPECT_FALSE(spillCanEvict(entry));
+}
+
 TEST_F(SpillSubmitTest, SavingAKeyOnFlashFails) {
     robj *entry = addRawKey("key");
     ASSERT_EQ(spillItem(0, entry), STORAGE_OK);
@@ -1673,6 +1763,75 @@ TEST_F(SpillSubmitTest, AKeyOnFlashIsFreedWithoutItsValue) {
     robj *key = createStringObject("list", 4);
     freeObjAsync(key, entry, 0);
     decrRefCount(key);
+}
+
+/* ---------------------------------------------------------------------------
+ * Spilling over maxmemory
+ * ---------------------------------------------------------------------------*/
+
+TEST_F(SpillSubmitTest, SpillsOnlyEnoughToCoverWhatMustBeFreed) {
+    robj *coldest = addRawKey("coldest");
+    objectSetLRUOrLFU(coldest, -1, 1000);
+    objectSetLRUOrLFU(addRawKey("warm"), -1, 100);
+    objectSetLRUOrLFU(addRawKey("hot"), -1, 10);
+
+    EXPECT_EQ(spillToFree(1), 0u);
+    EXPECT_EQ(getStorageState(coldest), STORAGE_STATE_COPYING_TO_FLASH);
+    size_t one_value = spillInflightRamBytes();
+
+    /* What is in flight already counts. */
+    EXPECT_EQ(spillToFree(one_value), 0u);
+    EXPECT_EQ(spillInflightRamBytes(), one_value);
+}
+
+/* Eviction frees what spilling can't. */
+TEST_F(SpillSubmitTest, ReturnsWhatSpillingCannotCover) {
+    addRawKey("a");
+    addRawKey("b");
+    addKey("embedded", createStringObject("short", 5));
+
+    size_t left = spillToFree(1000000);
+    EXPECT_EQ(left, 1000000 - spillInflightRamBytes());
+    ASSERT_EQ(finishSpills(), 2);
+}
+
+/* A call stops after a fixed number of keys without handing the rest to
+ * eviction, because spillable keys are left for the next call. */
+TEST_F(SpillSubmitTest, StopsAfterTheLimitWithoutEvicting) {
+    server.maxmemory_samples = 64; /* sample every key, so only the limit stops the loop */
+    for (int i = 0; i < 20; i++) {
+        char key[16];
+        snprintf(key, sizeof(key), "key%d", i);
+        addRawKey(key);
+    }
+    EXPECT_EQ(spillToFree(1000000), 0u);
+    EXPECT_EQ(finishSpills(), 16);
+}
+
+TEST_F(SpillSubmitTest, SpillsNothingUnlessTheEngineIsOpen) {
+    addRawKey("key");
+    extStorageDeinit();
+    EXPECT_EQ(spillToFree(100), 100u);
+    EXPECT_EQ(spillInflightRamBytes(), 0u);
+}
+
+/* beforeSleep() spills without a command, and on a replica, which never evicts. */
+TEST_F(SpillSubmitTest, CronSpillsOverMaxmemoryOnPrimariesAndReplicas) {
+    robj *primary_key = addRawKey("primary");
+    spillCron();
+    EXPECT_EQ(getStorageState(primary_key), STORAGE_STATE_ONLY_MEMORY); /* No maxmemory. */
+
+    server.maxmemory = zmalloc_used_memory() - 1;
+    spillCron();
+    EXPECT_EQ(getStorageState(primary_key), STORAGE_STATE_COPYING_TO_FLASH);
+
+    robj *replica_key = addRawKey("replica");
+    server.primary_host = (char *)"127.0.0.1";
+    server.maxmemory = zmalloc_used_memory() - spillInflightRamBytes() - 1;
+    spillCron();
+    EXPECT_EQ(getStorageState(replica_key), STORAGE_STATE_COPYING_TO_FLASH);
+    server.primary_host = nullptr;
+    server.maxmemory = 0;
 }
 
 #endif /* USE_EXT_STORAGE */
