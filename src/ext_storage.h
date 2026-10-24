@@ -33,12 +33,21 @@ sds extStorageInfoString(sds info);
 /* The serialization callbacks. */
 const storageSerializer *extStorageSerializer(void);
 
+/* Polls finished requests and hands each one to the code that submitted it. */
+int extStorageProcessCompletions(void);
+
 storageState getStorageState(const robj *o);
 void setStorageState(robj *o, storageState state);
 robj *spillSelectCandidate(int *dbid);
 storageStatus spillItem(int dbid, robj *entry);
 size_t spillInflightRamBytes(void);
 void debugSpillCommand(client *c);
+
+#else
+
+static inline int extStorageProcessCompletions(void) {
+    return 0;
+}
 
 #endif /* USE_EXT_STORAGE */
 
