@@ -3341,6 +3341,7 @@ int execGetKeys(struct serverCommand *cmd, robj **argv, int argc, getKeysResult 
 void decrRefCount(robj *o);
 void incrRefCount(robj *o);
 robj *makeObjectShared(robj *o);
+void freeObjectVal(robj *o);
 void freeStringObject(robj *o);
 void freeListObject(robj *o);
 void freeSetObject(robj *o);

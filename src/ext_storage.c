@@ -12,6 +12,7 @@
 #ifdef USE_EXT_STORAGE
 
 #include "ext_storage.h"
+#include "bgiteration.h"
 #include "rdb.h"
 #include "storage/storage_flashcache.h"
 #include "storage/storage_mock.h"
@@ -288,11 +289,16 @@ static size_t spillValueRamBytes(const robj *o) {
  * must still be in memory and be the only reference to its allocation.
  * Embedded strings and INT encodings have no separate allocation to free.
  * Module values have no serializer yet (#81). Expired keys are left for
- * expiry to delete. Values over ext-storage-max-spill-size stay in DRAM. */
+ * expiry to delete. Values over ext-storage-max-spill-size stay in DRAM. A
+ * hash with field expirations stays in DRAM because active field expiry reads
+ * its value.
+ * TODO(#57): spill it once expiry handles keys on flash. */
 static bool isSpillCandidate(const robj *o) {
-    return getStorageState(o) == STORAGE_STATE_ONLY_MEMORY && !o->hasembval &&
-           objectGetEncoding(o) != OBJ_ENCODING_INT && objectGetRefcount(o) == 1 && objectGetType(o) != OBJ_MODULE &&
-           !timestampIsExpired(objectGetExpire(o)) && spillValueRamBytes(o) <= server.ext_storage_max_spill_size;
+    if (getStorageState(o) != STORAGE_STATE_ONLY_MEMORY || o->hasembval || objectGetRefcount(o) != 1) return false;
+    if (objectGetEncoding(o) == OBJ_ENCODING_INT || objectGetType(o) == OBJ_MODULE) return false;
+    if (timestampIsExpired(objectGetExpire(o))) return false;
+    if (objectGetType(o) == OBJ_HASH && hashTypeHasVolatileFields((robj *)o)) return false;
+    return spillValueRamBytes(o) <= server.ext_storage_max_spill_size;
 }
 
 /* Picks the eviction policy used to sample and rank keys for spilling.
@@ -309,8 +315,7 @@ robj *spillSelectCandidate(int *dbid) {
     return evictionPoolPopColdest(spillSamplingPolicy(), isSpillCandidate, dbid);
 }
 
-/* A put in flight, passed to the engine as its request_ctx.
- * TODO(#109): free it when the completion is polled. */
+/* A put in flight, passed to the engine as its request_ctx. */
 typedef struct spillRequest {
     robj *entry;
     size_t ram_bytes;
@@ -368,6 +373,50 @@ void debugSpillCommand(client *c) {
     } else {
         addReplyError(c, "The storage engine rejected the item");
     }
+}
+
+/* Finishes a spill. On success the value is freed and only the key stays in
+ * DRAM. On failure the value was never released, so the key is back in memory
+ * and can be picked again. */
+static void spillComplete(const storageCompletion *comp) {
+    spillRequest *req = comp->request_ctx;
+    robj *entry = req->entry;
+    serverAssert(getStorageState(entry) == STORAGE_STATE_COPYING_TO_FLASH);
+
+    /* Keep a value that something else still references. */
+    bool in_use = objectGetRefcount(entry) != 1 || bgIteration_isEntryInuse(entry);
+    if (comp->status == STORAGE_OK && !in_use) {
+        freeObjectVal(entry);
+        objectSetVal(entry, NULL);
+        setStorageState(entry, STORAGE_STATE_ONLY_FLASH);
+    } else {
+        /* TODO(#34): delete the flash copy when the write succeeded. */
+        setStorageState(entry, STORAGE_STATE_ONLY_MEMORY);
+    }
+    inflight_ram_bytes -= req->ram_bytes;
+    zfree(req);
+}
+
+#define EXT_STORAGE_POLL_BATCH 64
+
+/* Polls finished requests and hands each one to the code that submitted it.
+ * Returns how many were processed. */
+int extStorageProcessCompletions(void) {
+    if (!ext_storage.open) return 0;
+
+    storageCompletion comps[EXT_STORAGE_POLL_BATCH];
+    int total = 0, n;
+    do {
+        n = ext_storage.engine->poll_completions(comps, EXT_STORAGE_POLL_BATCH);
+        for (int i = 0; i < n; i++) {
+            switch (comps[i].op_type) {
+            case STORAGE_OP_PUT: spillComplete(&comps[i]); break;
+            default: serverPanic("Unexpected storage engine completion %d", comps[i].op_type);
+            }
+        }
+        total += n;
+    } while (n == EXT_STORAGE_POLL_BATCH);
+    return total;
 }
 
 #endif /* USE_EXT_STORAGE */
