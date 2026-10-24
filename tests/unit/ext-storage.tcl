@@ -18,8 +18,9 @@ start_server {tags {"ext-storage external:skip"} overrides {ext-storage-enabled 
         r set big [string repeat x 1000]
         r set small v
         assert_equal OK [r debug spill big]
-        assert_match {* storage_state:1 *} [r debug object big fast]
-        # Already being written, too small to have a separate value, or missing.
+        # The completion is processed before the next command.
+        assert_match {* storage_state:2 *} [r debug object big fast]
+        # Already on flash, too small to have a separate value, or missing.
         assert_error {*can't be spilled*} {r debug spill big}
         assert_error {*can't be spilled*} {r debug spill small}
         assert_error {*no such key*} {r debug spill missing}
