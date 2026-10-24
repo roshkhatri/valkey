@@ -522,7 +522,7 @@ size_t spillToFree(size_t mem_tofree) {
         if (i == SPILL_MAX_PER_CALL) return 0;
         int dbid;
         robj *entry = spillSelectCandidate(&dbid);
-        if (entry == NULL || spillKey(dbid, entry) != STORAGE_OK) break;
+        if (entry == NULL || spillItem(dbid, entry) != STORAGE_OK) break;
     }
     return inflight_ram_bytes >= mem_tofree ? 0 : mem_tofree - inflight_ram_bytes;
 }

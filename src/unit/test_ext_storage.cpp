@@ -1654,8 +1654,8 @@ TEST_F(SpillSubmitTest, ASpilledHashHasNoFieldExpirations) {
 TEST_F(SpillSubmitTest, WritingAKeyMidSpillKeepsItsValue) {
     robj *other = addRawKey("other");
     robj *entry = addRawKey("key");
-    ASSERT_EQ(spillKey(0, other), STORAGE_OK);
-    ASSERT_EQ(spillKey(0, entry), STORAGE_OK);
+    ASSERT_EQ(spillItem(0, other), STORAGE_OK);
+    ASSERT_EQ(spillItem(0, entry), STORAGE_OK);
     sds val = sdsdup((sds)objectGetVal(entry));
 
     spillBeforeWrite(entry);
@@ -1675,8 +1675,8 @@ TEST_F(SpillSubmitTest, WritingAKeyMidSpillKeepsItsValue) {
 TEST_F(SpillSubmitTest, WritingAKeyWhoseCompletionWasSetAside) {
     robj *first = addRawKey("first");
     robj *second = addRawKey("second");
-    ASSERT_EQ(spillKey(0, first), STORAGE_OK);
-    ASSERT_EQ(spillKey(0, second), STORAGE_OK);
+    ASSERT_EQ(spillItem(0, first), STORAGE_OK);
+    ASSERT_EQ(spillItem(0, second), STORAGE_OK);
 
     spillBeforeWrite(second);
     ASSERT_EQ(getStorageState(first), STORAGE_STATE_COPYING_TO_FLASH);
@@ -1690,7 +1690,7 @@ TEST_F(SpillSubmitTest, WritingAKeyWhoseCompletionWasSetAside) {
 /* Deleting a key mid-spill must not free the value the engine is reading. */
 TEST_F(SpillSubmitTest, DeletingAKeyMidSpill) {
     robj *entry = addRawKey("key");
-    ASSERT_EQ(spillKey(0, entry), STORAGE_OK);
+    ASSERT_EQ(spillItem(0, entry), STORAGE_OK);
 
     spillBeforeRemove(entry);
     EXPECT_EQ(getStorageState(entry), STORAGE_STATE_ONLY_MEMORY);
@@ -1703,7 +1703,7 @@ TEST_F(SpillSubmitTest, DeletingAKeyMidSpill) {
 /* The key replacing a spilled key's value must not look spilled. */
 TEST_F(SpillSubmitTest, RemovingASpilledKeyResetsItsState) {
     robj *entry = addRawKey("key");
-    ASSERT_EQ(spillKey(0, entry), STORAGE_OK);
+    ASSERT_EQ(spillItem(0, entry), STORAGE_OK);
     ASSERT_EQ(finishSpills(), 1);
 
     spillBeforeRemove(entry);
@@ -1716,8 +1716,8 @@ TEST_F(SpillSubmitTest, RemovingASpilledKeyResetsItsState) {
 TEST_F(SpillSubmitTest, ClosingTheEngineFinishesSpillsInFlight) {
     robj *a = addRawKey("a");
     robj *b = addRawKey("b");
-    ASSERT_EQ(spillKey(0, a), STORAGE_OK);
-    ASSERT_EQ(spillKey(0, b), STORAGE_OK);
+    ASSERT_EQ(spillItem(0, a), STORAGE_OK);
+    ASSERT_EQ(spillItem(0, b), STORAGE_OK);
 
     extStorageDeinit();
     EXPECT_EQ(getStorageState(a), STORAGE_STATE_ONLY_FLASH);
@@ -1728,7 +1728,7 @@ TEST_F(SpillSubmitTest, ClosingTheEngineFinishesSpillsInFlight) {
 TEST_F(SpillSubmitTest, EvictionOnlyTakesKeysInMemory) {
     robj *entry = addRawKey("key");
     EXPECT_TRUE(spillCanEvict(entry));
-    ASSERT_EQ(spillKey(0, entry), STORAGE_OK);
+    ASSERT_EQ(spillItem(0, entry), STORAGE_OK);
     EXPECT_FALSE(spillCanEvict(entry));
     ASSERT_EQ(finishSpills(), 1);
     EXPECT_FALSE(spillCanEvict(entry));
