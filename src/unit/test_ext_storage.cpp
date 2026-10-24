@@ -1578,24 +1578,13 @@ TEST_F(SpillSubmitTest, EverySpillableTypeCompletes) {
     robj *spilled[NUM_TEST_OBJECTS];
     int num_spilled = 0;
     for (int i = 0; i < n; i++) {
-        /* The keyspace holds no empty collections. */
-        sds one = sdsnew("1");
-        robj *ele = createStringObject("1", 1);
-        int out_flags = 0;
-        switch (objs[i]->type) {
-        case OBJ_LIST: listTypePush(objs[i], ele, LIST_TAIL); break;
-        case OBJ_SET: setTypeAdd(objs[i], one); break;
-        case OBJ_HASH: hashTypeSet(objs[i], one, one, EXPIRY_NONE, HASH_SET_COPY, NULL); break;
-        case OBJ_ZSET: zsetAdd(objs[i], 1, one, ZADD_IN_NONE, &out_flags, NULL); break;
-        }
-        decrRefCount(ele);
-        sdsfree(one);
+        addOneElement(objs[i]);
 
         char key[16];
         snprintf(key, sizeof(key), "key%d", i);
         robj *entry = addKey(key, objs[i]);
-        /* Earlier keys are spilled or not candidates, so only this one can be picked. */
-        if (!isSelected(entry)) continue;
+        /* Embedded and INT strings have no separate value to spill. */
+        if (entry->hasembval || entry->encoding == OBJ_ENCODING_INT) continue;
         ASSERT_EQ(spillItem(0, entry), STORAGE_OK) << "type " << entry->type;
         spilled[num_spilled++] = entry;
     }
