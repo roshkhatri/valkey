@@ -653,7 +653,7 @@ bool spillCanEvict(const robj *o) {
 }
 
 /* Spills at most this many keys per call, to bound the time spent selecting. */
-#define SPILL_MAX_PER_CALL 16
+#define SPILL_MAX_PER_CALL 64
 
 /* Spills cold keys until the DRAM held by spills in flight covers mem_tofree,
  * since that DRAM is freed once they complete. Returns what is still to free,

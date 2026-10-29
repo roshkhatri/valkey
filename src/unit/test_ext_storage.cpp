@@ -2469,14 +2469,14 @@ TEST_F(SpillSubmitTest, ReturnsWhatSpillingCannotCover) {
 /* A call stops after a fixed number of keys without handing the rest to
  * eviction, because spillable keys are left for the next call. */
 TEST_F(SpillSubmitTest, StopsAfterTheLimitWithoutEvicting) {
-    server.maxmemory_samples = 64; /* sample every key, so only the limit stops the loop */
-    for (int i = 0; i < 20; i++) {
+    server.maxmemory_samples = 128; /* sample every key, so only the limit stops the loop */
+    for (int i = 0; i < 80; i++) {
         char key[16];
         snprintf(key, sizeof(key), "key%d", i);
         addRawKey(key);
     }
     EXPECT_EQ(spillToFree(1000000), 0u);
-    EXPECT_EQ(finishSpills(), 16);
+    EXPECT_EQ(finishSpills(), 64);
 }
 
 TEST_F(SpillSubmitTest, SpillsNothingUnlessTheEngineIsOpen) {
