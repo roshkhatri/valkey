@@ -56,12 +56,14 @@ if {$tiering_built} {
             r config set maxmemory [expr {[s used_memory] + 10000000}]
         }
 
-        test {Saving fails while values are on flash} {
-            catch {r save} e
-            assert_match {*ERR*} $e
+        # TODO(#64): save values on flash.
+        test {Saving skips values on flash} {
+            set loglines [count_log_lines 0]
+            assert_equal OK [r save]
             r bgsave
             waitForBgsave r
-            assert_equal err [s rdb_last_bgsave_status]
+            assert_equal ok [s rdb_last_bgsave_status]
+            verify_log_message 0 "*Skipped saving a key whose value isn't only in memory*" $loglines
         }
 
         test {Spilled hashes and lists can be deleted and overwritten} {
@@ -95,8 +97,7 @@ if {$tiering_built} {
             assert_equal v [r get list:0]
         }
 
-        # TODO(#39): reads and writes fetch the value instead.
-        test {A key on flash reads as missing and a write starts from an empty key} {
+        test {Reads and writes of a key on flash fetch its value} {
             r flushall
             r config set maxmemory 0
             r config set maxmemory-policy allkeys-lru
@@ -120,11 +121,10 @@ if {$tiering_built} {
                 }
             }
             lassign $spilled read write
-            assert_equal {} [r get $read]
-            assert_equal 0 [r exists $read]
-            assert_equal 1 [r append $write v]
-            assert_equal v [r get $write]
-            assert_equal PONG [r ping]
+            assert_equal $val [r get $read]
+            assert_match {* storage_state:0 *} [r debug object $read fast]
+            assert_equal 1001 [r append $write v]
+            assert_equal ${val}v [r get $write]
         } {} {needs:debug}
 
         test {Keys over maxmemory are spilled under noeviction} {

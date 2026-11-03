@@ -1992,7 +1992,7 @@ void beforeSleep(struct aeEventLoop *eventLoop) {
 
     /* Release keys from bgIteration before processing unblocked clients. */
     bgIteration_beforeSleep();
-    spillCron();
+    extStorageSpillCron();
     /* Handle blocked clients.
      * must be done before flushAppendOnlyFile, in case of appendfsync=always,
      * since the unblocked clients may write data. */

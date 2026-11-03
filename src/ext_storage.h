@@ -62,9 +62,12 @@ bool extStorageBlockClientIfRequired(client *c);
 
 /* Waits for every spill in flight to finish. */
 void extStorageSpillDrain(void);
-bool spillCanEvict(const robj *o);
-size_t spillToFree(size_t mem_tofree);
-void spillCron(void);
+
+/* Spills cold keys over maxmemory. Returns what eviction must still free. */
+size_t extStorageSpillToFree(size_t mem_tofree);
+
+/* Spills over maxmemory from beforeSleep(), also on replicas, which never evict. */
+void extStorageSpillCron(void);
 
 #else
 
@@ -74,14 +77,10 @@ static inline bool extStorageIsMemoryOnly(const robj *o) {
 }
 static inline void extStorageSpillDrain(void) {
 }
-static inline bool spillCanEvict(const robj *o) {
-    UNUSED(o);
-    return true;
-}
-static inline size_t spillToFree(size_t mem_tofree) {
+static inline size_t extStorageSpillToFree(size_t mem_tofree) {
     return mem_tofree;
 }
-static inline void spillCron(void) {
+static inline void extStorageSpillCron(void) {
 }
 
 #endif /* USE_EXT_STORAGE */

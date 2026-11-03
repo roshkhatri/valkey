@@ -570,7 +570,7 @@ int performEvictions(void) {
     }
 
     /* Spilled values free their DRAM once written, so eviction only frees the rest. */
-    mem_tofree = spillToFree(mem_tofree);
+    mem_tofree = extStorageSpillToFree(mem_tofree);
     if (mem_tofree == 0) {
         result = EVICT_OK;
         goto update_metrics;
@@ -608,7 +608,7 @@ int performEvictions(void) {
                 /* We don't want to make local-db choices when expiring keys,
                  * so to start populate the eviction pool sampling keys from
                  * every DB. */
-                unsigned long total_keys = evictionPoolSample(server.maxmemory_policy, spillCanEvict);
+                unsigned long total_keys = evictionPoolSample(server.maxmemory_policy, extStorageIsMemoryOnly);
                 if (!total_keys) break; /* No keys to evict. */
                 /* The filter rejected every sampled key, too many times in a row. */
                 if (EvictionPoolLRU[0].key == NULL) {
@@ -616,7 +616,7 @@ int performEvictions(void) {
                     if (rejected >= EVICTION_MAX_REJECTED_KEYS) break;
                 }
 
-                robj *valkey = evictionPoolPop(server.maxmemory_policy, spillCanEvict, &bestdbid, &bestslot);
+                robj *valkey = evictionPoolPop(server.maxmemory_policy, extStorageIsMemoryOnly, &bestdbid, &bestslot);
                 if (valkey) bestkey = objectGetKey(valkey);
             }
         }
@@ -642,7 +642,7 @@ int performEvictions(void) {
                 void *entry;
                 for (int tries = 0; tries < EVICTION_MAX_REJECTED_KEYS && !bestkey; tries++) {
                     if (!kvstoreHashtableRandomEntry(kvs, slot, &entry)) break;
-                    if (!spillCanEvict(entry)) continue;
+                    if (!extStorageIsMemoryOnly(entry)) continue;
                     bestkey = objectGetKey((robj *)entry);
                     bestdbid = j;
                     bestslot = slot;

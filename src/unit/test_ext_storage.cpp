@@ -2431,75 +2431,58 @@ TEST_F(BlockClientTest, AFetchTheEngineRefusesPanics) {
  * Spilling over maxmemory
  * ---------------------------------------------------------------------------*/
 
-TEST_F(SpillSubmitTest, EvictionOnlyTakesKeysInMemory) {
-    robj *entry = addRawKey("key");
-    EXPECT_TRUE(spillCanEvict(entry));
-    ASSERT_EQ(spillItem(0, entry), STORAGE_OK);
-    EXPECT_FALSE(spillCanEvict(entry));
-    ASSERT_EQ(finishSpills(), 1);
-    EXPECT_FALSE(spillCanEvict(entry));
-}
-
-TEST_F(SpillSubmitTest, SpillsOnlyEnoughToCoverWhatMustBeFreed) {
+/* While spills are in flight, eviction has nothing to free: they free memory
+ * once they complete. */
+TEST_F(SpillSubmitTest, SpillingCoversWhatMustBeFreed) {
     robj *coldest = addRawKey("coldest");
     objectSetLRUOrLFU(coldest, -1, 1000);
-    objectSetLRUOrLFU(addRawKey("warm"), -1, 100);
     objectSetLRUOrLFU(addRawKey("hot"), -1, 10);
 
-    EXPECT_EQ(spillToFree(1), 0u);
+    EXPECT_EQ(extStorageSpillToFree(1000000), 0u);
     EXPECT_EQ(getStorageState(coldest), STORAGE_STATE_COPYING_TO_FLASH);
-    size_t one_value = spillInflightRamBytes();
-
-    /* What is in flight already counts. */
-    EXPECT_EQ(spillToFree(one_value), 0u);
-    EXPECT_EQ(spillInflightRamBytes(), one_value);
-}
-
-/* Eviction frees what spilling can't. */
-TEST_F(SpillSubmitTest, ReturnsWhatSpillingCannotCover) {
-    addRawKey("a");
-    addRawKey("b");
-    addKey("embedded", createStringObject("short", 5));
-
-    size_t left = spillToFree(1000000);
-    EXPECT_EQ(left, 1000000 - spillInflightRamBytes());
     ASSERT_EQ(finishSpills(), 2);
 }
 
-/* A call stops after a fixed number of keys without handing the rest to
- * eviction, because spillable keys are left for the next call. */
-TEST_F(SpillSubmitTest, StopsAfterTheLimitWithoutEvicting) {
+/* Eviction frees the memory when no key can be spilled. */
+TEST_F(SpillSubmitTest, ReturnsEverythingWhenNothingCanBeSpilled) {
+    addKey("embedded", createStringObject("short", 5));
+    EXPECT_EQ(extStorageSpillToFree(100), 100u);
+}
+
+/* A call spills a bounded number of keys and leaves the rest for the next. */
+TEST_F(SpillSubmitTest, SpillsAtMostTheLimitPerCall) {
     server.maxmemory_samples = 128; /* sample every key, so only the limit stops the loop */
     for (int i = 0; i < 80; i++) {
         char key[16];
         snprintf(key, sizeof(key), "key%d", i);
         addRawKey(key);
     }
-    EXPECT_EQ(spillToFree(1000000), 0u);
+    EXPECT_EQ(extStorageSpillToFree(1000000), 0u);
     EXPECT_EQ(finishSpills(), 64);
 }
 
 TEST_F(SpillSubmitTest, SpillsNothingUnlessTheEngineIsOpen) {
-    addRawKey("key");
+    robj *entry = addRawKey("key");
     extStorageDeinit();
-    EXPECT_EQ(spillToFree(100), 100u);
-    EXPECT_EQ(spillInflightRamBytes(), 0u);
+    EXPECT_EQ(extStorageSpillToFree(100), 100u);
+    EXPECT_EQ(getStorageState(entry), STORAGE_STATE_ONLY_MEMORY);
 }
 
 /* beforeSleep() spills without a command, and on a replica, which never evicts. */
 TEST_F(SpillSubmitTest, CronSpillsOverMaxmemoryOnPrimariesAndReplicas) {
     robj *primary_key = addRawKey("primary");
-    spillCron();
+    extStorageSpillCron();
     EXPECT_EQ(getStorageState(primary_key), STORAGE_STATE_ONLY_MEMORY); /* No maxmemory. */
 
     server.maxmemory = zmalloc_used_memory() - 1;
-    spillCron();
+    extStorageSpillCron();
     EXPECT_EQ(getStorageState(primary_key), STORAGE_STATE_COPYING_TO_FLASH);
+    ASSERT_EQ(finishSpills(), 1);
 
     robj *replica_key = addRawKey("replica");
     server.primary_host = (char *)"127.0.0.1";
-    server.maxmemory = zmalloc_used_memory() - spillInflightRamBytes() - 1;
-    spillCron();
+    server.maxmemory = zmalloc_used_memory() - 1;
+    extStorageSpillCron();
     EXPECT_EQ(getStorageState(replica_key), STORAGE_STATE_COPYING_TO_FLASH);
     server.primary_host = nullptr;
     server.maxmemory = 0;
