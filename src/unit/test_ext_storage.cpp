@@ -8,9 +8,11 @@
 
 #include <cstring>
 #include <map>
+#include <pthread.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <string>
+#include <vector>
 
 extern "C" {
 #include "server.h"
@@ -27,6 +29,24 @@ extern "C" {
 void extStorageTestResetRegistry(void);
 void fetchItem(serverDb *db, robj *key);
 extern hashtableType commandSetType;
+void extStorageTestResetSpillAccount(void);
+/* Spill accounting, private to ext_storage.c. The structs must match it. */
+typedef struct extStorageSpillSizing {
+    bool sized;
+    size_t ram_bytes;
+} extStorageSpillSizing;
+typedef struct extStorageSpillAccountStats {
+    unsigned long inflight_requests;
+    unsigned long unsized_requests;
+    size_t sized_ram_bytes;
+    size_t ram_mean;
+} extStorageSpillAccountStats;
+void extStorageSpillAccountSubmit(extStorageSpillSizing *s);
+void extStorageSpillAccountSized(extStorageSpillSizing *s, size_t ram_bytes);
+void extStorageSpillAccountFinish(extStorageSpillSizing *s);
+size_t extStorageSpillAccountInflightRamBytes(void);
+void extStorageSpillAccountGetStats(extStorageSpillAccountStats *out);
+void streamFreeCG(streamCG *cg);
 void createSharedObjects(void);
 storageState getStorageState(const robj *o);
 void setStorageState(robj *o, storageState state);
@@ -184,7 +204,7 @@ class StorageMockTest : public ::testing::Test {
     size_t serializedLen(const char *s) {
         robj *o = createStringObject(s, strlen(s));
         char *bytes = nullptr;
-        int len = cfg.serializer.serialize("k", 1, o, &bytes);
+        int len = cfg.serializer.serialize("k", 1, o, NULL, &bytes);
         cfg.serializer.free_serialized(bytes);
         decrRefCount(o);
         return (size_t)len;
@@ -740,7 +760,7 @@ TEST_F(ExtStorageSerializerTest, StringValueSurvivesTheRoundTrip) {
     dbEntry *entry = makeEntry("mykey", "some value");
 
     char *bytes = nullptr;
-    int len = s->serialize("mykey", 5, entry, &bytes);
+    int len = s->serialize("mykey", 5, entry, NULL, &bytes);
     ASSERT_GT(len, 0);
     ASSERT_NE(bytes, nullptr);
 
@@ -766,8 +786,8 @@ TEST_F(ExtStorageSerializerTest, TheKeyIsNotPartOfTheRecord) {
 
     char *a = nullptr;
     char *b = nullptr;
-    int alen = s->serialize("short", 5, e1, &a);
-    int blen = s->serialize("a-much-longer-key", 17, e2, &b);
+    int alen = s->serialize("short", 5, e1, NULL, &a);
+    int blen = s->serialize("a-much-longer-key", 17, e2, NULL, &b);
     ASSERT_GT(alen, 0);
     ASSERT_EQ(alen, blen);
     EXPECT_EQ(memcmp(a, b, (size_t)alen), 0);
@@ -790,8 +810,8 @@ TEST_F(ExtStorageSerializerTest, AnExpireIsNotPartOfTheRecord) {
 
     char *a = nullptr;
     char *b = nullptr;
-    int alen = s->serialize("k", 1, with, &a);
-    int blen = s->serialize("k", 1, without, &b);
+    int alen = s->serialize("k", 1, with, NULL, &a);
+    int blen = s->serialize("k", 1, without, NULL, &b);
     ASSERT_GT(alen, 0);
     ASSERT_EQ(alen, blen);
     EXPECT_EQ(memcmp(a, b, (size_t)alen), 0);
@@ -812,7 +832,7 @@ TEST_F(ExtStorageSerializerTest, RejectsAMalformedBuffer) {
     // valid type but fail verification.
     dbEntry *entry = makeEntry("k", "some value");
     char *bytes = nullptr;
-    int len = s->serialize("k", 1, entry, &bytes);
+    int len = s->serialize("k", 1, entry, NULL, &bytes);
     ASSERT_GT(len, 10);
     EXPECT_EQ(s->deserialize("k", 1, bytes, len - 4), nullptr);
     s->free_serialized(bytes);
@@ -872,7 +892,7 @@ TEST_F(ExtStorageSerializerTest, AModuleTypeSeesTheKeyAndNoDbId) {
     observed_saves = 0;
 
     char *bytes = nullptr;
-    int len = s->serialize(key, sdslen(key), entry, &bytes);
+    int len = s->serialize(key, sdslen(key), entry, NULL, &bytes);
     ASSERT_GT(len, 0);
     ASSERT_EQ(observed_saves, 1);
     EXPECT_EQ(observed_key, "mykey");
@@ -1539,6 +1559,7 @@ class SpillSubmitTest : public SpillSelectTest {
         server.ext_storage_engine = zstrdup("mock");
         server.ext_storage_path = zstrdup("");
         extStorageInit();
+        extStorageTestResetSpillAccount();
     }
 
     void TearDown() override {
@@ -1640,6 +1661,453 @@ TEST_F(SpillSubmitTest, ARejectedItemChangesNothing) {
     EXPECT_EQ(extStorageSpillItem(server.dbnum, entry), STORAGE_ERR_REJECTED);
     EXPECT_EQ(getStorageState(entry), STORAGE_STATE_ONLY_MEMORY);
     EXPECT_EQ(objectGetRefcount(entry), 1);
+}
+
+/* ---------------------------------------------------------------------------
+ * Spill sizing
+ * ---------------------------------------------------------------------------*/
+
+class SpillSizingTest : public ::testing::Test {
+  protected:
+    /* Buffer for a string-ref hash field. The hash doesn't own it. */
+    static constexpr char string_ref_buf[] = "a value owned outside the hash";
+
+    MockValkey mock;
+    RealValkey real;
+
+    void SetUp() override {
+        memset(&server, 0, sizeof(valkeyServer));
+        server.hz = CONFIG_DEFAULT_HZ;
+        server.logfile = zstrdup("");
+        crc64_init();
+        /* Default limits, so listpacks and intsets keep their encoding. */
+        server.list_max_listpack_size = -2;
+        server.set_max_intset_entries = 512;
+        server.set_max_listpack_entries = 128;
+        server.set_max_listpack_value = 64;
+        server.zset_max_listpack_entries = 128;
+        server.zset_max_listpack_value = 64;
+        server.hash_max_listpack_entries = 128;
+        server.hash_max_listpack_value = 64;
+    }
+
+    void TearDown() override {
+        zfree(server.logfile);
+        server.logfile = NULL;
+    }
+
+    /* Serializes 'o' like the storage engine does, sizing it if ram_bytes isn't
+     * NULL. Returns the bytes. */
+    sds serialize(robj *o, size_t *ram_bytes) {
+        sds key = sdsnew("k");
+        robj key_obj;
+        initStaticStringObject(key_obj, key);
+        rio payload;
+        if (ram_bytes)
+            createDumpPayloadSized(&payload, o, &key_obj, -1, ram_bytes);
+        else
+            createDumpPayload(&payload, o, &key_obj, -1);
+        sdsfree(key);
+        return payload.io.buffer.ptr;
+    }
+
+    /* Returns the size serializing 'o' measures. */
+    size_t measure(robj *o) {
+        size_t ram_bytes = 0;
+        sdsfree(serialize(o, &ram_bytes));
+        return ram_bytes;
+    }
+
+    /* Frees 'o' and returns the bytes freed, not counting 'o' itself. */
+    size_t freeValue(robj *o) {
+        size_t object_bytes = zmalloc_size(o);
+        size_t used = zmalloc_used_memory();
+        decrRefCount(o);
+        return used - zmalloc_used_memory() - object_bytes;
+    }
+
+    /* A hashtable hash with 'ttl_fields' extra fields expiring 'ttl_step' ms
+     * apart. */
+    robj *createHashtableHash(int ttl_fields, long long ttl_step) {
+        robj *hash = createHashObject();
+        addOneElement(hash);
+        hashTypeConvert(hash, OBJ_ENCODING_HASHTABLE);
+        for (int i = 0; i < ttl_fields; i++) {
+            sds field = sdscatprintf(sdsempty(), "field:%d", i);
+            hashTypeSet(hash, field, field, 4000000000000LL + i * ttl_step, HASH_SET_COPY, NULL);
+            sdsfree(field);
+        }
+        return hash;
+    }
+
+    /* Fills 'objs' with one non-empty value per type and encoding. Returns the
+     * count. */
+    int createValues(robj **objs) {
+        int n = createOneOfEachObject(objs);
+        for (int i = 0; i < n; i++) addOneElement(objs[i]);
+
+        objs[n++] = createHashtableHash(0, 0);
+        objs[n++] = createHashtableHash(1, 0);
+        objs[n++] = createHashtableHash(2, 0);
+        objs[n++] = createHashtableHash(100, 0);
+        objs[n++] = createHashtableHash(100, 60000);
+
+        /* A stream with an entry, a consumer group, a consumer and a pending entry. */
+        robj *stream_obj = createStreamObject();
+        stream *s = (stream *)objectGetVal(stream_obj);
+        robj *fields[2] = {createStringObject("field", 5), createStringObject("value", 5)};
+        streamID id;
+        EXPECT_EQ(streamAppendItem(s, fields, 1, &id, NULL, 0), C_OK);
+        decrRefCount(fields[0]);
+        decrRefCount(fields[1]);
+        streamCG *cg = streamCreateCG(s, (char *)"group", 5, &id, 0);
+        sds consumer_name = sdsnew("consumer");
+        streamConsumer *consumer = streamCreateConsumer(cg, consumer_name, NULL, 0, SCC_NO_NOTIFY | SCC_NO_DIRTIFY);
+        sdsfree(consumer_name);
+        unsigned char pel_key[sizeof(streamID)];
+        streamEncodeID(pel_key, &id);
+        streamNACK *nack = streamCreateNACK(consumer);
+        raxInsert(cg->pel, pel_key, sizeof(pel_key), nack, NULL);
+        raxInsert(consumer->pel, pel_key, sizeof(pel_key), nack, NULL);
+        objs[n++] = stream_obj;
+
+        /* A path hash with a listpack payload and a hashtable payload. */
+        robj *path_hash_obj = createPathHashObject();
+        pathHashObject *path_hash = (pathHashObject *)objectGetVal(path_hash_obj);
+        const char *paths[] = {"listpack", "hashtable"};
+        for (int p = 0; p < 2; p++) {
+            robj *payload = createHashObject();
+            addOneElement(payload);
+            if (p == 1) hashTypeConvert(payload, OBJ_ENCODING_HASHTABLE);
+            raxInsert(path_hash->index, (unsigned char *)paths[p], strlen(paths[p]), payload, NULL);
+            path_hash->num_fields++;
+        }
+        objs[n++] = path_hash_obj;
+
+        /* Hash values too big to embed, with and without TTLs. */
+        objs[n++] = createHashWithBigValues(EXPIRY_NONE);
+        objs[n++] = createHashWithBigValues(4000000000000LL);
+
+        /* A listpack hash with a field TTL. */
+        robj *listpack_ttl = createHashObject();
+        addOneElement(listpack_ttl);
+        hashTypeSet(listpack_ttl, sdsnew("ttl"), sdsnew("value"), 4000000000000LL,
+                    HASH_SET_TAKE_FIELD | HASH_SET_TAKE_VALUE, NULL);
+        EXPECT_EQ(listpack_ttl->encoding, OBJ_ENCODING_LISTPACK);
+        objs[n++] = listpack_ttl;
+
+        /* A hash field with a string-ref value. */
+        robj *string_ref = createHashtableHash(0, 0);
+        sds one = sdsnew("1");
+        EXPECT_EQ(hashTypeUpdateAsStringRef(string_ref, one, string_ref_buf, sizeof(string_ref_buf) - 1), C_OK);
+        sdsfree(one);
+        objs[n++] = string_ref;
+
+        /* A set in the middle of a rehash. */
+        robj *rehashing = createSetObject();
+        hashtable *ht = (hashtable *)objectGetVal(rehashing);
+        for (int i = 0; i < 100000 && !hashtableIsRehashing(ht); i++) {
+            sds ele = sdscatprintf(sdsempty(), "element:%d", i);
+            setTypeAdd(rehashing, ele);
+            sdsfree(ele);
+        }
+        EXPECT_TRUE(hashtableIsRehashing(ht));
+        objs[n++] = rehashing;
+
+        /* A list with compressed nodes, and one holding a defrag bookmark. */
+        objs[n++] = createListOf1KValues(200, 1);
+        robj *bookmarked = createListOf1KValues(40, 0);
+        quicklist *ql = (quicklist *)objectGetVal(bookmarked);
+        EXPECT_TRUE(quicklistBookmarkCreate(&ql, "_AD", ql->head->next));
+        objectSetVal(bookmarked, ql);
+        objs[n++] = bookmarked;
+
+        /* A stream after XGROUP DESTROY of its only group, which leaves an empty
+         * group tree. */
+        robj *no_groups_obj = createStreamObject();
+        stream *no_groups = (stream *)objectGetVal(no_groups_obj);
+        robj *item[2] = {createStringObject("field", 5), createStringObject("value", 5)};
+        EXPECT_EQ(streamAppendItem(no_groups, item, 1, &id, NULL, 0), C_OK);
+        decrRefCount(item[0]);
+        decrRefCount(item[1]);
+        streamCG *destroyed = streamCreateCG(no_groups, (char *)"group", 5, &id, 0);
+        raxRemove(no_groups->cgroups, (unsigned char *)"group", 5, NULL);
+        streamFreeCG(destroyed);
+        objs[n++] = no_groups_obj;
+        return n;
+    }
+
+    /* A hashtable hash with values too big to embed. Fields expire from
+     * 'expiry' on, unless it is EXPIRY_NONE. */
+    robj *createHashWithBigValues(long long expiry) {
+        robj *hash = createHashObject();
+        std::string big(200, 'v');
+        for (int i = 0; i < 50; i++) {
+            long long field_expiry = expiry == EXPIRY_NONE ? EXPIRY_NONE : expiry + i * 60000;
+            hashTypeSet(hash, sdscatprintf(sdsempty(), "field:%d", i), sdsnewlen(big.data(), big.size()), field_expiry,
+                        HASH_SET_TAKE_FIELD | HASH_SET_TAKE_VALUE, NULL);
+        }
+        EXPECT_EQ(hash->encoding, OBJ_ENCODING_HASHTABLE);
+        return hash;
+    }
+
+    /* A list of 'count' 1 KB values. 'compress' is the compress depth; 0 turns
+     * compression off. */
+    robj *createListOf1KValues(int count, int compress) {
+        std::string val(1024, 'v');
+        robj *list = createQuicklistObject(-2, compress);
+        for (int i = 0; i < count; i++) {
+            robj *ele = createStringObject(val.data(), val.size());
+            listTypePush(list, ele, LIST_TAIL);
+            decrRefCount(ele);
+        }
+        quicklist *ql = (quicklist *)objectGetVal(list);
+        int compressed = 0;
+        for (quicklistNode *node = ql->head; node; node = node->next) compressed += quicklistNodeIsCompressed(node);
+        EXPECT_GT(ql->len, 1u);
+        EXPECT_EQ(compressed > 0, compress > 0);
+        return list;
+    }
+};
+
+#define MAX_TEST_VALUES (NUM_TEST_OBJECTS + 16)
+
+/* The measured size matches the bytes freed, for every type and encoding.
+ * Embedded and INT strings measure 0. Btree sorted sets are checked below. */
+TEST_F(SpillSizingTest, SerializingMeasuresWhatFreeingFrees) {
+    robj *objs[MAX_TEST_VALUES];
+    int n = createValues(objs);
+    for (int i = 0; i < n; i++) {
+        int type = objs[i]->type, encoding = objs[i]->encoding;
+        size_t measured = measure(objs[i]);
+        size_t freed = freeValue(objs[i]);
+        if (encoding == OBJ_ENCODING_BTREE) continue;
+        EXPECT_EQ(measured, freed) << "value " << i << " type " << type << " encoding " << strEncoding(encoding);
+    }
+}
+
+/* Serializing with a counter produces the same bytes. */
+TEST_F(SpillSizingTest, SizingLeavesTheBytesUnchanged) {
+    robj *objs[MAX_TEST_VALUES];
+    int n = createValues(objs);
+    for (int i = 0; i < n; i++) {
+        size_t ram_bytes = 0;
+        sds plain = serialize(objs[i], NULL);
+        sds sized = serialize(objs[i], &ram_bytes);
+        ASSERT_GT(sdslen(plain), 0u);
+        ASSERT_EQ(sdslen(plain), sdslen(sized)) << "value " << i;
+        EXPECT_EQ(memcmp(plain, sized, sdslen(plain)), 0) << "value " << i;
+        sdsfree(plain);
+        sdsfree(sized);
+        decrRefCount(objs[i]);
+    }
+}
+
+/* MEMORY USAGE's 5-element sample can be far off when element sizes vary.
+ * Serializing counts every element. */
+TEST_F(SpillSizingTest, CountsEveryElementOfACollection) {
+    /* The first nodes hold small elements, the rest one large element each. */
+    static char small[100], large[100 * 1024];
+    memset(small, 's', sizeof(small));
+    memset(large, 'l', sizeof(large));
+    robj *list = createQuicklistObject(-2, 0);
+    for (int i = 0; i < 420; i++) {
+        robj *ele = i < 400 ? createStringObject(small, sizeof(small)) : createStringObject(large, sizeof(large));
+        listTypePush(list, ele, LIST_TAIL);
+        decrRefCount(ele);
+    }
+
+    size_t sampled = objectComputeSize(NULL, list, 5, 0) - zmalloc_size(list);
+    size_t measured = measure(list);
+    size_t freed = freeValue(list);
+    EXPECT_EQ(measured, freed);
+    EXPECT_LT(sampled, freed / 2);
+}
+
+/* A btree sorted set's index nodes are estimated, as MEMORY USAGE does. */
+TEST_F(SpillSizingTest, EstimatesTheIndexOfABtreeSortedSet) {
+    robj *zset = createZsetObject();
+    for (int i = 0; i < 1000; i++) {
+        sds member = sdscatprintf(sdsempty(), "member:%d", i);
+        int out_flags = 0;
+        zsetAdd(zset, i, member, ZADD_IN_NONE, &out_flags, NULL);
+        sdsfree(member);
+    }
+    ASSERT_EQ(zset->encoding, OBJ_ENCODING_BTREE);
+    size_t measured = measure(zset);
+    size_t freed = freeValue(zset);
+    EXPECT_NEAR((double)measured, (double)freed, freed * 0.02);
+}
+
+/* ---------------------------------------------------------------------------
+ * Spill accounting
+ * ---------------------------------------------------------------------------*/
+
+class SpillAccountTest : public ::testing::Test {
+  protected:
+    void SetUp() override {
+        extStorageTestResetSpillAccount();
+    }
+
+    void TearDown() override {
+        extStorageTestResetSpillAccount();
+    }
+
+    extStorageSpillAccountStats stats() {
+        extStorageSpillAccountStats st;
+        extStorageSpillAccountGetStats(&st);
+        return st;
+    }
+};
+
+/* A spill counts as the mean until serialized, then as its measured size, and
+ * completion removes it. */
+TEST_F(SpillAccountTest, ASpillCountsAsTheMeanUntilSized) {
+    extStorageSpillSizing a, b;
+
+    extStorageSpillAccountSubmit(&a);
+    EXPECT_EQ(stats().inflight_requests, 1u);
+    EXPECT_EQ(stats().unsized_requests, 1u);
+    EXPECT_EQ(extStorageSpillAccountInflightRamBytes(), 0u); /* No sizes yet, so the mean is 0. */
+
+    extStorageSpillAccountSized(&a, 1000);
+    EXPECT_TRUE(a.sized);
+    EXPECT_EQ(a.ram_bytes, 1000u);
+    EXPECT_EQ(stats().unsized_requests, 0u);
+    EXPECT_EQ(stats().sized_ram_bytes, 1000u);
+    EXPECT_EQ(stats().ram_mean, 1000u);
+    EXPECT_EQ(extStorageSpillAccountInflightRamBytes(), 1000u);
+
+    extStorageSpillAccountSubmit(&b);
+    EXPECT_EQ(extStorageSpillAccountInflightRamBytes(), 2000u); /* One measured, one at the mean. */
+    extStorageSpillAccountSized(&b, 3000);
+    EXPECT_EQ(extStorageSpillAccountInflightRamBytes(), 4000u); /* Both measured. */
+
+    extStorageSpillAccountFinish(&a);
+    extStorageSpillAccountFinish(&b);
+    extStorageSpillAccountStats st = stats();
+    EXPECT_EQ(st.inflight_requests, 0u);
+    EXPECT_EQ(st.unsized_requests, 0u);
+    EXPECT_EQ(st.sized_ram_bytes, 0u);
+    EXPECT_EQ(extStorageSpillAccountInflightRamBytes(), 0u);
+    EXPECT_EQ(st.ram_mean, 1000u + 2000u / 16); /* The mean outlives the spills. */
+}
+
+/* A spill submitted after others complete counts as the mean. */
+TEST_F(SpillAccountTest, ASpillAfterAFinishCountsAsTheMean) {
+    extStorageSpillSizing a, b;
+    extStorageSpillAccountSubmit(&a);
+    extStorageSpillAccountSized(&a, 1000);
+    extStorageSpillAccountFinish(&a);
+
+    extStorageSpillAccountSubmit(&b);
+    EXPECT_EQ(stats().unsized_requests, 1u);
+    EXPECT_EQ(stats().sized_ram_bytes, 0u);
+    EXPECT_EQ(extStorageSpillAccountInflightRamBytes(), 1000u);
+    extStorageSpillAccountFinish(&b);
+}
+
+/* A reused extStorageSpillSizing starts unserialized. */
+TEST_F(SpillAccountTest, AReusedSizingStartsUnsized) {
+    extStorageSpillSizing s;
+    extStorageSpillAccountSubmit(&s);
+    extStorageSpillAccountSized(&s, 1000);
+    extStorageSpillAccountFinish(&s);
+
+    extStorageSpillAccountSubmit(&s);
+    EXPECT_FALSE(s.sized);
+    EXPECT_EQ(stats().unsized_requests, 1u);
+    extStorageSpillAccountSized(&s, 3000);
+    EXPECT_EQ(s.ram_bytes, 3000u);
+    EXPECT_EQ(stats().sized_ram_bytes, 3000u);
+    EXPECT_EQ(extStorageSpillAccountInflightRamBytes(), 3000u);
+    extStorageSpillAccountFinish(&s);
+}
+
+/* The mean starts at the first size, then moves 1/16 toward each new one. */
+TEST_F(SpillAccountTest, TheMeanMovesASixteenthTowardEachSize) {
+    extStorageSpillSizing s[3];
+    for (extStorageSpillSizing &x : s) extStorageSpillAccountSubmit(&x);
+
+    extStorageSpillAccountSized(&s[0], 1600);
+    EXPECT_EQ(stats().ram_mean, 1600u);
+    extStorageSpillAccountSized(&s[1], 3200);
+    EXPECT_EQ(stats().ram_mean, 1600u + 1600u / 16);
+    extStorageSpillAccountSized(&s[2], 100);
+    EXPECT_EQ(stats().ram_mean, 1700u - 1600u / 16);
+
+    for (extStorageSpillSizing &x : s) extStorageSpillAccountFinish(&x);
+}
+
+/* A refused spill was never serialized, so removing it only changes the count. */
+TEST_F(SpillAccountTest, ARefusedSpillLeavesNoCredit) {
+    extStorageSpillSizing sizing;
+    extStorageSpillAccountSubmit(&sizing);
+    extStorageSpillAccountFinish(&sizing);
+    EXPECT_FALSE(sizing.sized);
+    extStorageSpillAccountStats st = stats();
+    EXPECT_EQ(st.inflight_requests, 0u);
+    EXPECT_EQ(st.unsized_requests, 0u);
+    EXPECT_EQ(st.sized_ram_bytes, 0u);
+    EXPECT_EQ(st.ram_mean, 0u);
+}
+
+/* extStorageSpillAccountSized() is called once per spill. */
+TEST_F(SpillAccountTest, SizingASpillTwiceCrashes) {
+    extStorageSpillSizing sizing;
+    extStorageSpillAccountSubmit(&sizing);
+    extStorageSpillAccountSized(&sizing, 1000);
+    EXPECT_DEATH(extStorageSpillAccountSized(&sizing, 5000), "");
+    EXPECT_EQ(stats().sized_ram_bytes, 1000u);
+    extStorageSpillAccountFinish(&sizing);
+}
+
+#define SIZER_THREADS 4
+#define SPILLS_PER_SIZER 50000
+#define SPILL_SIZE 1000
+
+static void *sizeSpills(void *arg) {
+    std::vector<extStorageSpillSizing> *spills = (std::vector<extStorageSpillSizing> *)arg;
+    for (extStorageSpillSizing &s : *spills) extStorageSpillAccountSized(&s, SPILL_SIZE);
+    return NULL;
+}
+
+/* Engine threads size spills while the main thread reads the total. With equal
+ * sizes, a read that counted a spill twice would exceed the total. No size is
+ * lost, and completing every spill leaves zero. */
+TEST_F(SpillAccountTest, SizingOnOtherThreadsBalancesOut) {
+    std::vector<std::vector<extStorageSpillSizing>> spills(SIZER_THREADS,
+                                                           std::vector<extStorageSpillSizing>(SPILLS_PER_SIZER));
+    for (auto &batch : spills) {
+        for (extStorageSpillSizing &s : batch) extStorageSpillAccountSubmit(&s);
+    }
+    const size_t total = (size_t)SIZER_THREADS * SPILLS_PER_SIZER * SPILL_SIZE;
+
+    pthread_t sizers[SIZER_THREADS];
+    int started = 0;
+    while (started < SIZER_THREADS && pthread_create(&sizers[started], NULL, sizeSpills, &spills[started]) == 0)
+        started++;
+    /* Bounded reads while the threads run. */
+    size_t max_read = 0;
+    for (long i = 0; i < 10000000 && stats().unsized_requests > 0; i++) {
+        size_t read = extStorageSpillAccountInflightRamBytes();
+        if (read > max_read) max_read = read;
+    }
+    for (int i = 0; i < started; i++) pthread_join(sizers[i], NULL);
+    ASSERT_EQ(started, SIZER_THREADS);
+    EXPECT_LE(max_read, total);
+
+    extStorageSpillAccountStats st = stats();
+    EXPECT_EQ(st.unsized_requests, 0u);
+    EXPECT_EQ(st.sized_ram_bytes, total);
+    EXPECT_EQ(st.ram_mean, (size_t)SPILL_SIZE);
+    for (auto &batch : spills) {
+        for (extStorageSpillSizing &s : batch) extStorageSpillAccountFinish(&s);
+    }
+    st = stats();
+    EXPECT_EQ(st.inflight_requests, 0u);
+    EXPECT_EQ(st.sized_ram_bytes, 0u);
+    EXPECT_EQ(extStorageSpillAccountInflightRamBytes(), 0u);
 }
 
 /* ---------------------------------------------------------------------------
@@ -1970,7 +2438,7 @@ TEST_F(FetchCompletionTest, EverySpillableTypeComesBackAsLoaded) {
         if (entry->hasembval || entry->encoding == OBJ_ENCODING_INT) continue;
 
         char *bytes;
-        int len = serializer->serialize(key, strlen(key), entry, &bytes);
+        int len = serializer->serialize(key, strlen(key), entry, NULL, &bytes);
         ASSERT_GT(len, 0);
         loaded[num_spilled] = (robj *)serializer->deserialize(key, strlen(key), bytes, len);
         serializer->free_serialized(bytes);
@@ -1995,8 +2463,8 @@ TEST_F(FetchCompletionTest, EverySpillableTypeComesBackAsLoaded) {
         EXPECT_EQ(entry->encoding, encoding) << key;
 
         char *got, *want;
-        int got_len = serializer->serialize(key, sdslen(key), entry, &got);
-        int want_len = serializer->serialize(key, sdslen(key), loaded[i], &want);
+        int got_len = serializer->serialize(key, sdslen(key), entry, NULL, &got);
+        int want_len = serializer->serialize(key, sdslen(key), loaded[i], NULL, &want);
         EXPECT_TRUE(got_len == want_len && memcmp(got, want, got_len) == 0)
             << key << " type " << entry->type << " encoding " << strEncoding(entry->encoding);
         serializer->free_serialized(got);
@@ -2044,12 +2512,8 @@ TEST_F(FetchCompletionTest, AFailedFetchPanics) {
 /* A spill frees the value, so a fetch that finds one would leak it. */
 TEST_F(FetchCompletionTest, AFetchOntoAnEntryWithAValuePanics) {
     robj *entry = addRawKey("key");
-    /* Stores the record without freeing the value, which a real spill would do. */
-    sds key = objectGetKey(entry);
-    ASSERT_EQ(engine->put_async(0, key, sdslen(key), entry, nullptr), STORAGE_OK);
-    storageCompletion comp;
-    ASSERT_EQ(engine->poll_completions(&comp, 1), 1);
-    setStorageState(entry, STORAGE_STATE_ONLY_FLASH);
+    spill(entry);
+    objectSetVal(entry, sdsnew("v")); /* A value that a real spill would have freed. */
     startFetch(entry);
 
     EXPECT_DEATH(
@@ -2478,7 +2942,7 @@ TEST_F(DebugSpillTest, ADebugReadOfAKeyBeingSpilledFails) {
 /* While spills are in flight, writes are allowed: the spills free memory once
  * they complete. */
 TEST_F(SpillSubmitTest, AllowsWritesWhileSpillsAreInFlight) {
-    server.maxmemory = 100000000;
+    server.maxmemory = zmalloc_used_memory() - 1;
     robj *coldest = addRawKey("coldest");
     objectSetLRUOrLFU(coldest, -1, 1000);
     objectSetLRUOrLFU(addRawKey("hot"), -1, 10);
@@ -2491,7 +2955,7 @@ TEST_F(SpillSubmitTest, AllowsWritesWhileSpillsAreInFlight) {
 
 /* Writes are rejected when no key can be spilled. */
 TEST_F(SpillSubmitTest, RejectsWritesWhenNothingCanBeSpilled) {
-    server.maxmemory = 100000000;
+    server.maxmemory = zmalloc_used_memory() - 1;
     addKey("embedded", createStringObject("short", 5));
     EXPECT_FALSE(extStorageSpillOverMaxmemory());
     server.maxmemory = 0;
@@ -2501,7 +2965,7 @@ TEST_F(SpillSubmitTest, RejectsWritesWhenNothingCanBeSpilled) {
  * but the keys are still spilled. */
 TEST_F(SpillSubmitTest, RejectsWritesOverTheCapWhileStillSpilling) {
     addRawKey("key");
-    server.maxmemory = zmalloc_used_memory(); /* At maxmemory, under the cap. */
+    server.maxmemory = zmalloc_used_memory() - 1; /* Just over maxmemory, under the cap. */
     EXPECT_TRUE(extStorageSpillOverMaxmemory());
     ASSERT_EQ(finishSpills(), 1);
 
@@ -2521,10 +2985,50 @@ TEST_F(SpillSubmitTest, SpillsAtMostTheLimitPerCall) {
         snprintf(key, sizeof(key), "key%d", i);
         addRawKey(key);
     }
-    server.maxmemory = 100000000;
+    server.maxmemory = zmalloc_used_memory() - 1;
     EXPECT_TRUE(extStorageSpillOverMaxmemory());
     EXPECT_EQ(finishSpills(), 64);
     server.maxmemory = 0;
+}
+
+/* The first spill sets the mean, so the next call spills only what covers the
+ * deficit. Large values keep the spill requests' own memory out of the count. */
+TEST_F(SpillSubmitTest, SpillsOnlyWhatTheDeficitNeeds) {
+    server.maxmemory_samples = 128;
+    static char val[4000];
+    memset(val, 'v', sizeof(val));
+    robj *first = addKey("first", createStringObject(val, sizeof(val)));
+    size_t bytes = sdsAllocSize((sds)objectGetVal(first));
+    ASSERT_EQ(extStorageSpillItem(0, first), STORAGE_OK);
+    finishSpills();
+
+    for (int i = 0; i < 10; i++) {
+        char key[16];
+        snprintf(key, sizeof(key), "key%d", i);
+        addKey(key, createStringObject(val, sizeof(val)));
+    }
+    server.maxmemory = zmalloc_used_memory() - bytes - bytes / 2; /* 1.5 values over. */
+    EXPECT_TRUE(extStorageSpillOverMaxmemory());
+    server.maxmemory = 0;
+    EXPECT_EQ(finishSpills(), 2);
+}
+
+/* A spill that is serialized but not completed counts as its measured size. */
+TEST_F(SpillSubmitTest, ASerializedSpillCoversTheDeficit) {
+    server.maxmemory_samples = 128;
+    static char val[4000];
+    memset(val, 'v', sizeof(val));
+    robj *first = addKey("first", createStringObject(val, sizeof(val)));
+    size_t bytes = sdsAllocSize((sds)objectGetVal(first));
+    ASSERT_EQ(extStorageSpillItem(0, first), STORAGE_OK);
+    ASSERT_EQ(storageMockRunIo(1), 1); /* Serialized, completion not polled. */
+
+    robj *second = addKey("second", createStringObject(val, sizeof(val)));
+    server.maxmemory = zmalloc_used_memory() - bytes / 2;
+    EXPECT_TRUE(extStorageSpillOverMaxmemory());
+    server.maxmemory = 0;
+    EXPECT_EQ(getStorageState(second), STORAGE_STATE_ONLY_MEMORY);
+    EXPECT_EQ(getStorageState(first), STORAGE_STATE_COPYING_TO_FLASH);
 }
 
 TEST_F(SpillSubmitTest, SpillsNothingUnlessTheEngineIsOpen) {
@@ -2552,7 +3056,7 @@ TEST_F(SpillSubmitTest, BeforeSleepSpillsOverMaxmemory) {
  * the values it would free. */
 TEST_F(SpillSubmitTest, AFlushWaitsForSpillsInFlight) {
     robj *entry = addRawKey("key");
-    server.maxmemory = 100000000;
+    server.maxmemory = zmalloc_used_memory() - 1;
     ASSERT_TRUE(extStorageSpillOverMaxmemory());
     server.maxmemory = 0;
     ASSERT_EQ(getStorageState(entry), STORAGE_STATE_COPYING_TO_FLASH);
