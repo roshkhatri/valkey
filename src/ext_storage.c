@@ -85,14 +85,33 @@ static void extStorageReleaseLoadingLock(void) {
 /* Serialization and Deserialization Functions
  * The storage engine may call these from its own IO thread. */
 
-/* Serialize in the DUMP wire format, so every type and encoding is handled. */
-static int extStorageSerialize(const char *key, size_t key_len, const valkeyObject *entry, char **out) {
+/* A put in flight, passed to the engine as its request_ctx. The accounting is
+ * under Spill accounting below. */
+typedef struct spillRequest {
+    robj *entry;
+    bool sized;       /* Serialized and measured. */
+    size_t ram_bytes; /* Measured size, once serialized. */
+} spillRequest;
+void spillAccountSized(spillRequest *req, size_t ram_bytes);
+void spillAccountFinish(spillRequest *req);
+size_t spillAccountInflightRamBytes(void);
+typedef struct spillAccountStats {
+    unsigned long unsized_requests; /* Spills in flight not yet serialized. */
+    size_t sized_ram_bytes;         /* Measured bytes of the serialized ones. */
+    size_t ram_mean;                /* EMA of serialized sizes. */
+} spillAccountStats;
+void spillAccountGetStats(spillAccountStats *out);
+
+/* Serialize in the DUMP wire format, so every type and encoding is handled.
+ * Records the spill's size in req, if it isn't NULL. */
+static int serializeEntry(const char *key, size_t key_len, const valkeyObject *entry, spillRequest *req, char **out) {
     sds key_sds = sdsnewlen(key, key_len);
     robj key_obj;
     initStaticStringObject(key_obj, key_sds);
 
     rio payload;
-    createDumpPayload(&payload, (robj *)entry, &key_obj, -1);
+    size_t ram_bytes = 0;
+    createDumpPayloadSized(&payload, (robj *)entry, &key_obj, -1, req ? &ram_bytes : NULL);
     sdsfree(key_sds);
 
     size_t len = sdslen(payload.io.buffer.ptr);
@@ -101,8 +120,21 @@ static int extStorageSerialize(const char *key, size_t key_len, const valkeyObje
         *out = NULL;
         return -1;
     }
+    if (req) spillAccountSized(req, ram_bytes);
     *out = payload.io.buffer.ptr;
     return (int)len;
+}
+
+static int extStorageSerialize(const char *key, size_t key_len, const valkeyObject *entry, void *request_ctx, char **out) {
+    UNUSED(request_ctx);
+    return serializeEntry(key, key_len, entry, NULL, out);
+}
+
+/* Like extStorageSerialize(), for puts from extStorageSpillItem(). */
+static int spillSerialize(const char *key, size_t key_len, const valkeyObject *entry, void *request_ctx, char **out) {
+    spillRequest *req = request_ctx;
+    serverAssert(req);
+    return serializeEntry(key, key_len, entry, req, out);
 }
 
 static valkeyObject *extStorageDeserialize(const char *key, size_t key_len, const char *bytes, int len) {
@@ -222,7 +254,7 @@ void extStorageInit(void) {
         .path = server.ext_storage_path,
         .capacity_bytes = server.ext_storage_capacity,
         .num_databases = (uint32_t)server.dbnum,
-        .serializer = ext_storage_serializer,
+        .serializer = {spillSerialize, extStorageDeserialize, extStorageFreeSerialized},
         .thread_config = ext_storage_thread_config,
         .logger = extStorageLog,
         .monotonic_clock_us = getMonotonicUs,
@@ -282,8 +314,9 @@ static int extStoragePollCompletions(void) {
  * primary's client, which blockClient() doesn't allow. */
 static void spillIfOverMaxmemory(void) {
     if (!extStorageIsActive() || server.loading) return;
-    if (getMaxmemoryState(NULL, NULL, NULL, NULL) == C_OK) return;
-    extStorageSpillOverMaxmemory();
+    size_t mem_tofree;
+    if (getMaxmemoryState(NULL, NULL, &mem_tofree, NULL) == C_OK) return;
+    extStorageSpillOverMaxmemory(mem_tofree);
 }
 
 /* Runs once per event loop iteration, from beforeSleep. The cron timer wakes
@@ -344,12 +377,18 @@ sds extStorageInfoString(sds info) {
     if (!extStorageIsActive()) return sdscatprintf(info, "ext_storage_enabled:0\r\n");
 
     const extStorageStats *st = &ext_storage.stats;
+    spillAccountStats sa;
+    spillAccountGetStats(&sa);
     return sdscatprintf(info,
                         "ext_storage_enabled:1\r\n"
                         "ext_storage_engine:%s\r\n"
                         "ext_storage_api_version:%d\r\n"
                         "ext_storage_capacity_bytes:%llu\r\n"
                         "ext_storage_num_items_spilling_to_storage:%llu\r\n"
+                        "ext_storage_num_items_spilling_unsized:%lu\r\n"
+                        "ext_storage_spilling_sized_bytes:%zu\r\n"
+                        "ext_storage_spill_mean_bytes:%zu\r\n"
+                        "ext_storage_spilling_bytes:%zu\r\n"
                         "ext_storage_total_num_items_spilled_to_storage:%llu\r\n"
                         "ext_storage_total_num_items_fetched_from_storage:%llu\r\n"
                         "ext_storage_total_num_items_deleted_from_storage:%llu\r\n"
@@ -357,7 +396,8 @@ sds extStorageInfoString(sds info) {
                         "ext_storage_total_num_fetch_errors:%llu\r\n",
                         ext_storage.engine->name, VALKEY_STORAGE_API_VERSION,
                         (unsigned long long)ext_storage.capacity_bytes,
-                        (unsigned long long)st->num_items_spilling,
+                        (unsigned long long)st->num_items_spilling, sa.unsized_requests, sa.sized_ram_bytes,
+                        sa.ram_mean, spillAccountInflightRamBytes(),
                         (unsigned long long)st->total_num_items_spilled,
                         (unsigned long long)st->total_num_items_fetched,
                         (unsigned long long)st->total_num_items_deleted,
@@ -489,17 +529,12 @@ robj *extStorageSpillSelectCandidate(int *dbid) {
     return evictionPoolPopColdest(server.ext_storage_spill_policy, isSpillCandidate, dbid);
 }
 
-/* A put in flight, passed to the engine as its request_ctx. */
-typedef struct spillRequest {
-    robj *entry;
-} spillRequest;
-
 /* Submits an item to the storage engine, which borrows it until the completion
  * is polled. On any status other than STORAGE_OK nothing changes. */
 storageStatus extStorageSpillItem(int dbid, robj *entry) {
     serverAssert(ext_storage.open && isSpillCandidate(entry));
 
-    spillRequest *req = zmalloc(sizeof(*req));
+    spillRequest *req = zcalloc(sizeof(*req));
     req->entry = entry;
     sds key = objectGetKey(entry);
     incrRefCount(entry); /* Released in spillComplete(), keeps defrag from moving the entry. */
@@ -594,6 +629,7 @@ static void spillComplete(const storageCompletion *comp) {
 
     spillFreeValue(entry);
     setStorageState(entry, STORAGE_STATE_ONLY_FLASH);
+    spillAccountFinish(req);
     ext_storage.stats.num_items_spilling--;
     ext_storage.stats.total_num_items_spilled++;
 
@@ -719,22 +755,25 @@ bool extStorageBlockClientIfRequired(client *c) {
 /* Keys spilled per call, to bound the time spent selecting. */
 #define SPILL_MAX_PER_CALL 64
 
-/* Spills 64 cold keys, or fewer if no candidate is found or the storage engine
- * refuses one. Returns false when writes must be rejected: used memory is over
- * 1.2x maxmemory, or nothing could be spilled and no spill is in flight.
- * Otherwise the spills in flight free memory once they complete.
- * TODO(#110): spill only what projected memory needs, make the cap a config,
- * and throttle writes below it. */
-bool extStorageSpillOverMaxmemory(void) {
+/* Spills cold keys until the spills in flight are expected to free mem_tofree,
+ * what getMaxmemoryState() reports over maxmemory. Spills at most 64, or fewer
+ * if no candidate is found or the storage engine refuses one. The first call
+ * spills 64, since no spill size is known yet. Returns false when writes must
+ * be rejected: used memory is over 1.2x maxmemory, or nothing could be spilled
+ * and no spill is in flight.
+ * TODO(#110): make the cap a config, and throttle writes below it. A value
+ * freed in the background stops counting as in flight before its memory is
+ * freed, so a few extra keys may be spilled. */
+bool extStorageSpillOverMaxmemory(size_t mem_tofree) {
     if (!extStorageIsActive()) return true;
 
-    for (int i = 0; i < SPILL_MAX_PER_CALL; i++) {
+    for (int i = 0; i < SPILL_MAX_PER_CALL && spillAccountInflightRamBytes() < mem_tofree; i++) {
         int dbid;
         robj *entry = extStorageSpillSelectCandidate(&dbid);
         if (entry == NULL || extStorageSpillItem(dbid, entry) != STORAGE_OK) break;
     }
 
-    if (zmalloc_used_memory() > server.maxmemory + server.maxmemory / 5) return false; /* Over 1.2x maxmemory. */
+    if (mem_tofree > server.maxmemory / 5) return false; /* Over 1.2x maxmemory. */
     return ext_storage.stats.num_items_spilling > 0;
 }
 
@@ -742,6 +781,89 @@ bool extStorageSpillOverMaxmemory(void) {
 void extStorageSpillDrain(void) {
     if (!ext_storage.open) return;
     while (ext_storage.stats.num_items_spilling > 0) extStoragePollCompletions();
+}
+
+/* Spill accounting
+ *
+ * Estimates the total inflight bytes of all spill requests:
+ * - From submit to serialize, a spill isn't sized yet. The number of these
+ *   spills is multiplied by the EMA of serialized sizes to estimate their bytes.
+ * - From serialize to completion, a spill counts as its measured size.
+ * Completion subtracts what a spill added.
+ * Main thread only, except spillAccountSized(). */
+static _Atomic unsigned long spill_account_sized;    /* Serialization increments, completion decrements. */
+static _Atomic size_t spill_account_sized_ram_bytes; /* Serialization adds, completion subtracts. */
+static _Atomic size_t spill_account_ram_mean;        /* Serialization updates, main thread reads. */
+
+/* Weight of a new size in the mean: 1/16. */
+#define SPILL_RAM_MEAN_SHIFT 4
+
+/* Moves the mean 1/16 of the way to a new size. The first size sets it. */
+static size_t spillRamMeanStep(size_t mean, size_t bytes) {
+    if (mean == 0) return bytes;
+    if (bytes >= mean) return mean + ((bytes - mean) >> SPILL_RAM_MEAN_SHIFT);
+    return mean - ((mean - bytes) >> SPILL_RAM_MEAN_SHIFT);
+}
+
+/* Test-only reset, including spills a failed test left inflight. */
+void extStorageTestResetSpillAccount(void) {
+    ext_storage.stats.num_items_spilling = 0;
+    atomic_store_explicit(&spill_account_sized, 0, memory_order_relaxed);
+    atomic_store_explicit(&spill_account_sized_ram_bytes, 0, memory_order_relaxed);
+    atomic_store_explicit(&spill_account_ram_mean, 0, memory_order_relaxed);
+}
+
+/* Test-only change to the number of spills in flight, which the spill path
+ * keeps. */
+void extStorageTestAddSpilling(long delta) {
+    ext_storage.stats.num_items_spilling += delta;
+}
+
+/* Adds the spill's measured size and updates the mean. Call once per spill,
+ * before its completion is posted. Safe to call from a storage engine thread.
+ * The count is added before the bytes (release), so a reader that sees the
+ * bytes sees the count. */
+void spillAccountSized(spillRequest *req, size_t ram_bytes) {
+    serverAssert(!req->sized);
+    req->ram_bytes = ram_bytes;
+    req->sized = true;
+    atomic_fetch_add_explicit(&spill_account_sized, 1, memory_order_relaxed);
+    atomic_fetch_add_explicit(&spill_account_sized_ram_bytes, ram_bytes, memory_order_release);
+
+    size_t mean = atomic_load_explicit(&spill_account_ram_mean, memory_order_relaxed);
+    while (!atomic_compare_exchange_weak_explicit(&spill_account_ram_mean, &mean, spillRamMeanStep(mean, ram_bytes),
+                                                  memory_order_relaxed, memory_order_relaxed));
+}
+
+/* Takes a completed spill's measured size back out. */
+void spillAccountFinish(spillRequest *req) {
+    if (req->sized) {
+        atomic_fetch_sub_explicit(&spill_account_sized_ram_bytes, req->ram_bytes, memory_order_relaxed);
+        atomic_fetch_sub_explicit(&spill_account_sized, 1, memory_order_relaxed);
+    }
+}
+
+/* Reads the serialized bytes (acquire), then the unserialized count. A spill
+ * serialized in between may be missed, but never counted twice. */
+static void spillAccountRead(size_t *sized_ram_bytes, unsigned long *unsized_requests) {
+    *sized_ram_bytes = atomic_load_explicit(&spill_account_sized_ram_bytes, memory_order_acquire);
+    unsigned long sized = atomic_load_explicit(&spill_account_sized, memory_order_relaxed);
+    serverAssert(sized <= ext_storage.stats.num_items_spilling);
+    *unsized_requests = ext_storage.stats.num_items_spilling - sized;
+}
+
+/* Estimated in-flight bytes of all spills. Unserialized spills count as the
+ * mean size, which is 0 until the first spill is serialized. */
+size_t spillAccountInflightRamBytes(void) {
+    size_t sized_ram_bytes;
+    unsigned long unsized_requests;
+    spillAccountRead(&sized_ram_bytes, &unsized_requests);
+    return sized_ram_bytes + unsized_requests * atomic_load_explicit(&spill_account_ram_mean, memory_order_relaxed);
+}
+
+void spillAccountGetStats(spillAccountStats *out) {
+    spillAccountRead(&out->sized_ram_bytes, &out->unsized_requests);
+    out->ram_mean = atomic_load_explicit(&spill_account_ram_mean, memory_order_relaxed);
 }
 
 #endif /* USE_EXT_STORAGE */
